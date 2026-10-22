@@ -887,10 +887,45 @@ async def main() -> None:
 
     logger.info("[main] 所有任务已启动，等待退出信号...")
     # 监控所有 task，任意一个提前结束就记录
+    # [fix #37] 把 position_manager / signal_watcher / ws_listener 的内部后台 task 纳入监控：
+    #   关键 task（持仓巡检、userData/keepalive/markPrice、挂单轮询）意外结束 → 与主 task 同样处理（触发退出由守护重启）；
+    #   非关键 task（gc/health/forceOrder）只记录错误并推送一次。
+    def _internal_tasks():
+        crit, noncrit = [], []
+        try:
+            crit.extend(getattr(pm, "_tasks", []) or [])
+        except Exception:
+            pass
+        for _name in ("_polling_task", "_recheck_task", "_btc_guard_task"):
+            _t = getattr(signal_watcher, _name, None)
+            if _t is not None:
+                crit.append(_t)
+        _g = getattr(signal_watcher, "_gc_task", None)
+        if _g is not None:
+            noncrit.append(_g)
+        for _name in ("_user_data_task", "_mark_price_task", "_keepalive_task"):
+            _t = getattr(ws, _name, None)
+            if _t is not None:
+                crit.append(_t)
+        for _name in ("_force_order_task", "_health_task"):
+            _t = getattr(ws, _name, None)
+            if _t is not None:
+                noncrit.append(_t)
+        return crit, noncrit
+
     async def _watchdog():
+        _reported = set()
         while True:
             await asyncio.sleep(10)
             done = [t for t in tasks if t.done()]
+            _crit, _noncrit = _internal_tasks()
+            done += [t for t in _crit if t.done()]
+            for t in _noncrit:
+                if t.done() and id(t) not in _reported:
+                    _reported.add(id(t))
+                    _exc = t.exception() if not t.cancelled() else None
+                    logger.error(f"[main] WATCHDOG: 非关键内部 task {t.get_name()} 已结束 "
+                                 f"cancelled={t.cancelled()} exc={_exc}")
             if done:
                 for t in done:
                     exc = t.exception() if not t.cancelled() else None
