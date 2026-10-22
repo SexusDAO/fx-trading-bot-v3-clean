@@ -32,6 +32,7 @@ import math
 import os
 import random
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -1460,7 +1461,39 @@ def execute_signal_sync(signal: dict, ws_listener: Any = None) -> bool:
         asyncio.set_event_loop(None)
 
 
+# ── [fix #7/#8] 按 symbol 的开仓互斥锁 ───────────────────────────────────────────
+# 主扫描/signal_watcher（主事件循环）与 funding_arb（execute_signal_sync 在独立线程+独立 event loop 中运行）
+# 共用同一把锁，因此用线程锁（跨 event loop 有效）；异步侧用非阻塞轮询获取，不阻塞事件循环。
+# 锁覆盖「预检(读 state) → 下单 → add_position 写 state」完整区间，消除先检查后执行的竞态窗口。
+_SYMBOL_OPEN_LOCKS: dict = {}
+_SYMBOL_OPEN_LOCKS_GUARD = threading.Lock()
+_SYMBOL_LOCK_TIMEOUT = 90.0
+
+
+def _get_symbol_open_lock(symbol: str) -> "threading.Lock":
+    with _SYMBOL_OPEN_LOCKS_GUARD:
+        lk = _SYMBOL_OPEN_LOCKS.get(symbol)
+        if lk is None:
+            lk = _SYMBOL_OPEN_LOCKS[symbol] = threading.Lock()
+        return lk
+
+
 async def _execute_async(signal: dict, ws_listener: Any = None) -> bool:
+    symbol = signal.get("symbol", "")
+    lk = _get_symbol_open_lock(symbol)
+    deadline = time.time() + _SYMBOL_LOCK_TIMEOUT
+    while not lk.acquire(blocking=False):
+        if time.time() >= deadline:
+            logger.warning(f"[executor] {symbol} 等待开仓互斥锁超时({_SYMBOL_LOCK_TIMEOUT:.0f}s)，放弃本次开仓")
+            return False
+        await asyncio.sleep(0.05)
+    try:
+        return await _execute_async_locked(signal, ws_listener)
+    finally:
+        lk.release()
+
+
+async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     symbol    = signal.get("symbol", "")
     direction = (signal.get("direction") or "LONG").upper()
     mode      = signal.get("mode", "pullback")
