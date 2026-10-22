@@ -2106,7 +2106,7 @@ def _count_recent_sl(symbol: str, days: int = 7) -> tuple[int, list]:
     return len(records), records
 
 
-async def _fetch_actual_fees(symbol: str, since_ms: int = 0, notional: float = 0.0) -> float:
+def _fetch_actual_fees(symbol: str, since_ms: int = 0, notional: float = 0.0) -> float:
     """[fix #44] 从交易所成交回报（userTrades.commission）取本仓位实际手续费合计（USDT）。
     取不到时按名义价值 × 双边费率估算。"""
     try:
@@ -2129,7 +2129,7 @@ async def _fetch_actual_fees(symbol: str, since_ms: int = 0, notional: float = 0
     return round(abs(float(notional or 0.0)) * float(_tfr) * 2, 6)
 
 
-def _close_position_post_static(
+async def _close_position_post_static(
     pos_id: str, symbol: str, close_reason: str, event: dict,
     fill_price: float = 0, fill_qty: float = 0,
 ) -> None:
