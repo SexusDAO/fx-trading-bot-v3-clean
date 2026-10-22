@@ -117,6 +117,37 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── 自写 main.pid，供 daemon_start.py 精确管理 ──────────────────────────────
 _MAIN_PID_FILE = LOG_DIR / "main.pid"
+
+
+def _pid_is_running_main(pid: int) -> bool:
+    """pid 对应进程仍存活（Linux 下额外核对 cmdline 含 main.py，避免 pid 复用误判）。"""
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as _f:
+            return b"main.py" in _f.read()
+    except FileNotFoundError:
+        return True      # 无 /proc（非 Linux）：进程存在即视为在运行
+    except Exception:
+        return True
+
+
+# [fix #6] 单实例保护：pid 文件存在且进程仍在运行 → 直接退出并报错，不覆盖 pid 文件
+try:
+    _old_pid = int(_MAIN_PID_FILE.read_text().strip())
+except Exception:
+    _old_pid = 0
+if _old_pid and _pid_is_running_main(_old_pid):
+    sys.stderr.write(f"[main] 已有 main.py 实例在运行 (pid={_old_pid})，本进程退出，避免双实例重复下单\n")
+    sys.exit(1)
 try:
     _MAIN_PID_FILE.write_text(str(os.getpid()))
 except Exception:
@@ -126,7 +157,9 @@ import atexit
 @atexit.register
 def _cleanup_main_pid():
     try:
-        _MAIN_PID_FILE.unlink(missing_ok=True)
+        # 只清理自己写的 pid 文件，不误删其他实例的
+        if _MAIN_PID_FILE.exists() and _MAIN_PID_FILE.read_text().strip() == str(os.getpid()):
+            _MAIN_PID_FILE.unlink(missing_ok=True)
     except Exception:
         pass
 
