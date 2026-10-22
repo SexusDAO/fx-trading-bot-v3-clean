@@ -1725,7 +1725,17 @@ def maintain_pending_order(pos: dict, ticker: dict) -> str:
     symbol    = pos["symbol"]
     direction = pos["direction"]
     sig_type  = pos.get("sig_type", "pullback")
-    open_ts   = int(pos.get("open_ts", 0))
+    # [fix #33] 原读不存在的 open_ts，elapsed 恒为 0，超时撤单是死代码。
+    #   实际写入的字段是 open_time（毫秒，见 executor 写 pos_state）；兼容 create_ts / entry_ts / 旧名 open_ts。
+    open_ts = 0
+    for _k in ("open_time", "create_ts", "entry_ts", "open_ts"):
+        try:
+            _v = int(pos.get(_k) or 0)
+        except (TypeError, ValueError):
+            _v = 0
+        if _v > 0:
+            open_ts = _v if _v > 10**11 else _v * 1000   # 秒级时间戳自动换算成毫秒
+            break
     elapsed_min = (time.time() * 1000 - open_ts) / 60_000 if open_ts else 0
 
     # 超时撤单
