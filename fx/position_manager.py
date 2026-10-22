@@ -2946,7 +2946,7 @@ async def _daily_report_loop_static():
 PositionManager._check_pending_expire   = lambda self, p, n: _check_pending_expire_static(p, n)
 PositionManager._force_close            = lambda self, p, r: _force_close_static(p, r)
 PositionManager._close_position_post    = lambda self, pid, sym, reason, ev, **kw: \
-    _close_position_post_static(pid, sym, reason, ev, **kw)
+    _close_position_post_static(pid, sym, reason, ev, **kw)   # async 函数，调用方需 await
 PositionManager._daily_report_loop      = lambda self: _daily_report_loop_static()
 
 
