@@ -159,7 +159,8 @@ HIGH_VOL_REVERSAL_FUNDING_LONG  = -0.002  # [v3.85 DOC-2] 代码未引用此常�
 HIGH_VOL_REVERSAL_FUNDING_SHORT =  0.0035  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 候选池分类（向后兼容旧 scanner 代码）
-CLASSIFY_REVERSAL_CHG24_MIN    = 15.0  # 注意：高于判断层8%，8%~14%只走RSI极端通道(rsi_1h<25)，15%+走主通道
+CLASSIFY_REVERSAL_CHG24_MIN    = 15.0
+REVERSAL_CHG24_SHORT_MIN        = 10.0  # [fix C] reversal SHORT 主通道 chg24 门槛（原硬编码 +5.0%）  # 注意：高于判断层8%，8%~14%只走RSI极端通道(rsi_1h<25)，15%+走主通道
                                # 若想让8%~14%走主通道改回8.0，等实盘数据后决定
 CLASSIFY_REVERSAL_FUNDING_MIN  = 0.001
 CLASSIFY_REVERSAL_RSI4H_LONG   = REVERSAL_RSI4H_MAX_LONG    # 25
