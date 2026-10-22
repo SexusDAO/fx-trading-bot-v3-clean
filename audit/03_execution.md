@@ -119,3 +119,18 @@
 > 注：async 内同步 I/O 问题在 feature/passive-trigger 分支已有部分修复
 > （state.py OI缓存、main.py WS重连、trigger_detector.py 候选池缓存），
 > 本仓库当前代码未包含这些修复，审查结论基于 main 分支现状。
+
+## 待处理清单
+
+- [ ] 🔴 `executor.py:174-323、1198`、`state.py:155-170`：`add_position` 在下单后才拦截，只防重复建档；`executor` 无按标的互斥；需要下单前原子占位。
+- [ ] 🔴 `scanner.py:4196`、`executor.py:1432-1445`：funding_arb 线程与主扫描不共享锁，先检查后执行存在秒级窗口。
+- [ ] 🔴 `binance_api.py:154-204`、`executor.py:753-798`：`_retry` 吞掉所有异常，错误码丢失；`-4024`/`-2019` 分支与保证金暂停成为死代码。
+- [ ] 🟡 `executor.py:192-207`：交易所挂单兜底检查在接口失败时静默通过。
+- [ ] 🟡 `binance_api.py:154-204`：对业务拒绝也重试；没有限频处理（429/418/-1003）；无 `clientOrderId` 幂等；MARKET 单写超时对账找不到。
+- [ ] 🟡 `executor.py:113-116、695-696`、`binance_api.py:922-923`：精度查不到时用默认值；未处理 `MIN_NOTIONAL`、`MARKET_LOT_SIZE`、`PERCENT_PRICE`；小数字符串可能出现科学计数法（推断）。
+- [ ] 🟡 `binance_api.py:391-395`、`signal_watcher.py:1412-1420`、`position_manager.py:301`：持仓模式硬编码为对冲，无启动校验，混入 `BOTH` 判断。
+- [ ] 🟡 `binance_api.py:557-561`：对冲模式下 `reduceOnly` 不发送，`reduce_only=True` 是空操作。
+- [ ] 🟡 `binance_api.py:395` 起：`_validate_sl_order` 不在 `place_sl` 的实际路径上。
+- [ ] 🟡 `signal_watcher.py:1400-1427`：应急补止损未取整、成功判断失真、不补 TP、不建档。
+- [ ] 🔵 `signal_watcher.py:1123-1135`、`1233-1243`：`PreOrderError` 的重试与 5 分钟方向冷却冲突，会丢弃信号（推断）。
+- [ ] 🔵 `executor.py:689`：文档串写"不重试"，底层实际重试一次。

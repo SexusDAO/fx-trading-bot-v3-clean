@@ -84,3 +84,18 @@
 > 注：async 内同步 I/O 问题在 feature/passive-trigger 分支已有部分修复
 > （state.py OI缓存、main.py WS重连、trigger_detector.py 候选池缓存），
 > 本仓库当前代码未包含这些修复，审查结论基于 main 分支现状。
+
+## 待处理清单
+
+- [ ] 🔴 `main.py:119-123`、`daemon_start.py:316-402`、`watchdog.sh`：两套守护互不识别，`main.py` 无单实例保护；需要统一入口并加跨进程互斥。
+- [ ] 🟡 `DEPLOY.md` 第 8 节：systemd 的 `Type=simple` 与 `daemon_start.py` 双 fork 不兼容（推断）；第 7 节混有 `robinhood_sniper` 内容。
+- [ ] 🟡 `daemon_start.py` 与 `watchdog.sh`：启动环境（代理、模型、`.env`）和最大重启次数不一致。
+- [ ] 🟡 `state.py:32-36`、`config.py:479-481`、`risk_manager.py`、`trigger_detector.py:278`、`scanner.py:2009`、`executor.py:781`、`main.py:189`：状态文件分散，路径常量失效，部分写入非原子。
+- [ ] 🟡 `state.py:12、96-99`：线程锁不跨进程；原子写入没有 `fsync`；`_POS_STATE_CORRUPTED` 不持久。
+- [ ] 🟡 `main.py:435-660`：业务逻辑（对账、补挂）放在入口文件，与 `position_manager` 重复。
+- [ ] 🟡 `position_manager.py:2353、2558、2894、4242、4293`、`signal_watcher.py:930、1422`、`scanner.py:3142、4194`：模块循环依赖、导入私有函数、`signal_watcher` 直接下止损单。
+- [ ] 🟡 `config.py`、`binance_api.py:56`、`coinglass_api.py:229`、`vol_regime.py:38-39`、`main.py:175、236、340、381`：配置不集中，URL 重复，魔法数字，默认值分散。
+- [ ] 🟡 `main.py:476-492、582、728-731`、`position_manager.py`：`async` 函数内同步 HTTP 与磁盘 I/O，WS 重连回调也在其中。
+- [ ] 🟡 `main.py:52、81-102`：常开 `tracemalloc`、运行时 `pip install`。
+- [ ] 🔵 `position_manager.py`（约 4400 行）、`scanner.py`（约 4200 行）、`executor.py`（约 2000 行）：文件过大，建议按职责拆分。
+- [ ] 待验证：`funding_arb` 与主扫描在同一标的上的开仓竞态（见 03 第 1 节）。

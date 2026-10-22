@@ -109,3 +109,17 @@
 > 注：async 内同步 I/O 问题在 feature/passive-trigger 分支已有部分修复
 > （state.py OI缓存、main.py WS重连、trigger_detector.py 候选池缓存），
 > 本仓库当前代码未包含这些修复，审查结论基于 main 分支现状。
+
+## 待处理清单
+
+- [ ] 🔴 `binance_api.py:598-606、622-630`、`main.py:476-514`：接口失败返回 `[]`，被当作"交易所无持仓"，会清空本地记录；需要区分"成功为空"与"请求失败"。
+- [ ] 🔴 `main.py:517-618`：孤儿仓位只补保护单不建档，方向取本地默认 `long`，`update_position` 对不存在的 `pid` 返回 `False`。
+- [ ] 🔴 `main.py:531-618`：补挂 SL 后继续进入完整补挂，重复挂 SL，只缺 SL 时重挂 TP，新 SL 的 id 不回写。
+- [ ] 🔴 `state.py:58-88、702-731`：`pos_state` 损坏或为空文件后以空持仓重启，没有从交易所重建记录的路径。
+- [ ] 🟡 `main.py:517-618` 与 `position_manager.py:2883-3110`：两份补挂逻辑不一致（锁、已有 TP 检查、数量校验、止损倍数）。
+- [ ] 🟡 `executor.py:1038`、`position_manager.py:3042-3053`、`main.py:607-616`：保护单只部分成功仍写 `open`，调用方不检查 `protection_status`。
+- [ ] 🟡 `position_manager.py:1780-1783、1821-1838`：部分成交后撤单或过期，本地记录被直接删除，残留无保护小仓位。
+- [ ] 🟡 `state.py:77、84`、`_ensure_files`：空文件被当作合法；备份失败后仍覆盖原文件；其他四个状态文件损坏时无备份直接重置（包括熔断器）。
+- [ ] 🟡 `main.py:479-499`：对账假设对冲模式且按 `symbol` 建索引，缺少启动时的持仓模式校验。
+- [ ] 🟡 `position_manager.py:1769、1774、1823`：`async` 内直接调用同步 HTTP。
+- [ ] 🔵 `position_manager.py:1803-1808`：`get_order` 失败返回 `{}`，"查询失败超 24 小时清除"分支是死代码。
