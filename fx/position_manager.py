@@ -1061,6 +1061,9 @@ class PositionManager:
                     (pos.get("judge_detail") or {}).get("vol_ratio", 0) or 0), 4),
                 "judge_detail":      pos.get("judge_detail", {}),
                 "max_correlation":   round(float(pos.get("max_correlation", 0.0)), 4),
+                "signal_id":         pos.get("_sig_id", ""),          # [fix #44]
+                "fees_usdt":         round(_manual_fees, 6),          # [fix #44]
+                "pnl_net_usdt":      round(_real_pnl - _manual_fees, 4),
             }
             TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(TRADE_LOG_PATH, "a", encoding="utf-8") as _f:
@@ -1069,9 +1072,11 @@ class PositionManager:
                 f"[pm] {symbol} {_inferred_close_reason} trade_log 已补写: "
                 f"exit={_exit_price:.6g} pnl={_real_pnl:+.4f}U close_reason={_inferred_close_reason}"
             )
-            # 补写到燃断器盘口
+            # 补写熔断器盘口（[fix #44] 带实际手续费）
+            _manual_fees = _fetch_actual_fees(symbol, int(pos.get("open_time", 0) or 0),
+                                              float(pos.get("quantity", 0) or 0) * float(_exit_price or 0))
             try:
-                _record_pnl(_real_pnl, symbol=symbol)
+                _record_pnl(_real_pnl, symbol=symbol, fee=_manual_fees)
             except Exception:
                 pass
         except Exception as _te:
@@ -2101,7 +2106,30 @@ def _count_recent_sl(symbol: str, days: int = 7) -> tuple[int, list]:
     return len(records), records
 
 
-async def _close_position_post_static(
+async def _fetch_actual_fees(symbol: str, since_ms: int = 0, notional: float = 0.0) -> float:
+    """[fix #44] 从交易所成交回报（userTrades.commission）取本仓位实际手续费合计（USDT）。
+    取不到时按名义价值 × 双边费率估算。"""
+    try:
+        from shared.binance_api import get_user_trades as _gut
+        _t = _gut(symbol, start_time=int(since_ms) if since_ms else None, limit=100) or []
+        _tot = 0.0
+        for _x in _t:
+            try:
+                _tot += abs(float(_x.get("commission", 0) or 0))
+            except (TypeError, ValueError):
+                continue
+        if _tot > 0:
+            return round(_tot, 6)
+    except Exception as _e:
+        logger.warning(f"[pm] {symbol} 查询实际手续费失败，改用估算: {_e}")
+    try:
+        from config import TAKER_FEE_RATE as _tfr
+    except Exception:
+        _tfr = 0.0005
+    return round(abs(float(notional or 0.0)) * float(_tfr) * 2, 6)
+
+
+def _close_position_post_static(
     pos_id: str, symbol: str, close_reason: str, event: dict,
     fill_price: float = 0, fill_qty: float = 0,
 ) -> None:
@@ -2140,8 +2168,10 @@ async def _close_position_post_static(
     hold_minutes = (close_ms - open_ms) / 60000
 
     # 步骤2:更新熔断器(v3.16 修复:record_pnl 正确区分盈亏,盈利不再计入 daily_loss)
+    # [fix #44] 用交易所成交回报里的实际手续费，并计入总亏损
+    _fees = _fetch_actual_fees(symbol, open_ms, nominal)
     try:
-        _record_pnl(pnl_usdt, symbol=symbol)
+        _record_pnl(pnl_usdt, symbol=symbol, fee=_fees)
     except Exception as e:
         logger.error(f"[pm] record_pnl 失败: {e}")
 
@@ -2206,6 +2236,9 @@ async def _close_position_post_static(
             "nominal_value":     round(nominal, 2),
             "pnl_usdt":          round(pnl_usdt, 4),
             "pnl_pct":           round(pnl_pct, 4),
+            "fees_usdt":         round(_fees, 6),              # [fix #44] 实际手续费
+            "pnl_net_usdt":      round(pnl_usdt - _fees, 4),   # [fix #44] 净盈亏
+            "signal_id":         pos.get("_sig_id", ""),       # [fix #44] 信号↔成交关联
             "holding_minutes":   round(hold_minutes, 1),
             "open_time":         open_ms,
             "close_time":        close_ms,
