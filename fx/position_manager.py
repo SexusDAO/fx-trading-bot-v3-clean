@@ -2006,7 +2006,8 @@ async def _force_close_static_inner(pos: dict, close_reason: str):
             symbol=symbol, side=close_side,
             order_type="MARKET",
             quantity=qty,
-            position_side="LONG" if direction.upper()=="LONG" else "SHORT",
+            # [fix #26] 对冲模式平仓单必须显式带 positionSide（原先已带，这里加校验）
+            position_side=("SHORT" if direction.upper() == "SHORT" else "LONG"),
         )
         order_id = resp.get("orderId") or resp.get("algoId")
         # 尝试从订单历史得到实际成交均价

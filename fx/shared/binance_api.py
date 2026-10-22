@@ -612,8 +612,13 @@ def place_order(symbol: str, side: str, order_type: str,
     if stop_price:
         params["stopPrice"] = fmt_num(stop_price)
 
-    # Hedge Mode 处理
+    # [fix #26] 对冲模式下的平仓单（reduceOnly 语义）必须显式指定 positionSide=LONG/SHORT。
+    #   对冲模式不发 reduceOnly，若缺少 positionSide 交易所会按错误方向处理，可能反向开仓。
     hedge = is_hedge_mode()
+    if hedge and reduce_only and str(position_side or "").upper() not in ("LONG", "SHORT"):
+        logger.error(f"[place_order] {symbol} 对冲模式平仓单缺少 positionSide，拒绝下单")
+        return {"error": "hedge 模式下平仓单必须显式指定 positionSide=LONG/SHORT"}
+
     if hedge:
         # 明确传入的 position_side 优先；否则根据 side+reduceOnly 推断
         if position_side:
