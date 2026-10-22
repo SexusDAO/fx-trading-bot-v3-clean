@@ -1065,7 +1065,7 @@ async def _place_guards_async(
         "tp_mode": "dual" if has_tp2 else "single",
         "sl_qty":  sl_qty_f,
         "tp1_qty": tp1_qty_f,
-        "tp2_qty": tp2_qty_f,
+        "tp2_quantity": tp2_qty_f,
     }
 
 
@@ -1257,7 +1257,7 @@ def _write_position(
     """写入 pos_state.json，返回 pos_id；写入失败返回 None（[v3.89 #52]）。问题一修复：加入 atr 参数写入 atr_at_entry"""
     pos_id = str(uuid.uuid4())[:8]
     tp1_qty = guard["tp1_qty"]
-    tp2_qty = guard["tp2_qty"]
+    tp2_qty = guard["tp2_quantity"]
 
     _pos_rec = {
         "pos_id":                pos_id,

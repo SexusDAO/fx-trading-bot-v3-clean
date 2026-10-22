@@ -3016,7 +3016,7 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                             await asyncio.get_running_loop().run_in_executor(
                                 None, lambda: _api.cancel_order(symbol, tp2_id)
                             )
-                            tp2_qty = pos.get("tp2_quantity") or pos.get("tp2_qty") or 0
+                            tp2_qty = pos.get("tp2_quantity") or 0
                             prec = _get_precision(symbol)
                             tp2_price_r = round(float(tp2_state_price) / prec["tick"]) * prec["tick"]
                             tp2_qty_r   = _round_qty(float(tp2_qty), prec["step"])
