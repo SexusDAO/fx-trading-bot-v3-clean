@@ -18,7 +18,8 @@ SRC = (Path(__file__).parent.parent / "position_manager.py").read_text()
 def func_body(name):
     m = re.search(rf"^\s*(?:async )?def {re.escape(name)}\(", SRC, flags=re.M)
     start = m.start()
-    nxt = re.search(r"^\s*(?:async )?def |^class ", SRC[m.end():], flags=re.M)
+    # 终止符只匹配顶层（第 0 列）的 def/class：函数内的嵌套 def 不再截断函数体。
+    nxt = re.search(r"^(?:async )?def |^class ", SRC[m.end():], flags=re.M)
     return SRC[start:m.end() + (nxt.start() if nxt else len(SRC))]
 
 
@@ -91,7 +92,7 @@ def test_time_stop_still_uses_rest_position_query():
     ("_check_pending_expire_static", "api.get_open_orders(symbol)"),
     ("_adjust_sl_tp_once", "api.get_mark_price(symbol)"),           # 止损/止盈调整：不改
     ("_adjust_sl_tp_once", "api.get_klines(symbol, \"1h\", 55)"),
-    ("_补挂保护单", "_api.get_open_orders(symbol)"),               # 保护单补挂：不改
+    ("_补挂保护单", "_api.get_open_orders(symbol)"),                 # 保护单补挂：不改（仍走 _api）
     ("_close", "api.get_mark_price(symbol)"),                       # 平仓路径：不改
 ])
 def test_money_paths_untouched(fn, needle):
