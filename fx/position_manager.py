@@ -3500,6 +3500,25 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
             # v3.6: 禁止做空止损上移(向不利方向调整)
             pass  # SHORT 止损只允许下移,不允许上移
 
+    # ── [fix #42] 止损上限检查：调整后的止损距离不得超过开仓时的初始风险上限 RISK_PER_TRADE × 入场价。
+    #   当前实现只允许 SL 向有利方向移动，天然不会外扩；这里是防御性硬上限，
+    #   防止以后放开外扩（TP_SL_ADJUST_SL_WIDEN_ATR）或 calc_sl_tp 异常时突破初始风险。
+    if sl_changed:
+        try:
+            from config import RISK_PER_TRADE as _RPT
+            _ref_entry = float(entry_price or pos.get("entry_price") or 0)
+            _max_dist = float(_RPT) * _ref_entry
+            _new_dist = abs(_ref_entry - float(new_sl))
+            _old_dist = abs(_ref_entry - float(old_sl))
+            if _ref_entry > 0 and _new_dist > _max_dist and _new_dist > _old_dist:
+                sl_changed = False
+                sl_reason = (f"blocked: 新止损距离 {_new_dist:.6g} 超过初始风险上限 "
+                             f"{_max_dist:.6g}(RISK_PER_TRADE×入场价)")
+                logger.warning(f"[adjust_sltp] {symbol} 拒绝调整 SL: {sl_reason}")
+        except Exception as _rle:
+            sl_changed = False
+            logger.error(f"[adjust_sltp] {symbol} 止损上限检查异常，保守不调整 SL: {_rle}")
+
     # ── TP1 判断(双向,下调有门槛)────────────────────────────────────────────
     if not tp1_filled:
         if direction == "LONG":
