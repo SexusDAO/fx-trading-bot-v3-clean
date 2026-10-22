@@ -419,7 +419,7 @@ def _daemonize() -> bool:
         os._exit(0)
 
     os.chdir(str(FX_DIR))
-    os.umask(0)
+    os.umask(0o027)   # [fix #38] 原 umask(0) 会让日志/状态文件变成 0666
 
     devnull = os.open("/dev/null", os.O_RDWR)
     os.dup2(devnull, 0)   # stdin  → /dev/null
