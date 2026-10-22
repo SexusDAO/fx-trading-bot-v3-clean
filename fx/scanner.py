@@ -2667,22 +2667,10 @@ def _filter_and_register_signals(
         if _pulse_penalty:
             logger.info(f"[scanner] {sig['symbol']} pulse_short_penalty={_pulse_penalty:+d}")
 
-        # ── v3.58 Taker Buy/Sell 买卖比加分 ────────────────────────────────────
-        # 买方主导（>0.55）+3分，卖方主导（<0.45）-3分，中性不调
-        # 只对顺方向有效：LONG时需买方主导，SHORT时需卖方主导
-        _tbr = ind.get("taker_buy_ratio", 0.5)
+        # ── [fix #35a] 原 v3.58 在此处按 taker_buy_ratio 加减 ±3 分，而 _apply_score_bonuses 里的
+        #   taker 加分（hub 数据，见 _calc_taker_bonus）读的是同一类信息 → 同一因子被重复计分。
+        #   现删除这里的重复逻辑，只保留 _apply_score_bonuses 的 taker 加分。taker_adj 置 0 以保持日志/字段兼容。
         taker_adj = 0
-        if _sig_type not in ("funding_arb",):
-            if direction == "LONG" and _tbr > 0.55:
-                taker_adj = +3
-            elif direction == "LONG" and _tbr < 0.45:
-                taker_adj = -3
-            elif direction == "SHORT" and _tbr < 0.45:
-                taker_adj = +3
-            elif direction == "SHORT" and _tbr > 0.55:
-                taker_adj = -3
-        if taker_adj:
-            logger.debug(f"[scanner] {sig['symbol']} taker_buy_ratio={_tbr:.3f} taker_adj={taker_adj:+d}")
 
         new_score = min(100, max(0, base_score + btc_adj + cg_bonus + strategy_adj + post_shock_adj + atr_tier_adj + _pulse_penalty + taker_adj))
         # 新增三个加分项（hub 数据；在现有评分之后叠加，总分上限 100）
