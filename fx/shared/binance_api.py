@@ -1025,6 +1025,8 @@ def get_algo_open_orders(symbol: str = None) -> list:
         params = {"symbol": symbol} if symbol else {}
         return _signed_get("/fapi/v1/openAlgoOrders", params)
     result = _retry(_call)
+    if result is None:   # [fix #4] 查询失败≠无 Algo 单，抛出由调用方决定，避免据此重复挂 SL
+        raise ApiQueryError("get_algo_open_orders 查询失败（重试耗尽）")
     if isinstance(result, dict):
         return result.get("orders", [])
     return result or []

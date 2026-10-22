@@ -1167,7 +1167,7 @@ def calc_leverage_remaining(direction: str, equity: float) -> float:
             d = (direction or "").upper()
             used = 0.0
             for p in _gap():
-                if p.get("status") not in ("open", "pending", "patching"):
+                if p.get("status") not in ("open", "pending", "patching", "pending_guard"):
                     continue
                 if (p.get("direction") or "").upper() != d:
                     continue

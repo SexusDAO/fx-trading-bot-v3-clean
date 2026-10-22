@@ -3180,7 +3180,7 @@ def dispatch_trigger_analysis(symbol: str, ticker: dict, mark: dict | None, klin
     bi["long_cnt"] = sum(1 for p in positions if p.get("direction") == "LONG" and p.get("status") == "open")
     bi["short_cnt"] = sum(1 for p in positions if p.get("direction") == "SHORT" and p.get("status") == "open")
     active_syms = {(p["symbol"], p.get("direction", "").upper()) for p in positions if p.get("status") == "open"}
-    pending_syms = {p["symbol"] for p in positions if p.get("status") in ("pending", "patching")}
+    pending_syms = {p["symbol"] for p in positions if p.get("status") in ("pending", "patching", "pending_guard")}
     mpm = {symbol: mark} if mark else {}
     bi["_mark_price_map"] = mpm
     bi["_mark_price_map_ts"] = time.monotonic()
@@ -3414,7 +3414,7 @@ def run_scan(dry_run: bool = False, signal_watcher=None) -> dict:
     active_sym_set = {p["symbol"] for p in positions if p.get("status") == "open"}
     # patching 也排除：正在补挂止损止盈，不允许再次开仓
     pending_syms = {p["symbol"] for p in positions
-                   if p.get("status") in ("pending", "patching")}
+                   if p.get("status") in ("pending", "patching", "pending_guard")}
 
     # 对已有挂单的标的执行维护
     pending_positions = [p for p in positions if p.get("status") == "pending"]
@@ -3999,7 +3999,7 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
         _max_total_arb = 5
     from shared.state import get_all_positions as _arb_all_pos
     _total_open_arb = sum(1 for p in _arb_all_pos()
-                          if p.get("status") in ("open", "pending", "patching"))
+                          if p.get("status") in ("open", "pending", "patching", "pending_guard"))
     if _total_open_arb >= _max_total_arb:
         logger.info(f"[arb_scan] 总仓位已满({_total_open_arb}/{_max_total_arb})，跳过 funding_arb 扫描")
         return result
@@ -4031,7 +4031,7 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
     # ── 逐标的分析 ─────────────────────────────────────────────────────────────
     from shared.state import get_all_positions
     active_syms = {p["symbol"] for p in get_all_positions()
-                   if p.get("status") in ("open", "pending", "patching")}
+                   if p.get("status") in ("open", "pending", "patching", "pending_guard")}
 
     from shared.judges import judge_funding_arb
     from shared.indicators import rsi as _rsi_fn

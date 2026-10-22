@@ -180,11 +180,11 @@ def _precheck(signal: dict) -> tuple[bool, str]:
     for p in positions:
         if p["symbol"] == symbol:
             status = p.get("status", "")
-            if status in ("open", "pending", "patching"):
+            if status in ("open", "pending", "patching", "pending_guard"):
                 return False, f"{symbol} 已有机器人{'持仓' if status=='open' else ('补挂中' if status=='patching' else '挂单')}"
 
     # 1-2: 检查 pending/patching orders（兼容不同字段名）
-    pending = [p for p in positions if p.get("status") in ("pending", "patching")]
+    pending = [p for p in positions if p.get("status") in ("pending", "patching", "pending_guard")]
     for p in pending:
         if p["symbol"] == symbol:
             return False, f"{symbol} 已有挂单"
@@ -280,7 +280,7 @@ def _precheck(signal: dict) -> tuple[bool, str]:
         _acc_d   = api.get_account()
         _equity  = float(_acc_d.get("totalMarginBalance", 0)) or float(_acc_d.get("totalWalletBalance", 1))
         # v3.59: 同时计入 open 和 pending 持仓，避免多个同向 pending 等待成交时 Delta 被低估
-        _nom_statuses = ("open", "pending", "patching")
+        _nom_statuses = ("open", "pending", "patching", "pending_guard")
         _long_nom  = sum(
             float(p.get("quantity", 0)) * float(p.get("entry_price", 0))
             for p in _all_pos if p.get("status") in _nom_statuses and p.get("direction","").upper() == "LONG"
@@ -575,7 +575,7 @@ def _account_final_check(notional: float, notifier_fn=None) -> tuple[bool, str]:
         positions = get_all_positions()
         total_notional = sum(
             p.get("quantity", 0) * p.get("entry_price", 0)
-            for p in positions if p.get("status") in ("open", "pending", "patching")
+            for p in positions if p.get("status") in ("open", "pending", "patching", "pending_guard")
         )
         max_notional = total_balance * _max_nom
         if total_notional + notional > max_notional:
@@ -586,7 +586,7 @@ def _account_final_check(notional: float, notifier_fn=None) -> tuple[bool, str]:
             from shared.risk_manager import check_max_drawdown as _cmd, update_drawdown_high_water as _udw
             _total_margin = float(acc.get("totalMarginBalance", total_balance))
             # v3.59: 高水位只在无活跃持仓时更新，避免含浮亏的权益虚假拉高高水位
-            _open_pos_count = sum(1 for p in get_all_positions() if p.get("status") in ("open", "pending", "patching"))
+            _open_pos_count = sum(1 for p in get_all_positions() if p.get("status") in ("open", "pending", "patching", "pending_guard"))
             if _open_pos_count == 0:
                 _udw(_total_margin)
             _dd_ok, _dd_reason = _cmd(_total_margin, notifier_fn=notifier_fn)
@@ -908,6 +908,7 @@ async def _place_guards_async(
     symbol: str, direction: str,
     fill_qty: float, sl_price: float, tp1_price: float, tp2_price: float | None,
     precision: dict,
+    skip_sl: bool = False,
 ) -> dict:
     """
     提交保护单：SL + TP1（必选）+ TP2（可选，tp2_price=None 时不挂）。
@@ -1006,8 +1007,8 @@ async def _place_guards_async(
                 f"错误：{e}"
             )
 
-    coros = [
-        _place_algo_sl_with_verify(),
+    coros = [] if skip_sl else [_place_algo_sl_with_verify()]   # [fix #4] skip_sl: SL 已存活时不重复挂
+    coros += [
         _place("tp1", dict(
             symbol=symbol, side=close_side,
             order_type="LIMIT",
@@ -1035,7 +1036,7 @@ async def _place_guards_async(
     logger.info(f"[executor] {symbol} 保护单模式: {tp_mode}")
 
     return {
-        "protection_status": "complete" if results.get("sl") and results.get("tp1") and (not has_tp2 or results.get("tp2")) else "partial",
+        "protection_status": "complete" if (skip_sl or results.get("sl")) and results.get("tp1") and (not has_tp2 or results.get("tp2")) else "partial",
         "unallocated_qty": max(0.0, fill_qty - sl_qty_f),
         "sl_id":   results.get("sl"),
         "tp1_id":  results.get("tp1"),
@@ -1203,7 +1204,7 @@ def _persist_position_record(rec: dict, kind: str) -> bool:
         from shared import state as _st
         corrupted = bool(getattr(_st, "_POS_STATE_CORRUPTED", False))
         dup = [p for p in get_all_positions()
-               if p.get("symbol") == sym and p.get("status") in ("open", "pending", "patching")]
+               if p.get("symbol") == sym and p.get("status") in ("open", "pending", "patching", "pending_guard")]
     except Exception:
         corrupted, dup = False, []
     if err is None and not corrupted and dup:

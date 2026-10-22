@@ -161,7 +161,7 @@ def add_position(record: dict) -> bool:
         data = _load_pos()
         # 检查是否已有同标的持仓（包括 open / pending / patching，防止补挂进行中资已开仓的标的被二次开仓）
         existing = [p for p in data if p.get("symbol") == sym
-                    and p.get("status") in ("open", "pending", "patching")]
+                    and p.get("status") in ("open", "pending", "patching", "pending_guard")]
         if existing:
             logger.error(f"[state] add_position 拒绝：{sym} 已有记录")
             return False
