@@ -1751,6 +1751,37 @@ def _health_score_detail(direction: str,
 
 
     # ── B4. 挂单有效期检查 ────────────────────────────────────────────────────
+async def _recover_partial_fill(pos: dict, od: dict, pid: str, symbol: str) -> bool:
+    """[fix #14] 挂单被撤/过期时若已有部分成交（executedQty>0），不能直接删本地记录：
+    交易所里已经有真实持仓，按"孤儿仓位"处理——用实际成交量/均价补挂保护单并保留记录。
+    返回 True 表示已按部分成交接管（调用方不得再删记录）。"""
+    try:
+        exec_qty = float((od or {}).get("executedQty", 0) or 0)
+    except (TypeError, ValueError):
+        exec_qty = 0.0
+    if exec_qty <= 0:
+        return False
+    try:
+        fill_price = float((od or {}).get("avgPrice") or (od or {}).get("price") or 0)
+    except (TypeError, ValueError):
+        fill_price = 0.0
+    if fill_price <= 0:
+        fill_price = float(pos.get("entry_price") or 0)
+    logger.warning(f"[pm] {symbol} 挂单已{(od or {}).get('status')}但部分成交 executedQty={exec_qty} "
+                   f"avg={fill_price}，按孤儿仓位处理：保留记录并补挂保护单")
+    update_position(pid, {"status": "patching", "quantity": exec_qty, "quantity_remaining": exec_qty,
+                          "fill_price": fill_price, "entry_price": fill_price or pos.get("entry_price"),
+                          "partial_fill": True})
+    mark_system_order_update(symbol)
+    try:
+        await _补挂保护单(pos, fill_price, exec_qty, pid, symbol)
+    except Exception as ge:
+        update_position(pid, {"status": "pending_guard", "missing_guards": ["sl", "tp1"]})
+        logger.error(f"[pm] {symbol} 部分成交补挂保护单失败，置 pending_guard: {ge}")
+        await _notify_async(f"⚠️ {symbol} 挂单部分成交({exec_qty})后补挂保护单失败，已标记 pending_guard，patrol 将重试\n错误:{ge}")
+    return True
+
+
 async def _check_pending_expire_static(pos: dict, now_ms: int):
     pid      = pos.get("pos_id", pos.get("symbol","unknown"))
     symbol   = pos["symbol"]
@@ -1779,6 +1810,8 @@ async def _check_pending_expire_static(pos: dict, now_ms: int):
                 if od is not None:
                     status = od.get("status","")
                     if status in ("CANCELED","EXPIRED","REJECTED"):
+                        if await _recover_partial_fill(pos, od, pid, symbol):   # [fix #14]
+                            return
                         _remove_position_checked(pid)
                         logger.info(f"[pm] {symbol} pending订单 {order_id} 已{status},清除本地记录")
                         return
@@ -1822,11 +1855,25 @@ async def _check_pending_expire_static(pos: dict, now_ms: int):
     for attempt in range(2):
         try:
             api.cancel_order(symbol, int(order_id))
+            # [fix #14] 撤单后复查成交量：撤单前可能已部分成交，不能直接删记录
+            try:
+                _od_after = api.get_order(symbol, int(order_id))
+            except Exception as _qe:
+                _od_after = None
+                logger.warning(f"[pm] {symbol} 撤单后查询订单失败: {_qe}")
+            if _od_after and await _recover_partial_fill(pos, _od_after, pid, symbol):
+                return
             break
         except Exception as e:
             err_str = str(e).lower()
             # GTD 单可能已被交易所自动撤销(订单不存在),静默处理即可
             if any(kw in err_str for kw in ("unknown order", "order does not exist", "-2011", "-2013")):
+                try:
+                    _od_gone = api.get_order(symbol, int(order_id))
+                except Exception:
+                    _od_gone = None
+                if _od_gone and await _recover_partial_fill(pos, _od_gone, pid, symbol):   # [fix #14]
+                    return
                 logger.info(f"[pm] {symbol} 挂单 {order_id} 已不存在(可能 GTD 已自动到期),直接清除本地记录")
                 break
             if attempt == 0:
