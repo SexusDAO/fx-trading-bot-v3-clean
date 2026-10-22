@@ -754,6 +754,16 @@ def _place_open_order(symbol: str, direction: str, mode: str,
                 price=float(price_str),
                 timeInForce="GTX",
             )
+        elif expire_ts:
+            # [fix #34] immediate 入场单：GTD，有效期由 ORDER_EXPIRE_* 决定
+            order = api.place_order(
+                symbol=symbol, side=side,
+                order_type="LIMIT",
+                quantity=float(qty_str),
+                price=float(price_str),
+                timeInForce="GTD",
+                goodTillDate=expire_ts,
+            )
         else:
             order = api.place_order(
                 symbol=symbol, side=side,
@@ -1839,7 +1849,13 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     elif entry_mode == "pending_order":
         expire_ts = int((time.time() + 4 * 3600) * 1000)
     else:
-        expire_ts = None
+        # [fix #34] immediate 模式原为无过期的 GTC：改用 GTD，有效期取 ORDER_EXPIRE_* 配置
+        #   （交易所要求 goodTillDate 至少晚于当前 600 秒，这里取配置分钟数并保证 >= 11 分钟）
+        try:
+            from config import ORDER_EXPIRE_PULLBACK_MIN as _exp_min
+        except ImportError:
+            _exp_min = 240
+        expire_ts = int((time.time() + max(float(_exp_min), 11.0) * 60) * 1000)
 
     order_id, err = _place_open_order(
         symbol, direction, mode, entry_price, quantity, precision,
