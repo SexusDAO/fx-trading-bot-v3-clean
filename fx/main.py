@@ -767,6 +767,13 @@ async def main() -> None:
         await _sync_positions_on_startup()
     ws.on_reconnect(_on_ws_reconnect)
 
+    # [fix #36] 注册断线补偿回调：userData 断线期间由 ws_listener 的有界补偿任务周期性 REST 对齐
+    #   （此前 on_disconnect 从未注册，补偿任务永远不启动）。对齐函数查询失败时会整体中止，不会误清仓。
+    async def _on_ws_disconnect():
+        logger.info("[main] WS 断线补偿：REST 对齐持仓/保护单...")
+        await _sync_positions_on_startup()
+    ws.on_disconnect(_on_ws_disconnect)
+
     # ── 2. 初始化 PositionManager，注入 ws ────────────────────────────────
     from position_manager import PositionManager, _set_manager, _adjust_sl_tp_loop_static
     pm = PositionManager(ws_listener=ws)
