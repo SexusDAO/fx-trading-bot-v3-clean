@@ -203,8 +203,10 @@ def _precheck(signal: dict) -> tuple[bool, str]:
                and o.get("type") in ("LIMIT", "MARKET")]
         if dup:
             return False, f"{symbol} 交易所已有同向入场挂单({len(dup)}笔)，跳过重复开仓"
-    except Exception:
-        pass  # 查不到不阻断，保守跳过
+    except Exception as _lo_e:
+        # [fix #23] 兜底检查失败 → 拒绝开仓，不静默放行
+        logger.error(f"[executor] {symbol} 查询交易所挂单失败，拒绝开仓: {_lo_e}")
+        return False, f"{symbol} 交易所挂单查询失败，无法排除重复开仓，拒绝开仓"
 
     # 1-3/1-4: 持仓总量 + 方向上限（用 risk_manager.check_position_limits 而非静态上限，和 scanner 动态上限保持一致）
     open_pos  = [p for p in positions if p.get("status") in ("open", "pending")]
@@ -302,7 +304,9 @@ def _precheck(signal: dict) -> tuple[bool, str]:
                 f"限制新增空头（已计入 open+pending）"
             )
     except Exception as _de:
-        logger.debug(f"[executor] {symbol} 净Delta检查失败，降级放行: {_de}")
+        # [fix #28] 检查异常 → 拒绝开仓（原为降级放行）
+        logger.error(f"[executor] {symbol} 净Delta检查失败，拒绝开仓: {_de}")
+        return False, f"{symbol} 净Delta检查异常，拒绝开仓: {_de}"
 
     # 1-12: sl_degraded + score 双重过滤（v3.78 APR 复盘教诛）
     # 背景： sl_degraded=True 说明止损不在结构位（容易被噪音打到）
@@ -592,8 +596,10 @@ def _account_final_check(notional: float, notifier_fn=None) -> tuple[bool, str]:
             _dd_ok, _dd_reason = _cmd(_total_margin, notifier_fn=notifier_fn)
             if not _dd_ok:
                 return False, _dd_reason
-        except Exception:
-            pass
+        except Exception as _dd_e:
+            # [fix #28] 回撤保护检查异常 → 拒绝开仓（原为静默放行）
+            logger.error(f"[executor] {symbol} 回撤保护检查失败，拒绝开仓: {_dd_e}")
+            return False, f"回撤保护检查异常，拒绝开仓: {_dd_e}"
 
         # 功能三：保证金安全垫检查
         try:
@@ -607,8 +613,10 @@ def _account_final_check(notional: float, notifier_fn=None) -> tuple[bool, str]:
                 _MARGIN_TIGHT_HINT[0] = ""
             # 保证金偏紧时将 scale 写入全局供开仓逻辑读取
             _MARGIN_SCALE[0] = _mstats.get("position_scale", 1.0)
-        except Exception:
-            pass
+        except Exception as _ms_e:
+            # [fix #28/#29] 保证金安全垫检查异常 → 拒绝开仓
+            logger.error(f"[executor] {symbol} 保证金安全垫检查失败，拒绝开仓: {_ms_e}")
+            return False, f"保证金安全垫检查异常，拒绝开仓: {_ms_e}"
 
         return True, ""
     except Exception as e:
