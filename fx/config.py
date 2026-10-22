@@ -255,9 +255,9 @@ TAKER_FEE_RATE     = 0.0005  # [fix #44] 无法从成交回报取手续费时的
 RISK_PER_TRADE     = 0.01    # 每笔最大风险比例（止损定仓核心参数）  # [fix] 5% → 1%
 
 # 熔断参数
-# ⚠️ 用户决定：CIRCUIT_BREAKER_DAILY_LOSS 设为 9999（实际禁用日亏损熔断）。
-# 这是用户的主动选择，不是系统错误。如需恢复，将下面的值改回 100（即账户亏损100U触发熔断）。
-CIRCUIT_BREAKER_DAILY_LOSS = 9999  # 用户决定维持禁用状态；恢复建议值: 100
+# [fix B] 恢复日内亏损熔断：改为按账户权益比例触发（默认 8%）。
+CIRCUIT_BREAKER_DAILY_LOSS_PCT = 0.08   # 当日净亏损超过权益的 8% 触发熔断
+CIRCUIT_BREAKER_DAILY_LOSS = 100.0      # 兜底绝对值：取不到账户权益时使用（≈1250U 权益 × 8%）
 CIRCUIT_BREAKER_RESET_HOUR = 0     # UTC 重置时间  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 止损距离上限（动态，按波动层级）
