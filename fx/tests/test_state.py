@@ -152,10 +152,23 @@ class TestCircuitBreaker:
         st.record_pnl(-40.0)
         assert st.get_daily_loss() == pytest.approx(70.0)
 
-    def test_profit_does_not_reduce_loss(self):
+    def test_profit_offsets_loss_net_pnl(self):
+        """[fix #12] 净盈亏口径：盈利与亏损抵消"""
         st.record_pnl(-50.0)
-        st.record_pnl(+100.0)   # 盈利不抵消
-        assert st.get_daily_loss() == pytest.approx(50.0)
+        st.record_pnl(+30.0)
+        assert st.get_daily_loss() == pytest.approx(20.0)
+        st.record_pnl(+100.0)   # 净盈利 → daily_loss 为 0
+        assert st.get_daily_loss() == pytest.approx(0.0)
+
+    def test_fees_and_funding_count_toward_loss(self):
+        """[fix #12] 手续费/资金费单独记录并计入总亏损"""
+        st.record_pnl(+10.0, fee=3.0, funding=2.0)
+        d = st._load_cb()
+        assert d["daily_fees"] == pytest.approx(3.0)
+        assert d["daily_funding"] == pytest.approx(2.0)
+        assert st.get_daily_loss() == pytest.approx(0.0)    # 10-3-2=+5 净盈利
+        st.record_pnl(-20.0, fee=1.0)
+        assert st.get_daily_loss() == pytest.approx(16.0)   # pnl -10, fees 4, funding 2 → 净 -16
 
     def test_circuit_triggers_at_limit(self):
         """累计亏损超过 CIRCUIT_BREAKER_DAILY_LOSS 触发熔断"""

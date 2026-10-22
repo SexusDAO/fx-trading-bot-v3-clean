@@ -57,12 +57,14 @@ class TestCircuitBreaker:
             rm.record_pnl(-90.0)
         assert rm.is_circuit_open() is False
 
-    def test_profit_does_not_prevent_trigger(self):
-        """盈利不抵消亏损熔断计算"""
+    def test_profit_offsets_loss_for_trigger(self):
+        """[fix #12] 净盈亏口径：盈利抵消亏损；净亏损超限才触发"""
         import config as _c; _c.CIRCUIT_BREAKER_DAILY_LOSS = 100
         try:
             rm.record_pnl(+500.0)   # 盈利
-            rm.record_pnl(-150.0)   # 亏损超限
+            rm.record_pnl(-150.0)   # 净仍盈利 350 → 不触发
+            assert rm.is_circuit_open() is False
+            rm.record_pnl(-500.0)   # 净亏 150 → 触发
             assert rm.is_circuit_open() is True
         finally:
             _c.CIRCUIT_BREAKER_DAILY_LOSS = 9999

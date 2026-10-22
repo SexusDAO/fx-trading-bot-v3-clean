@@ -326,7 +326,10 @@ def get_pending_orders() -> list:
 # ═══════════════════════════════════════════════════════════════════════════════
 _CB_DEFAULT = {
     "is_open":          False,
-    "daily_loss":       0.0,
+    "daily_loss":       0.0,   # = max(0, -(daily_pnl - daily_fees - daily_funding))
+    "daily_pnl":        0.0,   # 当日净已实现盈亏（正负都累计，不含费用）
+    "daily_fees":       0.0,   # 当日手续费（支出）
+    "daily_funding":    0.0,   # 当日资金费（支出为正）
     "last_reset_date":  "",
     "triggered_at":     None,
     "triggered_reason": None,
@@ -372,15 +375,22 @@ def is_circuit_open() -> bool:
         return True
 
 
-def record_pnl(pnl: float) -> bool:
+def record_pnl(pnl: float, fee: float = 0.0, funding: float = 0.0) -> bool:
     """
-    记录盈亏。pnl < 0 累加到 daily_loss。
+    [fix #12] 记录净盈亏：盈利与亏损都累计（正负抵消）；手续费、资金费单独字段累计，
+    并计入总亏损：daily_loss = max(0, -(daily_pnl - daily_fees - daily_funding))。
+      pnl     已实现盈亏（正=盈利，负=亏损，不含手续费/资金费）
+      fee     手续费（正数=支出）
+      funding 资金费（正数=支出，负数=收入）
     返回本次是否触发熔断。
     """
     with _locks["cb"]:
         d = _load_cb()
-        if pnl < 0:
-            d["daily_loss"] = round(d.get("daily_loss", 0.0) + abs(pnl), 4)
+        d["daily_pnl"]     = round(float(d.get("daily_pnl", 0.0)) + float(pnl), 6)
+        d["daily_fees"]    = round(float(d.get("daily_fees", 0.0)) + abs(float(fee or 0.0)), 6)
+        d["daily_funding"] = round(float(d.get("daily_funding", 0.0)) + float(funding or 0.0), 6)
+        net = d["daily_pnl"] - d["daily_fees"] - d["daily_funding"]
+        d["daily_loss"] = round(max(0.0, -net), 4)
         try:
             from config import CIRCUIT_BREAKER_DAILY_LOSS
             limit = float(CIRCUIT_BREAKER_DAILY_LOSS)
@@ -390,7 +400,7 @@ def record_pnl(pnl: float) -> bool:
         if d["daily_loss"] >= limit and not d.get("is_open"):
             d["is_open"]          = True
             d["triggered_at"]     = int(time.time() * 1000)
-            d["triggered_reason"] = f"日亏损 {d['daily_loss']:.1f}U 超限 {limit}U"
+            d["triggered_reason"] = f"日净亏损 {d['daily_loss']:.1f}U 超限 {limit}U"
             d["notified"]         = False  # 待 risk_manager 推送后置 True
             triggered = True
             logger.warning(f"[state] 熔断触发：{d['triggered_reason']}")

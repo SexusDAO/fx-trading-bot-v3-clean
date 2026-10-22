@@ -177,9 +177,9 @@ def is_circuit_open() -> bool:
 # record_pnl — 平仓后调用
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def record_pnl(pnl: float, symbol: str = "", reason: str = "") -> dict:
+def record_pnl(pnl: float, symbol: str = "", reason: str = "", fee: float = 0.0, funding: float = 0.0) -> dict:
     """
-    记录盈亏。pnl<0 累加 daily_loss。
+    记录净盈亏（正负都累计）；fee/funding 单独记录并计入总亏损。
     返回 {"circuit_triggered": bool|None, "daily_loss": float|None, "persisted": bool[, "error": str]}
     [v3.89 #63] persisted=False 表示本次盈亏没有记入 state（circuit_triggered 此时为 None=未知）。
     """
@@ -190,7 +190,7 @@ def record_pnl(pnl: float, symbol: str = "", reason: str = "") -> dict:
     persisted = True
     persist_error = None
     try:
-        triggered = _state_record(pnl)
+        triggered = _state_record(pnl, fee=fee, funding=funding)
     except Exception as e:
         # [v3.89 #63] 持久化失败不再伪装成「已记账、未触发熔断」：circuit_triggered 置 None（未知，且为假值，
         #   兼容 if result["circuit_triggered"] 的既有用法），并带 persisted=False 与 error 供上游识别、对账。
