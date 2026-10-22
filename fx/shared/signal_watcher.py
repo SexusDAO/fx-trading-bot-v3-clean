@@ -1419,8 +1419,24 @@ class SignalWatcher:
             side = "SELL" if d == "LONG" else "BUY"
             pside = ps if ps != "BOTH" else d
             try:
-                await loop.run_in_executor(None, lambda: _api.place_sl(symbol, side, pside, sl, abs(amt)))
-                logger.warning(f"[CANCEL-UNKNOWN] {symbol} 可能已成交，已补止损 (sl={sl} qty={abs(amt)})")
+                # [fix #27] 与 executor 相同的取整逻辑；成功判断改为检查返回的 algoId 是否有效
+                from executor import _get_precision, _round_price, _round_qty
+                _prec = _get_precision(symbol)
+                sl_r  = _round_price(sl, _prec["tick"])
+                qty_r = _round_qty(abs(amt), _prec["step"])
+                if sl_r <= 0 or qty_r <= 0:
+                    logger.error(f"[CANCEL-UNKNOWN] {symbol} 取整后止损价/数量无效 sl={sl_r} qty={qty_r}，请人工处理")
+                    return False
+                _resp = await loop.run_in_executor(None, lambda: _api.place_sl(symbol, side, pside, sl_r, qty_r))
+                _aid = (_resp or {}).get("algoId") or (_resp or {}).get("orderId")
+                try:
+                    _aid_ok = int(_aid) > 0
+                except (TypeError, ValueError):
+                    _aid_ok = False
+                if not _aid_ok:
+                    logger.error(f"[CANCEL-UNKNOWN] {symbol} 补止损未得到有效 algoId，resp={_resp}，请人工处理")
+                    return False
+                logger.warning(f"[CANCEL-UNKNOWN] {symbol} 可能已成交，已补止损 algoId={_aid} (sl={sl_r} qty={qty_r})")
                 return True
             except Exception as e:
                 logger.error(f"[CANCEL-UNKNOWN] {symbol} 补止损失败: {e}")
