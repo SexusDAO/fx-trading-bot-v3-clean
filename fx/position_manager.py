@@ -1125,6 +1125,22 @@ class PositionManager:
                 await self._force_close(pos, "time_stop_hard_72h")
                 return
 
+        # ── [fix E] 接入 TIME_STOP_PROFIT_THRESHOLD：浮盈达到 ATR × 阈值后不再触发时间止损 ──
+        # 原常量在 config 里标注「代码未引用」，实际未生效；此处接入。
+        try:
+            from config import TIME_STOP_PROFIT_THRESHOLD as _TSPT
+            _atr_ref = float(pos.get("atr_at_entry", 0.0) or 0.0)
+            if _atr_ref > 0:
+                _profit_abs = (price - entry) if direction == "LONG" else (entry - price)
+                if _profit_abs >= _atr_ref * float(_TSPT):
+                    logger.info(
+                        f"[pm] {symbol} 浮盈 {_profit_abs:.6g} ≥ ATR({_atr_ref:.6g})×{_TSPT}"
+                        f"={_atr_ref * float(_TSPT):.6g}，跳过时间止损"
+                    )
+                    return
+        except Exception as _ts_e:
+            logger.debug(f"[pm] {symbol} 时间止损浮盈豁免检查异常，按原逻辑继续: {_ts_e}")
+
         # SL 辅助确认:每5分钟检查 Algo SL 是否仍在交易所,不在则重挂
         # 注意:本账号 SL 走 /fapi/v1/algoOrder,必须查 openAlgoOrders 而非 openOrders
         sl_order_id = pos.get("sl_order_id")
