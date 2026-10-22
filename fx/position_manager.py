@@ -724,7 +724,21 @@ class PositionManager:
                 try:
                     precision = _get_precision(symbol)
                     _sl_qty   = _round_qty(tp2_qty, precision["step"])
-                    _sl_p     = _round_price(sl_price, precision["tick"])
+                    # [fix F] TP1 成交后剩余仓位止损移到入场价保本：
+                    # LONG 取 max(原止损, 入场成交价)，SHORT 取 min(原止损, 入场成交价)，
+                    # 保证止损至少不劣于原止损、且不劣于保本价。
+                    _fill_ref = float(pos.get("fill_price") or pos.get("entry_price") or 0.0)
+                    if _fill_ref > 0:
+                        _sl_be = (max(sl_price, _fill_ref) if direction == "LONG"
+                                  else min(sl_price, _fill_ref))
+                    else:
+                        _sl_be = sl_price
+                    _sl_p     = _round_price(_sl_be, precision["tick"])
+                    if abs(_sl_p - sl_price) > 0:
+                        logger.info(
+                            f"[pm] {symbol} TP1后剩余仓位止损移向保本: "
+                            f"{sl_price} → {_sl_p} (入场参考 {_fill_ref})"
+                        )
                     _close_side = "SELL" if direction == "LONG" else "BUY"
                     _pos_side   = "LONG" if direction == "LONG" else "SHORT"
                     _resp = await asyncio.get_running_loop().run_in_executor(
@@ -746,7 +760,7 @@ class PositionManager:
                                 )
                             except Exception:
                                 pass
-                        update_position(pid, {"sl_order_id": int(_new_sl_id)})
+                        update_position(pid, {"sl_order_id": int(_new_sl_id), "sl_price": _sl_p})
                         logger.info(
                             f"[pm] {symbol} TP1后补挂SL单成功: "
                             f"qty={_sl_qty} price={_sl_p} id={_new_sl_id}"
