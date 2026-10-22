@@ -1929,10 +1929,14 @@ async def _force_close_static_inner(pos: dict, close_reason: str):
                     logger.info(f"[pm] {symbol} 清理残余 algo 单 algoId={aid}")
                 except Exception:
                     pass
-        # 清理残余普通挂单
-        open_orders = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: api.get_open_orders(symbol)
-        )
+        # 清理残余普通挂单（[fix #2] 查询失败时跳过清理，不当作"无挂单"）
+        try:
+            open_orders = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: api.get_open_orders(symbol)
+            )
+        except Exception as _qe:
+            logger.warning(f"[pm] {symbol} 查询残余挂单失败，跳过清理: {_qe}")
+            open_orders = []
         for oo in (open_orders or []):
             oid = int(oo.get("orderId", 0))
             if oid:

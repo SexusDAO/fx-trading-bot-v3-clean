@@ -595,15 +595,28 @@ def cancel_order(symbol: str, order_id: int) -> dict:
         return _signed_delete("/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
     return _retry(_call) or {}
 
+class ApiQueryError(RuntimeError):
+    """查询类接口失败（重试耗尽 / 返回格式异常）。
+
+    [fix #2] 区分「交易所确实没有持仓/挂单（返回 []）」与「查询失败（抛本异常）」，
+    调用方不得把失败当作空结果处理。
+    """
+
+
 def get_position(symbol: str = None) -> list:
-    """查当前持仓，失败返回 []"""
+    """查当前持仓。成功返回列表（可为空 = 交易所确实无持仓）；失败抛 ApiQueryError。"""
     def _call():
         params = {}
         if symbol:
             params["symbol"] = symbol
         d = _signed_get("/fapi/v2/positionRisk", params)
-        return d if isinstance(d, list) else []
-    return _retry(_call) or []
+        if not isinstance(d, list):
+            raise ApiQueryError(f"positionRisk 返回格式异常: {type(d).__name__}")
+        return d
+    res = _retry(_call)
+    if res is None:
+        raise ApiQueryError("get_position 查询失败（重试耗尽）")
+    return res
 
 def get_account() -> dict:
     """查账户余额，失败返回 {}"""
@@ -620,14 +633,19 @@ def get_order(symbol: str, order_id: int) -> dict:
 
 
 def get_open_orders(symbol: str = None) -> list:
-    """查所有未成交挂单，失败返回 []"""
+    """查所有未成交挂单。成功返回列表（可为空）；失败抛 ApiQueryError。"""
     def _call():
         params = {}
         if symbol:
             params["symbol"] = symbol
         d = _signed_get("/fapi/v1/openOrders", params)
-        return d if isinstance(d, list) else []
-    return _retry(_call) or []
+        if not isinstance(d, list):
+            raise ApiQueryError(f"openOrders 返回格式异常: {type(d).__name__}")
+        return d
+    res = _retry(_call)
+    if res is None:
+        raise ApiQueryError("get_open_orders 查询失败（重试耗尽）")
+    return res
 
 def get_user_trades(symbol: str, start_time: int = None, limit: int = 20) -> list:
     """查某标的最近成交记录（含 realizedPnl），失败返回 []"""

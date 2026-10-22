@@ -473,7 +473,18 @@ async def _sync_positions_on_startup() -> None:
 
     try:
         # ── 拉取真实持仓 ──────────────────────────────────────────────────────
-        pos_risk = _bapi.get_position()  # 走 binance_api 封装：_retry + Session + key 轮询
+        # [fix #2] 查询失败（ApiQueryError）≠ 交易所无持仓：直接中止对齐，不做任何清理
+        try:
+            pos_risk = _bapi.get_position()  # 走 binance_api 封装：_retry + Session + key 轮询
+            open_orders = _bapi.get_open_orders()
+        except Exception as _qe:
+            logger.error(f"[startup_sync] 查询交易所持仓/挂单失败，本次对齐中止（不清理、不补挂）: {_qe}")
+            try:
+                from shared.notifier import notify_async
+                await notify_async(f"⚠️ 持仓对齐中止：交易所持仓/挂单查询失败，未做任何清理\n{str(_qe)[:120]}")
+            except Exception:
+                pass
+            return
         # HEDGE 模式：多单 positionSide=LONG，空单 positionSide=SHORT，两者都要对齐
         # 用 (symbol, positionSide) 作为 key，避免同一标的多空各一条记录时互相覆盖
         real = {(p["symbol"], p["positionSide"]): p for p in pos_risk
@@ -481,7 +492,6 @@ async def _sync_positions_on_startup() -> None:
                 and abs(float(p.get("positionAmt", 0))) > 0}
 
         # ── 拉取开放挂单（普通限价单：TP）──────────────────────────────────────
-        open_orders = _bapi.get_open_orders()  # 走 binance_api 封装
         live_ids = {int(o["orderId"]) for o in open_orders}
         order_by_sym = {}
         for o in open_orders:
