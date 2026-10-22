@@ -85,7 +85,10 @@ _SL_MAX_MAP  = {"low": _CFG_SL_LOW, "mid": _CFG_SL_MID, "high": _CFG_SL_HIGH}
 _TP1_MAX_PCT = _CFG_TP1_MAX  # low/mid tier TP1 距入场价上限
 _TP1_MAX_PCT_HIGH = _CFG_TP1_HIGH  # high tier TP1 距入场价上限
 _TP1_MIN_RR = _CFG_RR_MIN_TP1   # v3.14: 从 config.RR_MIN_TP1 加载，与配置同步（原硬编码 1.5）
-_TP2_MIN_RR = 2.5           # TP2 最小盈亏比
+try:
+    from config import RR_MIN_TP2 as _TP2_MIN_RR   # [fix #41] 统一从 config 读取，删除硬编码 2.5
+except Exception:
+    _TP2_MIN_RR = 3.0                                # 与 config.RR_MIN_TP2 默认值一致
 
 
 # ─────────────────────────────────────────────────────────────────────────────

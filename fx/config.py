@@ -52,7 +52,7 @@ WS_MARK_PRICE_MAX_QUEUE = 32   # 三条 WS 连接共用的接收队列高水位
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")  # 保留兼容
 # TELEGRAM_CHAT_ID — 同上
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")  # 保留兼容
-TELEGRAM_DAILY_REPORT_HOUR = 2   # UTC，对应北京时间 10:00  # [v3.85 DOC-2] 代码未引用此常量，修改无效
+TELEGRAM_DAILY_REPORT_HOUR = 2   # UTC，对应北京时间 10:00  # [fix #41] calc_sl_tp 已改为读取此常量
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 第二组：候选池参数
