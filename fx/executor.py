@@ -110,10 +110,18 @@ def _refresh_precision_cache() -> None:
         logger.warning(f"[executor] 精度缓存刷新失败: {e}")
 
 
+class PrecisionUnavailableError(RuntimeError):
+    """[fix #25] 交易所精度（tickSize/stepSize）获取失败。"""
+
+
 def _get_precision(symbol: str) -> dict:
     if time.time() - _PRECISION_TS > _PRECISION_TTL or symbol not in _PRECISION_CACHE:
         _refresh_precision_cache()
-    return _PRECISION_CACHE.get(symbol, {"tick": 0.01, "step": 0.001})
+    prec = _PRECISION_CACHE.get(symbol)
+    if not prec or not prec.get("tick") or not prec.get("step"):
+        # [fix #25] 取不到精度不再用默认值（0.01/0.001 会让价格/数量错位被拒或下错价）→ 拒绝下单
+        raise PrecisionUnavailableError(f"{symbol} 精度信息不可用（tick/step），拒绝下单")
+    return prec
 
 
 def _round_price(price: float, tick: float) -> float:
@@ -700,8 +708,8 @@ def _place_open_order(symbol: str, direction: str, mode: str,
     step = precision["step"]
     side = "BUY" if direction.upper() == "LONG" else "SELL"
 
-    price_str = str(_round_price(entry_price, tick))
-    qty_str   = str(_round_qty(quantity, step))
+    price_str = api.fmt_num(_round_price(entry_price, tick))   # [fix #25] 统一定点格式
+    qty_str   = api.fmt_num(_round_qty(quantity, step))
 
     # [fix] -4024 预检：若计算价格低于历史已记录的最低限价，直接拒绝不提交
     _min_price_key = f"_min_price_{symbol}"

@@ -107,6 +107,12 @@ def reset_session():
     logger.info(f"[api] Session 已重建（累计第 {count} 次），旧会话已关闭")
 
 # ── 内部重试装饰器 ────────────────────────────────────────────────────────────
+def fmt_num(value) -> str:
+    """[fix #25] 统一数字格式化：定点 8 位小数并去掉末尾 0 / 小数点，杜绝科学计数法（如 1e-05）。"""
+    out = f"{float(value):.8f}".rstrip("0").rstrip(".")
+    return out if out not in ("", "-") else "0"
+
+
 class BinanceAPIError(Exception):
     """[fix #9] 带原始错误码的业务错误。str() 保持 "BinanceError code=.. msg=.. http=.." 旧格式，
     旧代码里 `"-4024" in str(e)` 的判断继续有效。"""
@@ -600,10 +606,11 @@ def place_order(symbol: str, side: str, order_type: str,
         "type":      order_type,
         "quantity":  quantity,
     }
+    params["quantity"] = fmt_num(quantity)          # [fix #25] 避免浮点科学计数法
     if price:
-        params["price"] = price
+        params["price"] = fmt_num(price)
     if stop_price:
-        params["stopPrice"] = stop_price
+        params["stopPrice"] = fmt_num(stop_price)
 
     # Hedge Mode 处理
     hedge = is_hedge_mode()
@@ -1021,8 +1028,8 @@ def place_sl(symbol: str, side: str, position_side: str,
         "symbol":       symbol,
         "side":         side,
         "type":         "STOP_MARKET",
-        "triggerPrice": f"{trigger_price}",
-        "quantity":     f"{quantity}",
+        "triggerPrice": fmt_num(trigger_price),
+        "quantity":     fmt_num(quantity),
         "workingType":  "MARK_PRICE",
         "algoType":     "CONDITIONAL",
     }
