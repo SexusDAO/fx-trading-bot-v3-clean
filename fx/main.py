@@ -509,126 +509,89 @@ async def _sync_positions_on_startup() -> None:
         ps_map = {p["symbol"]: p for p in positions}
 
         removed,補挂, errors = [], [], []
+        orphans_rebuilt = []
 
-        # ── 1. 清僵尸记录 ─────────────────────────────────────────────────────
-        for sym, ps in ps_map.items():
-            if ps.get("status") != "open":
+        # ── 1. 清僵尸记录（仅在上面持仓/挂单查询都成功时才会走到这里）────────────
+        _live_statuses = ("open", "pending_guard")
+        for sym, ps in list(ps_map.items()):
+            if ps.get("status") not in _live_statuses:
                 continue
             ps_side = ps.get("direction", "long").upper()  # pos_state 里存的是 direction
-            real_key = (sym, ps_side)
-            if real_key not in real:
+            if (sym, ps_side) not in real:
                 # 交易所已无此方向持仓，用 state.py 的加锁原子接口清除
                 pid = ps.get("pos_id", sym)
                 remove_position(pid)
                 removed.append(sym)
                 logger.info(f"[startup_sync] 清除僵尸记录: {sym} ({ps_side})")
 
-        # ── 2. 检查有持仓但缺 TP 挂单的仓位，自动补挂 ───────────────────────
+        # ── 2. 对齐每个真实持仓：孤儿建档 + 统一走 position_manager._补挂保护单 ──────
+        # [fix #3] 孤儿仓位（交易所有、本地无）：用交易所数据重建完整记录并 add_position，
+        #          方向取 positionSide，不使用默认值。
+        # [fix #4/#13] 保护单补挂只走一条路径：position_manager._补挂保护单
+        #          （SL 存活不重复挂；缺失先撤旧单；新 SL id 写回 pos_state）。
+        from position_manager import _补挂保护单
+        from shared.state import add_position
+        ps_by_key = {}
+        for _p in get_all_positions():
+            if _p.get("status") in ("open", "pending_guard", "patching"):
+                ps_by_key[(_p.get("symbol"), str(_p.get("direction", "")).upper())] = _p
+
         for (sym, pos_side), rp in real.items():
             entry = float(rp["entryPrice"])
             qty   = abs(float(rp["positionAmt"]))
-            ps    = ps_map.get(sym, {})
-            pid   = ps.get("pos_id", sym)
+            ps    = ps_by_key.get((sym, pos_side))
+
+            if ps is None:
+                _now_ms = int(_time.time() * 1000)
+                ps = {
+                    "pos_id":             f"rec_{sym}_{pos_side[0]}_{_now_ms}",
+                    "symbol":             sym,
+                    "direction":          pos_side.lower(),   # 取自交易所 positionSide
+                    "status":             "open",
+                    "mode":               "recovered",
+                    "sig_type":           "recovered",
+                    "entry_price":        entry,
+                    "fill_price":         entry,
+                    "quantity":           qty,
+                    "quantity_remaining": qty,
+                    "leverage":           int(float(rp.get("leverage", 0) or 0)),
+                    "open_time":          _now_ms,
+                    "fill_time":          _now_ms,
+                    "tp1_filled":         False,
+                    "tp2_filled":         False,
+                    "source":             "orphan_recovered",
+                }
+                if not add_position(ps):
+                    errors.append(f"{sym}({pos_side}) 孤儿仓位建档失败")
+                    logger.error(f"[startup_sync] {sym}({pos_side}) 孤儿仓位建档失败，请人工核查")
+                    continue
+                orphans_rebuilt.append(f"{sym}({pos_side})")
+                logger.warning(f"[startup_sync] {sym}({pos_side}) 孤儿仓位已按交易所数据建档: qty={qty} entry={entry}")
+
+            pid    = ps.get("pos_id", sym)
             tp1_id = ps.get("tp1_order_id")
             tp2_id = ps.get("tp2_order_id")
-
-            # 单TP模式：tp2_price=None 表示本仓位不需要 TP2
             single_tp_mode = (ps.get("tp2_price") is None)
+            sl_id_ps = ps.get("sl_order_id")
 
             tp1_alive = bool(tp1_id and int(tp1_id) in live_ids)
             tp2_alive = bool(tp2_id and int(tp2_id) in live_ids) if not single_tp_mode else True
-
-            # v3.56: 检查 SL 是否仍在交易所（重启期间可能被交易所自动撤销）
-            sl_id_ps  = ps.get("sl_order_id")
             sl_alive  = bool(sl_id_ps and int(sl_id_ps) in live_algo_ids)
-            if sl_id_ps and not sl_alive:
-                logger.warning(f"[startup_sync] {sym}: SL单 {sl_id_ps} 不在交易所，需补挂")
-                try:
-                    from executor import _get_precision
-                    from shared.calc_sl_tp import calc_sl_tp as _csltp
-                    _direction_sl = ps.get("direction", "LONG").upper()
-                    _sl_price_sv  = float(ps.get("sl_price", 0))
-                    _qty_sv       = abs(float(rp.get("positionAmt", 0)))
-                    _prec_sv      = _get_precision(sym)
-                    if _sl_price_sv > 0 and _qty_sv > 0:
-                        _resp_sv = await _place_guards_async.__wrapped__(
-                            sym, _direction_sl, _qty_sv,
-                            _sl_price_sv, ps.get("tp1_price", 0), ps.get("tp2_price"), _prec_sv
-                        ) if False else None  # 只补SL，不重复挂TP
-                        # 直接调 api.place_sl
-                        from shared import binance_api as _bapi2
-                        _sl_resp = await __import__('asyncio').get_event_loop().run_in_executor(
-                            None, lambda: _bapi2.place_sl(
-                                symbol=sym,
-                                side="SELL" if _direction_sl=="LONG" else "BUY",
-                                position_side=_direction_sl,
-                                trigger_price=round(_sl_price_sv / _prec_sv["tick"]) * _prec_sv["tick"],
-                                quantity=round(_qty_sv / _prec_sv["step"]) * _prec_sv["step"],
-                            )
-                        )
-                        _new_sl_id_sv = _sl_resp.get("orderId") or _sl_resp.get("algoId")
-                        if _new_sl_id_sv:
-                            from shared.state import update_position as _upd
-                            _upd(ps.get("pos_id", sym), {"sl_order_id": int(_new_sl_id_sv)})
-                            logger.info(f"[startup_sync] {sym}: SL补挂成功 id={_new_sl_id_sv}")
-                            補挂.append(f"{sym} sl={_new_sl_id_sv}")
-                        else:
-                            errors.append(f"{sym} SL补挂失败: {_sl_resp}")
-                except Exception as _sv_e:
-                    errors.append(f"{sym} SL补挂异常: {_sv_e}")
-                    logger.error(f"[startup_sync] {sym} SL补挂失败: {_sv_e}")
 
-            if tp1_alive and tp2_alive and sl_alive:
+            if tp1_alive and tp2_alive and sl_alive and ps.get("status") == "open":
                 logger.info(f"[startup_sync] {sym}: SL✅ TP1✅ {'(单TP)' if single_tp_mode else 'TP2✅'} 无需补挂")
                 continue
 
-            # TP1 缺失才需补挂
-            if tp1_alive and single_tp_mode and sl_alive:
-                logger.info(f"[startup_sync] {sym}: SL✅ TP1✅ 单TP模式 无需补挂")
-                continue
-
-            logger.info(f"[startup_sync] {sym}: tp1_alive={tp1_alive} tp2_alive={tp2_alive} single_tp={single_tp_mode}，开始补挂")
+            logger.info(f"[startup_sync] {sym}: sl_alive={sl_alive} tp1_alive={tp1_alive} "
+                        f"tp2_alive={tp2_alive} single_tp={single_tp_mode}，委托 position_manager 补挂")
             try:
-                klines = _bapi.get_klines(sym, "1h", 22)
-                now_ms = _time.time() * 1000
-                closed = [k for k in klines if float(k[6]) < now_ms]
-                trs = [max(float(closed[i][2]) - float(closed[i][3]),
-                           abs(float(closed[i][2]) - float(closed[i-1][4])),
-                           abs(float(closed[i][3]) - float(closed[i-1][4])))
-                       for i in range(1, len(closed))]
-                atr = sum(trs[-14:]) / 14 if trs else entry * 0.01
-                tier = ps.get("volatility_tier", "mid")
-                from config import SL_MULT_LOW, SL_MULT_MID, SL_MULT_HIGH
-                sl_mult = {"low": SL_MULT_LOW, "mid": SL_MULT_MID, "high": SL_MULT_HIGH}.get(tier, SL_MULT_MID)
-
-                direction_ps = ps.get("direction", "long").upper()
-                sl_price  = ps.get("sl_price") or (
-                    entry - atr * sl_mult if direction_ps == "LONG" else entry + atr * sl_mult)
-                tp1_price = ps.get("tp1_price") or (
-                    entry + atr * 1.5 if direction_ps == "LONG" else entry - atr * 1.5)
-                # tp2_price 严格从 pos_state 取，None 表示单TP模式
-                tp2_price = ps.get("tp2_price")  # None → 不挂 TP2
-
-                precision = _get_precision(sym)
-                guard = await _place_guards_async(
-                    sym, direction_ps, qty, sl_price, tp1_price, tp2_price, precision
-                )
-
-                update_position(pid, {
-                    "status": "open",
-                    "fill_price": entry,
-                    "quantity": qty,
-                    "sl_price": sl_price,
-                    "tp1_price": tp1_price,
-                    "tp2_price": tp2_price,
-                    "tp1_order_id": guard.get("tp1_id"),
-                    "tp2_order_id": guard.get("tp2_id"),
-                })
-                補挂.append(f"{sym} tp1={guard.get('tp1_id')}")
-                logger.info(f"[startup_sync] {sym} 补挂完成: {guard}")
+                await _补挂保护单(ps, entry, qty, pid, sym)
+                補挂.append(f"{sym}({pos_side})")
             except Exception as e:
                 errors.append(f"{sym}: {e}")
                 logger.error(f"[startup_sync] {sym} 补挂失败: {e}")
+
+        ps_map = {p["symbol"]: p for p in get_all_positions()}
 
         # ── 3. 推送摘要 ───────────────────────────────────────────────────────
         lines = [f"🔄 重启持仓对齐完成"]
@@ -646,6 +609,8 @@ async def _sync_positions_on_startup() -> None:
             t2_ok  = "✅" if (tp2_id and int(tp2_id) in live_ids) else "❌"
             lines.append(f"  {sym}({pos_side}): entry={entry:.6g} qty={qty} PnL={pnl:+.2f}U")
             lines.append(f"    SL={sl_str}(patrol) TP1{t1_ok} TP2{t2_ok}")
+        if orphans_rebuilt:
+            lines.append(f"  🧩 孤儿仓位已建档: {', '.join(orphans_rebuilt)}")
         if removed:
             lines.append(f"  🗑 清除僵尸: {', '.join(removed)}")
         if 補挂:
