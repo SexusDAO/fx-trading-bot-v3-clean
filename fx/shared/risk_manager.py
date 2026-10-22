@@ -690,8 +690,9 @@ def check_margin_safety(notifier_fn=None) -> tuple[bool, str, dict]:
         return True, "", stats
 
     except Exception as e:
-        logger.warning(f"[risk] check_margin_safety 异常，降级允许开仓: {e}")
-        return True, "", stats  # 降级放行，不因查询失败阻断开仓
+        # [fix #29] 统一口径：检查异常 → 拒绝开仓
+        logger.error(f"[risk] check_margin_safety 异常，拒绝开仓: {e}")
+        return False, f"保证金安全垫检查异常: {e}", stats
 
 
 def get_risk_summary() -> dict:
@@ -958,10 +959,13 @@ def check_systemic_risk() -> tuple[bool, str]:
                         f"{pos['symbol']} 资金费率极端 {fr*100:.2f}%（非套利仓位），"
                         f"疑似交易所异常，暂停新开仓"
                     )
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as _fe:
+                # [fix #29] 单仓位资金费率查询失败 → 拒绝开仓
+                logger.error(f"[risk] 系统性风险检查：{pos.get('symbol')} 资金费率查询失败，拒绝开仓: {_fe}")
+                return False, f"系统性风险检查异常（{pos.get('symbol')} 资金费率查询失败）"
+    except Exception as _se:
+        logger.error(f"[risk] 系统性风险检查异常，拒绝开仓: {_se}")
+        return False, f"系统性风险检查异常: {_se}"
 
     return True, ""
 
@@ -1184,7 +1188,9 @@ def calc_leverage_remaining(direction: str, equity: float) -> float:
             logger.debug(f"[leverage] {d} ratio={ratio} budget={budget:.0f} used={used:.0f} remaining={remaining:.0f}")
             return min(remaining, single_cap)
         except Exception as e:
-            logger.warning(f"[leverage] calc_leverage_remaining 异常，降级放行: {e}")
-            return single_cap
-    except Exception:
-        return float("inf")
+            # [fix #29] 异常 → 剩余预算 0（调用方据此拒绝开仓）
+            logger.error(f"[leverage] calc_leverage_remaining 异常，剩余预算置 0（拒绝开仓）: {e}")
+            return 0.0
+    except Exception as e:
+        logger.error(f"[leverage] calc_leverage_remaining 外层异常，剩余预算置 0（拒绝开仓）: {e}")
+        return 0.0

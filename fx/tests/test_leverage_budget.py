@@ -119,13 +119,14 @@ class TestRemaining(Base):
         self.assertEqual(RM.calc_leverage_remaining("LONG", 100.0), 100.0)          # budget 100，单仓上限 150 → 100
         self.assertEqual(RM.calc_leverage_remaining("SHORT", 100.0), 150.0)         # budget 400，单仓上限 150
 
-    def test_exception_degrades_to_single_cap(self):
+    def test_exception_fails_closed_to_zero(self):
+        """[fix #29] 计算异常 → 剩余预算 0（拒绝开仓），不再降级放行"""
         self.market("range")
         with mock.patch.object(ST, "get_all_positions", side_effect=RuntimeError("state down")):
-            self.assertEqual(RM.calc_leverage_remaining("LONG", 1000.0), 1500.0)
+            self.assertEqual(RM.calc_leverage_remaining("LONG", 1000.0), 0.0)
         with mock.patch.object(RM, "get_market_mode", side_effect=RuntimeError("api down")):
-            self.assertEqual(RM.calc_leverage_remaining("LONG", 1000.0), 1500.0)
-        self.assertEqual(RM.calc_leverage_remaining("SIDEWAYS", 1000.0), 1500.0)   # 非法方向也降级
+            self.assertEqual(RM.calc_leverage_remaining("LONG", 1000.0), 0.0)
+        self.assertEqual(RM.calc_leverage_remaining("SIDEWAYS", 1000.0), 0.0)   # 非法方向同样拒绝
 
     def test_unusable_equity_is_not_blocking(self):
         for eq in (None, "x", float("nan"), float("inf")):
