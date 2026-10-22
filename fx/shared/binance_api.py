@@ -395,6 +395,20 @@ def is_hedge_mode() -> bool:
     return _HEDGE_MODE
 
 
+def get_position_mode() -> bool:
+    """[fix #16] 向交易所查询账户真实持仓模式。True=对冲模式(dualSidePosition)；失败抛 ApiQueryError。"""
+    def _call():
+        d = _signed_get("/fapi/v1/positionSide/dual", {})
+        if not isinstance(d, dict) or "dualSidePosition" not in d:
+            raise ApiQueryError(f"positionSide/dual 返回异常: {d!r}"[:200])
+        return d
+    res = _retry(_call)
+    if res is None:
+        raise ApiQueryError("get_position_mode 查询失败（重试耗尽）")
+    v = res.get("dualSidePosition")
+    return v is True or str(v).lower() == "true"
+
+
 def _validate_sl_order(
     order_type: str, side: str,
     stop_price: float, entry_price: float | None,

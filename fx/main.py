@@ -668,8 +668,37 @@ async def _sync_positions_on_startup() -> None:
         logger.error(f"[startup_sync] 对齐失败: {e}", exc_info=True)
 
 
+async def _verify_hedge_mode_or_exit() -> None:
+    """[fix #16] 启动时向交易所确认对冲模式；非对冲或无法确认 → 告警并拒绝启动。
+    （代码按对冲模式编写：positionSide=LONG/SHORT，单向模式下对账与保护单会全部错位。）"""
+    from shared import binance_api as _b
+    loop = asyncio.get_running_loop()
+    try:
+        dual = await loop.run_in_executor(None, _b.get_position_mode)
+    except Exception as e:
+        msg = f"🚨 无法确认账户持仓模式，拒绝启动：{str(e)[:120]}"
+        logger.critical(f"[main] {msg}")
+        try:
+            from shared.notifier import notify_async
+            await notify_async(msg)
+        except Exception:
+            pass
+        raise SystemExit(2)
+    if not dual:
+        msg = "🚨 账户当前为单向持仓模式，本系统要求对冲模式(Hedge Mode)，拒绝启动。请在币安合约设置中切换后重启。"
+        logger.critical(f"[main] {msg}")
+        try:
+            from shared.notifier import notify_async
+            await notify_async(msg)
+        except Exception:
+            pass
+        raise SystemExit(2)
+    logger.info("[main] 持仓模式校验通过：对冲模式")
+
+
 async def main() -> None:
     logger.info("[main] fx 交易系统 V3.0 启动")
+    await _verify_hedge_mode_or_exit()
 
     # ── 临时诊断（定位后删除）────────────────────────────────────────────────
     # 启动事件循环看门狗线程：检测阻塞 > 2s 时 dump 所有线程堆栈
