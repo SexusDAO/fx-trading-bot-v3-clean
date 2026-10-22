@@ -2164,6 +2164,18 @@ class SignalWatcher:
             logger.error(f'[recheck] 价格位移重挂：旧单已撤但新单注册失败 {sym}，旧条目保留继续监控（limit_order_id 已置空）: {e}')
             raise
 
+    async def cancel_signal(self, symbol: str, reason: str = "") -> bool:
+        """[fix #32] 公开接口：撤销某标的的监控挂单并移除条目（供 scanner 竞争替换使用）。
+        复用 _cancel_and_remove 的撤单确认流程；撤单失败/结果未知/已成交时条目保留。
+        返回 True 表示条目已确认移除（可安全占用该槽位），False 表示未移除。"""
+        async with self._lock:
+            entry = self._watched.get(symbol)
+        if entry is None:
+            return True
+        await self._cancel_and_remove(symbol, entry, reason or "外部请求撤销")
+        async with self._lock:
+            return symbol not in self._watched
+
     async def _cancel_and_remove(self, sym: str, entry: WatchEntry, reason: str) -> None:
         """
         撤销 entry 的限价单并从监控队列移除。

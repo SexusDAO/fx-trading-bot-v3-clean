@@ -3060,18 +3060,12 @@ def _filter_and_register_signals(
                             f"[scanner] {sym} 替换 {_min_sym}: 新分{_sig_score} > 旧分{_min_score}，"
                             f"撤旧挂新"
                         )
-                        if _min_entry.limit_order_id:
-                            try:
-                                import asyncio as _asio2
-                                await _asio2.get_event_loop().run_in_executor(
-                                    None, lambda: api.cancel_all_orders(_min_sym)
-                                )
-                            except Exception as _ce:
-                                logger.warning(f"[scanner] 撤低分挂单 {_min_sym} 失败: {_ce}")
-                        async with signal_watcher._lock:
-                            signal_watcher._watched.pop(_min_sym, None)
-                        if _ws_ref is not None:
-                            _ws_ref.unsubscribe(_min_sym)
+                        # [fix #32] 经 signal_watcher 公开接口撤单并移除；撤单失败/结果未知/已成交时条目保留，
+                        #   不占用该槽位，本次新信号跳过（下一轮扫描再比较）。
+                        _removed = await signal_watcher.cancel_signal(_min_sym, "高分信号替换低分挂单")
+                        if not _removed:
+                            logger.warning(f"[scanner] 撤低分挂单 {_min_sym} 未确认，保留条目，{sym} 本轮跳过")
+                            continue
 
                     async def _on_trigger(signal, _sw=signal_watcher):
                         """
