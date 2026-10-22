@@ -1,0 +1,931 @@
+    # ── 第四步：信号汇总与排序 ────────────────────────────────────────────────
+    # v3.34: 槽位过滤已后移到评分过滤之后，先将 signals_raw 赋给 avail_signals
+    avail_signals = list(signals_raw)
+
+    # ── #1 相关性过滤：同方向同策略集中持仓保护 ─────────────────────────────────
+    from config import CORR_MAX_REVERSAL_SAME_DIR, CORR_MAX_PULLBACK_SAME_DIR, CORR_MAX_SAME_DIR_TOTAL
+    from shared.state import get_all_positions as _all_pos
+    _open_pos = _all_pos()
+    # 统计已有持仓的方向×策略分布
+    _rev_long  = sum(1 for p in _open_pos if p.get("mode") == "reversal"  and p.get("direction","").upper() == "LONG"  and p.get("status") in ("open","pending"))
+    _rev_short = sum(1 for p in _open_pos if p.get("mode") == "reversal"  and p.get("direction","").upper() == "SHORT" and p.get("status") in ("open","pending"))
+    _pb_long   = sum(1 for p in _open_pos if p.get("mode") == "pullback"  and p.get("direction","").upper() == "LONG"  and p.get("status") in ("open","pending"))
+    _pb_short  = sum(1 for p in _open_pos if p.get("mode") == "pullback"  and p.get("direction","").upper() == "SHORT" and p.get("status") in ("open","pending"))
+    _corr_filtered = []
+    for sig in avail_signals:
+        _mode = sig.get("sig_type", "pullback")
+        _dir  = sig["direction"].upper()
+        _reject_reason = ""
+        if _mode == "reversal":
+            _cnt = _rev_long if _dir == "LONG" else _rev_short
+            if _cnt >= CORR_MAX_REVERSAL_SAME_DIR:
+                _reject_reason = f"相关性过滤: {_dir} reversal 已有{_cnt}个持仓>={CORR_MAX_REVERSAL_SAME_DIR}"
+        elif _mode == "pullback":
+            _cnt = _pb_long if _dir == "LONG" else _pb_short
+            if _cnt >= CORR_MAX_PULLBACK_SAME_DIR:
+                _reject_reason = f"相关性过滤: {_dir} pullback 已有{_cnt}个持仓>={CORR_MAX_PULLBACK_SAME_DIR}"
+        elif _mode == "range_bounce":
+            # range_bounce 只做多，和 pullback LONG 共享计数器
+            _cnt = _pb_long
+            if _cnt >= CORR_MAX_PULLBACK_SAME_DIR:
+                _reject_reason = f"相关性过滤: LONG range_bounce+pullback 已有{_cnt}个>={CORR_MAX_PULLBACK_SAME_DIR}"
+        if not _reject_reason:
+            # 合计上限（reversal+pullback+range_bounce 同方向）
+            _total_long  = _rev_long  + _pb_long
+            _total_short = _rev_short + _pb_short
+            _total = _total_long if _dir == "LONG" else _total_short
+            if _mode in ("reversal", "pullback", "range_bounce") and _total >= CORR_MAX_SAME_DIR_TOTAL:
+                _reject_reason = f"相关性过滤: {_dir} reversal+pullback+range_bounce 合计{_total}>={CORR_MAX_SAME_DIR_TOTAL}"
+        if _reject_reason:
+            result["rejected"].append({"symbol": sig["symbol"], "reason": _reject_reason})
+            logger.info(f"[scanner] {sig['symbol']} {_reject_reason}")
+            continue
+        # 通过：更新计数器，供后续信号参考
+        if _mode == "reversal" and _dir == "LONG":  _rev_long  += 1
+        if _mode == "reversal" and _dir == "SHORT": _rev_short += 1
+        if _mode == "pullback" and _dir == "LONG":  _pb_long   += 1
+        if _mode == "pullback" and _dir == "SHORT": _pb_short  += 1
+        if _mode == "range_bounce":                 _pb_long   += 1  # 共享 pullback LONG 计数器
+        _corr_filtered.append(sig)
+    avail_signals = _corr_filtered
+
+    # ── 空单 BTC 协同过滤（v3.5 重写）──────────────────────────────────────────
+    # 熊市（down）：顺势空单直接放行——这是最需要放宽的场景
+    # 震荡（neutral）：空单需 RSI4H>65 或 funding>0
+    # 牛市（up）：空单需 RSI4H>=75 且 funding>0.00005（真正超买）
+    _btc_neutral = _btc_trend not in ("up", "down")
+    filtered_shorts = []
+    for sig in avail_signals:
+        if sig["direction"] != "SHORT":
+            filtered_shorts.append(sig)
+            continue
+        ind     = sig["ind"]
+        # 问题四修复：funding 在 sig 顶层，不在 ind 里
+        funding = float(sig.get("funding", ind.get("funding", ind.get("funding_rate", 0))))
+        rsi_4h  = float(ind.get("rsi_4h", 50))
+        if _btc_trend == "down":
+            # 熊市顺势空，仅要求不是极端负费率
+            # v3.41.1: 门槛从 -0.05% 放宽到 BTC_BEAR_SHORT_MIN_FUNDING (-0.15%)
+            # 日报会记录被拒标的和费率，供人工复查是否需要进一步放宽
+            try:
+                from config import BTC_BEAR_SHORT_MIN_FUNDING as _bear_short_min_fr
+            except ImportError:
+                _bear_short_min_fr = -0.0015
+            if funding >= _bear_short_min_fr:
+                filtered_shorts.append(sig)
+                logger.info(f"[scanner] {sig['symbol']} 空单熊市顺势通过: funding={funding:.5f} rsi4h={rsi_4h:.1f}")
+            else:
+                result["rejected"].append({"symbol": sig["symbol"],
+                    "reason": f"熊市空单被拒（费率极端负{funding*100:.4f}% < {_bear_short_min_fr*100:.2f}%）"})
+        elif _btc_neutral:
+            # 震荡：需要一定RSI或资金费率支撑
+            if rsi_4h >= 65 or funding > 0:
+                filtered_shorts.append(sig)
+                logger.info(f"[scanner] {sig['symbol']} 空单震荡通过: rsi4h={rsi_4h:.1f} funding={funding:.5f}")
+            else:
+                result["rejected"].append({"symbol": sig["symbol"],
+                    "reason": f"震荡空单被拒(RSI4H={rsi_4h:.1f}<65 且 funding={funding:.5f}<=0)"})
+        else:  # btc up
+            # 牛市：需要真正超买
+            if rsi_4h >= 75 and funding >= 0.00005:
+                filtered_shorts.append(sig)
+                logger.info(f"[scanner] {sig['symbol']} 空单牛市超买通过: rsi4h={rsi_4h:.1f} funding={funding:.5f}")
+            else:
+                result["rejected"].append({"symbol": sig["symbol"],
+                    "reason": f"牛市禁空(RSI4H={rsi_4h:.1f}<75 or funding={funding:.5f}<0.00005)"})
+    avail_signals = filtered_shorts
+
+    # 亏损黑名单已在并行扫描前计算，此处标记为已提前过滤（保留 rejected 记录）
+    filtered_bl = []
+    for sig in avail_signals:
+        if sig["symbol"] in _loss_blacklist:
+            result["rejected"].append({"symbol": sig["symbol"],
+                "reason": f"累计亏损黑名单(>={_LOSS_THRESHOLD}U近期)"})
+        else:
+            filtered_bl.append(sig)
+    avail_signals = filtered_bl
+
+    # ── ② 新闻信号过滤（v3.8，超跌解锁 v3.9）──────────────────────────────────
+    # bearish 新闻 → LONG 一票否决（默认）
+    # 但是有一种超跌解锁情况：利空新闻已发布超过48h且已跌 > 60%且 RSI_1h < 25，
+    #   说明市场已充分定价利空，进入超卖反弹阶段，此时 reversal LONG 才合理
+    # 参考：DEXE 2026年7月事件—事件后第3天从最低点反弹+232%
+    if _NEWS_SIGNAL_OK:
+        news_filtered = []
+        for sig in avail_signals:
+            sym_base = sig["symbol"].replace("USDT", "")
+            try:
+                nb = _get_news_bias(sym_base)
+            except Exception:
+                nb = None
+            sig["ind"]["news_bias"] = nb  # 存入 ind，供后续日志 / recheck 使用
+
+            if nb == "bearish" and sig["direction"] == "LONG":
+                # 检查超跌解锁条件（v3.9）
+                # 条件：必须是 reversal（超卖反弹）且同时满足：
+                #   1. 新闻发布时间 > 48小时前（即 news 最新一条时间 < 当前-48h）
+                #   2. 该币 1h RSI < 25（深度超卖）
+                #   3. 24H 涨跌已转正（止跌信号）
+                # 三项全部满足，才解锁，否则一票否决
+                unlock = False
+                unlock_reason = ""
+
+                if sig.get("sig_type") == "reversal":
+                    rsi_1h = float(sig["ind"].get("rsi_1h", sig["ind"].get("rsi", 100)))
+                    chg24_v = float(sig.get("chg24", 0))  # 正值 = 涨
+                    # 用 get_news_bias_detail 获取新闻发布时间
+                    try:
+                        from shared.news_signal import get_news_bias_detail as _ns_detail
+                        _nd = _ns_detail(sym_base)
+                        news_age_h = _nd.get("news_age_h", 0.0)
+                    except Exception:
+                        news_age_h = 0
+
+                    if rsi_1h < 25 and chg24_v > 0 and news_age_h > 48:
+                        unlock = True
+                        unlock_reason = (
+                            f"bearish新闻已{news_age_h:.0f}h前, "
+                            f"RSI_1h={rsi_1h:.1f}<25 深度超卖+24H已转正={chg24_v:+.1f}%"
+                        )
+
+                if unlock:
+                    sig["news_unlock"] = True
+                    logger.warning(
+                        f"[scanner] ② {sig['symbol']} LONG reversal 触发超跌解锁: {unlock_reason}"
+                    )
+                else:
+                    result["rejected"].append({
+                        "symbol": sig["symbol"],
+                        "reason": "利空新闻一票否决 LONG（bearish news veto）",
+                    })
+                    logger.warning(f"[scanner] ② {sig['symbol']} LONG 被利空新闻一票否决")
+                    continue
+
+            # caution：攻击事件+已快速响应，不否决但评分-10
+            # v3.41: LLM 复核——实际利好则降级为 neutral，比关键词更严重则升级为一票否决
+            if nb == "caution" and sig["direction"] == "LONG":
+                try:
+                    from config import LLM_JUDGE_ENABLED, LLM_JUDGE_NEWS
+                    if LLM_JUDGE_ENABLED and LLM_JUDGE_NEWS:
+                        from shared.news_signal import _fetch_raw_news as _get_raw_txt
+                        _news_items = _get_raw_txt(sym_base)
+                        _raw_news = ' | '.join(
+                            str(i.get('title', '') or i.get('content', ''))
+                            for i in _news_items[:3]
+                        ) if _news_items else ''
+                        if _raw_news:
+                            from shared.llm_judge import judge_news_sentiment_llm
+                            _ns = judge_news_sentiment_llm(
+                                sig['symbol'], _raw_news, sig['direction'])
+                            if _ns == 'bullish':
+                                nb = 'neutral'
+                                logger.info(f"[scanner] ② {sig['symbol']} LLM复核 caution→neutral")
+                            elif _ns == 'bearish':
+                                result['rejected'].append({'symbol': sig['symbol'],
+                                    'reason': 'LLM新闻语义: caution升级为bearish，一票否决'})
+                                logger.warning(
+                                    f"[scanner] ② {sig['symbol']} LLM caution→bearish 一票否决")
+                                continue
+                except Exception as _ne:
+                    logger.debug(f"[scanner] {sym_base} 新闻LLM跳过: {_ne}")
+                if nb == "caution":  # 未被 LLM 改变，执行原有评分惩罚
+                    sig["ind"]["final_score"] = max(0, sig["ind"].get("final_score", 0) - 10)
+                    logger.info(f"[scanner] ② {sig['symbol']} LONG caution新闻（攻击+快速响应），评分-10")
+
+            if nb == "bullish" and sig["direction"] == "LONG":
+                sig["news_exempt"] = True  # 标记：利好新闻豁免，后续 BTC 熊市过滤直接放行
+                logger.info(f"[scanner] ② {sig['symbol']} LONG 有利好新闻，标记 news_exempt")
+
+            if nb == "bearish" and sig["direction"] == "SHORT":
+                # 只有明确利空（bearish）才豁免牛市限制
+                # caution（攻击事件+已快速响应）不应豁免：项目正在处理，价格短暂下跌后往往反弹，做空豁免反而危险
+                sig["news_exempt"] = True  # 利空新闻 → SHORT 豁免 BTC 牛市限制
+                logger.info(f"[scanner] ② {sig['symbol']} SHORT 有利空新闻(bearish)，标记 news_exempt")
+
+            news_filtered.append(sig)
+        avail_signals = news_filtered
+        logger.info(f"[scanner] ② 新闻过滤后剩余信号 {len(avail_signals)} 个")
+
+    # ── ③ BTC 4H 空头排列时，硬性禁止做多 reversal（v3.5）────────────────────
+    # 复用现有 _btc_trend 判断（EMA9<EMA20<EMA50 = down）
+    # 熊市中做多 reversal = 对抗整体流动性收缩，系统性风险极高
+    # 豁免（v3.7）：山寨币独立行情时豁免 BTC 空头过滤
+    #   ① 24H 涨幅 > 25%（极端独立行情）
+    #   ② 资金费率 > 0.05%（市场强烈压注多方向）
+    #   ③ 量比 > 3 且 24H 涨幅 > 15%（量价共振）
+    #   ④ 利好新闻（news_exempt=True）（v3.8）
+    if _btc_trend == "down":
+        btc_bear_filtered = []
+        for sig in avail_signals:
+            if sig["direction"] == "LONG" and sig.get("sig_type") == "reversal":
+                chg24_s    = abs(float(sig.get("chg24", 0)))
+                funding_s  = float(sig.get("funding", sig["ind"].get("funding", 0)))
+                vol_ratio_s = float(sig["ind"].get("vol_ratio", 0))
+                # 豁免检查
+                exempt = False
+                exempt_reason = ""
+                if sig.get("news_exempt"):
+                    exempt = True
+                    exempt_reason = f"利好新闻豁免 (news_bias=bullish)"
+                elif chg24_s > 30:   # v3.21: 25→30%，仅极端独立行情才豁免
+                    exempt = True
+                    exempt_reason = f"24H涨幅极端 {chg24_s:.1f}%>30%"
+                elif funding_s > 0.002:  # v3.21: 0.0005→0.002，0.05%太常见，收紧到0.2%
+                    exempt = True
+                    exempt_reason = f"资金费率 {funding_s*100:.3f}%>0.2%"
+                elif vol_ratio_s > 3 and chg24_s > 15:
+                    exempt = True
+                    exempt_reason = f"量比 {vol_ratio_s:.1f}>3 且涨幅 {chg24_s:.1f}%>15%"
+
+                if exempt:
+                    btc_bear_filtered.append(sig)
+                    logger.info(
+                        f"[scanner] ③ {sig['symbol']} LONG reversal 豁免 BTC熊市过滤: {exempt_reason}"
+                    )
+                else:
+                    result["rejected"].append({
+                        "symbol": sig["symbol"],
+                        "reason": f"BTC 4H空头排列禁止做多reversal (btc_trend=down)",
+                    })
+                    logger.info(f"[scanner] ③ {sig['symbol']} LONG reversal 被BTC空头硬性拦截")
+            else:
+                btc_bear_filtered.append(sig)
+        avail_signals = btc_bear_filtered
+        logger.info(f"[scanner] ③ BTC空头：过滤后剩余信号 {len(avail_signals)} 个")
+
+    # ── BTC 趋势加减分 + CG bonus（与 paper_scanner 对齐）─────────────────────
+    _cg_import_ok = False
+    try:
+        from shared.coinglass_api import score_symbol_cg_bonus as _cg_bonus_fn
+        _cg_import_ok = True
+    except Exception:
+        pass
+
+    for sig in avail_signals:
+        ind        = sig["ind"]
+        direction  = sig["direction"]
+        # signal_strength → base_score（strong=70, medium=50, weak=30）
+        from config import SCORE_BASE_STRONG, SCORE_BASE_MEDIUM, SCORE_BASE_WEAK
+        _strength = sig.get("signal_strength", ind.get("signal_strength", "medium"))
+        _base_map = {"strong": SCORE_BASE_STRONG, "medium": SCORE_BASE_MEDIUM, "weak": SCORE_BASE_WEAK}
+        base_score = _base_map.get(_strength, SCORE_BASE_MEDIUM)
+
+        # BTC 趋势 ±5 分
+        btc_adj = 0
+        if   _btc_trend == "up"   and direction == "LONG":  btc_adj = +5
+        elif _btc_trend == "up"   and direction == "SHORT": btc_adj = -5
+        elif _btc_trend == "down" and direction == "LONG":  btc_adj = -5
+        elif _btc_trend == "down" and direction == "SHORT": btc_adj = +5
+        if btc_adj:
+            logger.debug(f"[scanner] {sig['symbol']} btc_trend={_btc_trend} adj={btc_adj:+d}")
+
+        # CG bonus（清算热力图 + 巨鲸 + KOL，失败自动跳过）
+        cg_bonus = 0
+        if _cg_import_ok:
+            try:
+                mark = float(_get_mark_price(sig["symbol"]).get("markPrice", 0))
+                cg_bonus = _cg_bonus_fn(sig["symbol"], direction, mark, ind)
+                cg_bonus = max(-10, min(10, cg_bonus))  # v3.65: clip ±15→±10，CG数据不100%可靠，收窄防单源一票否决
+            except Exception:
+                pass
+
+        # ── v3.38 策略×市场模式适配评分（加入熊市强度感知）────────────────────
+        # reversal=逆势（胜率低）pullback=顺势（趋势加持）range_bounce=区间依赖
+        _sig_type = sig.get("sig_type", ind.get("sig_type", "pullback"))
+        strategy_adj = 0
+
+        # ── v3.58 市场周期阶段加分（初期/中段/末期区分）───────────────────────
+        # early_bull: breakout信号最佳(+5)，reversal SHORT最危险(-5)
+        # mid_bull:   pullback信号最佳(+5)，趋势跟随效果最好
+        # late_bull:  所有做多信号降权(-5)，趋势即将耗尽
+        try:
+            from shared.risk_manager import get_market_cycle_phase as _gcyc
+            _cycle = _gcyc()
+            ind["market_cycle"] = _cycle
+            if _cycle == "early_bull":
+                if _sig_type == "breakout" and direction == "LONG":
+                    strategy_adj += 5
+                elif _sig_type == "reversal" and direction == "SHORT":
+                    strategy_adj -= 5
+            elif _cycle == "mid_bull":
+                if _sig_type == "pullback" and direction == "LONG":
+                    strategy_adj += 5
+            elif _cycle == "late_bull":
+                if direction == "LONG" and _sig_type in ("pullback", "reversal", "breakout"):
+                    strategy_adj -= 5
+                    logger.info(f"[scanner] {sig['symbol']} late_bull 做多降权 -5")
+        except Exception:
+            pass
+        if _mkt_mode == "bear":
+            # v3.38: 读取熊市强度，区分三档惩罚/奖励
+            try:
+                from shared.risk_manager import get_bear_strength as _get_bear_str
+                _bear_str = _get_bear_str() or "weak"
+            except Exception:
+                _bear_str = "weak"
+            if _sig_type == "reversal" and direction == "LONG":
+                # 熊市逆势做多：强熊惩罚更重
+                strategy_adj = -15 if _bear_str == "strong" else \
+                               -12 if _bear_str == "moderate" else -10
+            elif _sig_type == "pullback" and direction == "SHORT":
+                # 熊市顺势做空：强熊加分更多
+                strategy_adj = +10 if _bear_str == "strong" else \
+                               +7  if _bear_str == "moderate" else +5
+            elif _sig_type == "range_bounce":
+                # 强熊下区间支撑失败概率更高
+                strategy_adj = -10 if _bear_str == "strong" else \
+                               -7  if _bear_str == "moderate" else -5
+            if strategy_adj:
+                logger.info(f"[scanner] {sig['symbol']} bear强度={_bear_str} "
+                            f"strategy_adj={strategy_adj:+d} "
+                            f"(type={_sig_type} dir={direction})")
+        elif _mkt_mode == "bull":
+            if _sig_type == "reversal" and direction == "SHORT":
+                strategy_adj = -10  # 牛市逆势做空：系统性风险高
+            elif _sig_type == "pullback" and direction == "LONG":
+                strategy_adj = +5   # 牛市顺势做多：趋势加持
+            elif _sig_type == "range_bounce":
+                strategy_adj = +5   # 牛市支撑更可靠
+            if strategy_adj:
+                logger.info(f"[scanner] {sig['symbol']} strategy_adj={strategy_adj:+d} "
+                            f"(mkt=bull type={_sig_type} dir={direction})")
+        elif _mkt_mode == "range":
+            if _sig_type == "breakout":
+                strategy_adj = -5   # 震荡市突破信号假突破概率高
+            elif _sig_type == "reversal":
+                strategy_adj = +5   # 震荡市反转信号胜率更高
+            elif _sig_type == "range_bounce":
+                strategy_adj = +10  # 震荡市是 range_bounce 最适合的环境
+            if strategy_adj:
+                logger.info(f"[scanner] {sig['symbol']} strategy_adj={strategy_adj:+d} "
+                            f"(mkt=range type={_sig_type} dir={direction})")
+
+        # v3.49.2 stop_hunt 策略评分覆盖
+        if _sig_type == "stop_hunt":
+            from config import STOP_HUNT_BASE_STRONG, STOP_HUNT_BASE_MEDIUM
+            _sh_strength = (sig.get("signal_strength")
+                            or (sig.get("reason") or {}).get("signal_strength", "medium"))
+            base_score = STOP_HUNT_BASE_STRONG if _sh_strength == "strong" else STOP_HUNT_BASE_MEDIUM
+            # 修复3：stop_hunt 不受 btc_adj 影响
+            # 止损猎杀是局部流动性事件，与 BTC 大趋势关联度低
+            # btc_adj 会系统性推向 SHORT（BTC 偏跌时），导致逆势开仓
+            btc_adj = 0
+            # 覆盖前面通用 strategy_adj
+            if _mkt_mode == "bull" and direction == "LONG":
+                strategy_adj = +5
+            elif _mkt_mode == "bull" and direction == "SHORT":
+                strategy_adj = -5
+            elif _mkt_mode == "range":
+                strategy_adj = 0
+            elif _mkt_mode == "bear" and direction == "SHORT":
+                strategy_adj = +5
+            elif _mkt_mode == "bear" and direction == "LONG":
+                strategy_adj = -15   # 熊市不做多头猎杀
+            logger.info(
+                f"[scanner] {sig['symbol']} stop_hunt base={base_score} "
+                f"btc_adj=0(cleared) strategy_adj={strategy_adj:+d} "
+                f"(mkt={_mkt_mode} dir={direction} strength={_sh_strength})"
+            )
+
+        # v3.60 oi_divergence 策略评分覆盖
+        elif _sig_type == "oi_divergence":
+            from config import OI_DIV_BASE_STRONG, OI_DIV_BASE_MEDIUM
+            _oi_strength = (sig.get("reason") or {}).get("signal_strength", "medium")
+            base_score = OI_DIV_BASE_STRONG if _oi_strength == "strong" else OI_DIV_BASE_MEDIUM
+            btc_adj = btc_adj // 2
+            if _mkt_mode == "bear" and direction == "LONG":
+                strategy_adj = -10
+            elif _mkt_mode == "bull" and direction == "SHORT":
+                strategy_adj = -10
+            elif _mkt_mode == "range":
+                strategy_adj = +8
+            logger.info(
+                f"[scanner] {sig['symbol']} oi_divergence base={base_score} "
+                f"btc_adj={btc_adj:+d}(half) strategy_adj={strategy_adj:+d} "
+                f"(mkt={_mkt_mode} dir={direction} strength={_oi_strength})"
+            )
+
+        # v3.61 ema_trend 策略评分覆盖
+        elif _sig_type == "ema_trend":
+            from config import EMA_TREND_BASE_STRONG, EMA_TREND_BASE_MEDIUM
+            _et_strength = (sig.get("reason") or {}).get("signal_strength", "medium")
+            base_score = EMA_TREND_BASE_STRONG if _et_strength == "strong" else EMA_TREND_BASE_MEDIUM
+            # strategy_adj 市场环境（v3.83：按方向区分，做空在熊市顺势、牛市逆势）
+            _et_is_short = str(sig.get("direction", "")).upper() == "SHORT"
+            if _mkt_mode == "bull":
+                strategy_adj = -15 if _et_is_short else +8
+            elif _mkt_mode == "bear":
+                strategy_adj = +8 if _et_is_short else -15
+            elif _mkt_mode == "range":
+                strategy_adj = -5   # 震荡市 EMA 排列容易失效
+            logger.info(
+                f"[scanner] {sig['symbol']} ema_trend base={base_score} "
+                f"btc_adj={btc_adj:+d} strategy_adj={strategy_adj:+d} "
+                f"(mkt={_mkt_mode} strength={_et_strength})"
+            )
+
+        # ── v3.31 大行情恢复窗口：评分额外 -10 ─────────────────────────────
+        post_shock_adj = -10 if _post_shock else 0
+        if post_shock_adj:
+            logger.info(f"[scanner] {sig['symbol']} post_shock_adj={post_shock_adj:+d}")
+
+        # ── v3.46 中波动档评分惩罚 ──────────────────────────────────────────
+        from config import ATR_TIER_MID_SCORE_ADJ
+        _vol_tier = sig["ind"].get("_vol_tier", "high")
+        atr_tier_adj = ATR_TIER_MID_SCORE_ADJ if _vol_tier == "mid_vol" else 0
+        if atr_tier_adj:
+            logger.info(f"[scanner] {sig['symbol']} atr_tier_adj={atr_tier_adj:+d} (mid_vol档)")
+
+        # ── v3.46 脉冲大涨做空惩罚 ──────────────────────────────────────────
+        _pulse_penalty = (sig.get("reason") or {}).get("pulse_short_penalty", 0)
+        if _pulse_penalty:
+            logger.info(f"[scanner] {sig['symbol']} pulse_short_penalty={_pulse_penalty:+d}")
+
+        # ── v3.58 Taker Buy/Sell 买卖比加分 ────────────────────────────────────
+        # 买方主导（>0.55）+3分，卖方主导（<0.45）-3分，中性不调
+        # 只对顺方向有效：LONG时需买方主导，SHORT时需卖方主导
+        _tbr = ind.get("taker_buy_ratio", 0.5)
+        taker_adj = 0
+        if _sig_type not in ("funding_arb",):
+            if direction == "LONG" and _tbr > 0.55:
+                taker_adj = +3
+            elif direction == "LONG" and _tbr < 0.45:
+                taker_adj = -3
+            elif direction == "SHORT" and _tbr < 0.45:
+                taker_adj = +3
+            elif direction == "SHORT" and _tbr > 0.55:
+                taker_adj = -3
+        if taker_adj:
+            logger.debug(f"[scanner] {sig['symbol']} taker_buy_ratio={_tbr:.3f} taker_adj={taker_adj:+d}")
+
+        new_score = min(100, max(0, base_score + btc_adj + cg_bonus + strategy_adj + post_shock_adj + atr_tier_adj + _pulse_penalty + taker_adj))
+        # 新增三个加分项（hub 数据；在现有评分之后叠加，总分上限 100）
+        new_score, _bonus_info = _apply_score_bonuses(sig["symbol"], direction, _sig_type, new_score)
+        if new_score != base_score:
+            logger.info(f"[scanner] {sig['symbol']} score {base_score}→{new_score} "
+                        f"(btc={btc_adj:+d} cg={cg_bonus:+d} strat={strategy_adj:+d} shock={post_shock_adj:+d} tier={atr_tier_adj:+d} pulse={_pulse_penalty:+d} taker={taker_adj:+d})")
+        ind["final_score"]    = new_score
+        ind["btc_trend"]      = _btc_trend
+        ind["btc_adj"]        = btc_adj
+        ind["cg_bonus"]       = cg_bonus
+        ind["strategy_adj"]   = strategy_adj
+        ind["post_shock_adj"] = post_shock_adj
+        ind["atr_tier_adj"]   = atr_tier_adj
+        ind["taker_adj"]      = taker_adj
+        ind["score_taker_bonus"]    = _bonus_info["taker"]
+        ind["score_range_bonus"]    = _bonus_info["range"]
+        ind["score_volprice_bonus"] = _bonus_info["volprice"]
+
+    # ── 宏观保守模式：过滤 reversal/breakout，其余信号评分门槛+10 ────────────
+    if _macro_conservative:
+        _macro_filtered = []
+        for sig in avail_signals:
+            _st = sig.get("sig_type", "")
+            if _st in ("reversal", "breakout"):
+                result["rejected"].append({"symbol": sig["symbol"],
+                    "reason": f"宏观保守模式：停止 {_st}（{_macro_event_desc}）"})
+                logger.info(f"[scanner] {sig['symbol']} 宏观保守：拦截 {_st}")
+                continue
+            # 其余策略评分 -10（等效于门槛提高10分）
+            sig["ind"]["final_score"] = max(0, sig["ind"].get("final_score", 0) - 10)
+            sig["ind"]["macro_adj"]   = -10
+            _macro_filtered.append(sig)
+        avail_signals = _macro_filtered
+        logger.info(f"[scanner] 宏观保守过滤后剩余信号 {len(avail_signals)} 个")
+
+    # ── 工作日 final_score 最低门槛过滤 ────────────────────────────────────
+    from config import MIN_SIGNAL_SCORE_WEEKDAY, MIN_SIGNAL_SCORE_WEEKEND
+    _is_weekend = _is_weekend_period(now)
+    if not _is_weekend:
+        _weekday_filtered = []
+        for sig in avail_signals:
+            sc = sig["ind"].get("final_score", 0)
+            if sc < MIN_SIGNAL_SCORE_WEEKDAY:
+                # ── v3.41 边界信号：45~55 分交给 LLM，其余直接拒绝 ────────────
+                _llm_rescued = False
+                try:
+                    from config import (LLM_JUDGE_ENABLED, LLM_JUDGE_BORDERLINE,
+                                        LLM_BORDERLINE_SCORE_MIN, LLM_BORDERLINE_SCORE_MAX,
+                                        LLM_JUDGE_MIN_CONFIDENCE)
+                    if (LLM_JUDGE_ENABLED and LLM_JUDGE_BORDERLINE
+                            and LLM_BORDERLINE_SCORE_MIN <= sc <= LLM_BORDERLINE_SCORE_MAX
+                            and sig.get('sig_type') != 'funding_arb'):
+                        from shared.llm_judge import judge_borderline_signal_llm
+                        _bl_v = judge_borderline_signal_llm(
+                            sig['symbol'], sig.get('sig_type', ''), sig.get('direction', ''),
+                            sc, sig['ind'], float(sig.get('chg24', 0)), _mkt_mode
+                        )
+                        if (_bl_v.get('decision') == 'open'
+                                and _bl_v.get('confidence', 0) >= LLM_JUDGE_MIN_CONFIDENCE):
+                            sig['ind']['final_score']    = MIN_SIGNAL_SCORE_WEEKDAY + 1
+                            sig['ind']['llm_bl_boosted'] = True
+                            sig['ind']['llm_reason']     = _bl_v.get('reason', '')
+                            logger.info(
+                                f"[scanner] {sig['symbol']} 边界LLM提升: "
+                                f"{sc}→{MIN_SIGNAL_SCORE_WEEKDAY+1} {_bl_v.get('reason','')}"
+                            )
+                            _llm_rescued = True
+                        else:
+                            result["rejected"].append({"symbol": sig["symbol"],
+                                "reason": f"边界信号LLM拒绝(score={sc}): {_bl_v.get('reason','')}"})
+                except Exception as _ble:
+                    logger.debug(f"[scanner] {sig['symbol']} 边界LLM跳过: {_ble}")
+                if not _llm_rescued:
+                    result["rejected"].append({"symbol": sig["symbol"],
+                        "reason": f"工作日低分过滤: score={sc}<{MIN_SIGNAL_SCORE_WEEKDAY}"})
+                    logger.debug(f"[scanner] {sig['symbol']} 工作日低分过滤 score={sc}")
+                    continue
+            _weekday_filtered.append(sig)
+        avail_signals = _weekday_filtered
+
+    # ── 周末评分上限（v3.3.4）：strong=60 / medium=70 独立门槛，cap 80 ──
+    # strong 信号豁免到 60（防止 BTC 下跌 -5 误杀 strong LONG），medium 保持 70 严格约束
+    if _is_weekend:  # v3.29: 已由上方 _is_weekend_period() 统一计算
+        _weekend_filtered = []
+        for sig in avail_signals:
+            sc = sig["ind"].get("final_score", 0)
+            _detail = sig.get("judge_detail") or sig.get("reason") or {}
+            _strength = _detail.get("signal_strength", "medium")
+            _min_sc = 60 if _strength == "strong" else 70
+            if sc < _min_sc:
+                result["rejected"].append({"symbol": sig["symbol"],
+                    "reason": f"周末低分过滤: score={sc}<{_min_sc}({_strength})"})
+                continue
+            if sc > 80:
+                sig["ind"]["final_score"] = 80
+                sig["ind"]["weekend_capped"] = True
+            _weekend_filtered.append(sig)
+        avail_signals = _weekend_filtered
+        logger.debug(f"[scanner] 周末模式：strong≥60/medium≥70 cap 80，过滤后 {len(avail_signals)} 个")
+
+        # ── v3.28 周末 breakout 仅放行 strong 信号 ────────────────────────────────────
+        # 周末成交量天然偏低，达标的 breakout 信号往往是「量能刚刚达标的边界信号」，质量天然偏弱
+        # strong 信号保留（真正放量突破），medium/weak 周末直接过滤
+        _weekend_filtered2 = []
+        for sig in avail_signals:
+            if sig.get("sig_type") == "breakout":
+                _detail2 = sig.get("judge_detail") or sig.get("reason") or {}
+                _strength2 = _detail2.get("signal_strength", "medium")
+                if _strength2 != "strong":
+                    result["rejected"].append({
+                        "symbol": sig["symbol"],
+                        "reason": f"周末 breakout 仅允许 strong 信号，当前={_strength2}"
+                    })
+                    logger.info(f"[scanner] 周末 breakout 过滤: {sig['symbol']} strength={_strength2}")
+                    continue
+            _weekend_filtered2.append(sig)
+        avail_signals = _weekend_filtered2
+        logger.debug(f"[scanner] 周末 breakout medium 过滤后 {len(avail_signals)} 个")
+
+    # ── v3.53 槽位过滤（后移到评分过滤之后）────────────────────────────────────────
+    # 只对「分数已达标」的信号消耗槽位，避免低分信号预占槽位导致高分信号被误拦
+    # v3.53: long_cnt/short_cnt 已改为只计 open 持仓，pending 挂单不占槽位
+    _scored_signals = avail_signals
+    avail_signals = []
+    _long  = long_cnt
+    _short = short_cnt
+    for sig in _scored_signals:
+        d = sig["direction"]
+        if d == "LONG"  and _long  >= _dyn_max_long:
+            result["rejected"].append({"symbol": sig["symbol"], "reason": "多单槽位已满"})
+            continue
+        if d == "SHORT" and _short >= _dyn_max_short:
+            result["rejected"].append({"symbol": sig["symbol"], "reason": "空单槽位已满"})
+            continue
+        avail_signals.append(sig)
+        if d == "LONG":  _long  += 1
+        else:            _short += 1
+
+    # v3.54: 按 final_score 降序排序（高分优先），同分时再按模式优先级/强度/量比
+    avail_signals.sort(key=lambda x: (
+        -x["ind"].get("final_score", 0),
+        SIGNAL_PRIORITY.get(x["sig_type"], 99),
+        SIGNAL_STRENGTH_ORDER.get(
+            (x.get("judge_detail") or x.get("reason") or {}).get("signal_strength", "medium"), 1
+        ),
+        -x["ind"].get("vol_ratio", 0)
+    ))
+
+    result["signals_final"] = len(avail_signals)
+
+    # ── 市场环境快照：注入所有信号（用于 trade_log 标注）─────────────────────
+    try:
+        # [fix] 复用本轮批量拉好的 _mark_price_map（资金费率均值不需要最新一刻的数据）；批量失败导致 map 为空时才再请求一次
+        _all_mp = list(_mark_price_map.values()) or (api.get_all_mark_prices() or [])
+        _avg_fr = (sum(abs(float(x.get("lastFundingRate", 0))) for x in _all_mp) / len(_all_mp)
+                   if _all_mp else 0.0)
+    except Exception:
+        _avg_fr = 0.0
+    # BTC ATR ratio（波动率代理指标）
+    try:
+        from shared.indicators import atr as _atr_fn
+        _btc_k1h   = api.get_klines("BTCUSDT", "1h", 20)
+        _btc_atr   = _atr_fn(_btc_k1h)
+        _btc_close = float(_btc_k1h[-1][4]) if _btc_k1h else 0.0
+        _btc_vol   = round(_btc_atr / _btc_close * 100, 4) if _btc_close > 0 else 0.0
+    except Exception:
+        _btc_vol = 0.0
+    _market_env = {
+        "btc_trend":        _btc_trend,           # up/down/neutral
+        "market_mode":      _mkt_mode,            # bull/bear/range
+        "market_volatility": _btc_vol,            # BTC ATR/price %
+        "funding_market":   round(_avg_fr * 100, 6),  # 全市场平均资费绝对值 %
+    }
+    for _sig in avail_signals:
+        _sig["market_env"] = _market_env
+        # ── v3.31 大行情恢复窗口：仓低 × 0.5 ───────────────────────────────────
+        if _post_shock:
+            _old_cap = _sig.get("position_size_cap", 0.5)
+            _sig["position_size_cap"] = round(_old_cap * 0.5, 3)
+            logger.info(f"[scanner] {_sig['symbol']} post_shock 降仓 cap {_old_cap}→{_sig['position_size_cap']}")
+        # ── v3.63 宏观保守模式：仓位 × 0.5（叠加在其他降仓之后）────────────────
+        if _macro_conservative:
+            _old_cap = _sig.get("position_size_cap", 0.5)
+            _sig["position_size_cap"] = round(_old_cap * 0.5, 3)
+            logger.debug(f"[scanner] {_sig['symbol']} 宏观保守降仓 cap {_old_cap}→{_sig['position_size_cap']}")
+        # 叠加市场情绪仓位系数（v3.38: 读当前 cap，含 post_shock 效果，不读原始值）
+        if _sig["direction"].upper() == "LONG" and _global_long_scale < 1.0:
+            _cur_cap = _sig.get("position_size_cap", 0.5)  # 已含 post_shock 降仓效果
+            _sig["position_size_cap"] = round(_cur_cap * _global_long_scale, 3)
+            logger.debug(f"[scanner] {_sig['symbol']} 市场情绪做多降仓 cap {_cur_cap}→{_sig['position_size_cap']}")
+        elif _sig["direction"].upper() == "SHORT" and _global_short_scale < 1.0:
+            _cur_cap = _sig.get("position_size_cap", 0.5)
+            _sig["position_size_cap"] = round(_cur_cap * _global_short_scale, 3)
+            logger.debug(f"[scanner] {_sig['symbol']} 市场情绪做空降仓 cap {_cur_cap}→{_sig['position_size_cap']}")
+
+    # ── 第五步：输出给 executor（通过 SignalWatcher 或直接调用）───────────────────
+    if not dry_run and avail_signals:
+        if signal_watcher is not None:
+            # 新路径：注册到 SignalWatcher，由实时价格驱动触发
+            import asyncio as _asyncio
+            from shared.signal_watcher import compute_entry_range
+
+            # ── 第一阶段（子线程）：耗时 IO 操作，预算每个信号的 entry_price ───────
+            import fx.executor as _executor_mod
+            from shared.calc_sl_tp import calc_sl_tp as _calc_sl_tp
+            from shared.liq_cache import get_liq_zones_cached as _liq_zones
+            from shared.indicators import atr as _calc_atr, ema as _calc_ema
+
+            prepared = []   # [(sig, entry_low, entry_high, expire_ts, ws_ref)]
+            _snap_by_sym = {}   # [v3.87 STEP2-2] 按标的保存触发快照，避免注册阶段读到上一个标的的残留变量
+            _ws_ref = getattr(signal_watcher, "_ws_listener", None)
+
+            for sig in avail_signals:
+                sym  = sig["symbol"]
+                mode = sig.get("sig_type", "pullback")
+                sig["mode"] = mode
+                try:
+                    # [fix] 优先复用本轮批量标记价格；但这里的 markPrice 会成为 pre_entry_price（入场价基准），
+                    #   批量数据取自扫描开始时，超过 _MARK_MAP_MAX_AGE_SEC 就视为过旧，改走单标的 REST 取最新价
+                    mp = None
+                    if time.monotonic() - _mark_price_map_ts <= _MARK_MAP_MAX_AGE_SEC:
+                        mp = _mark_price_map.get(sym)
+                    mp     = mp or api.get_mark_price(sym)
+                    mark_p = float(mp.get("markPrice", 0))
+                    sig["pre_entry_price"] = mark_p
+
+                    if mode == "breakout":
+                        expire_sec = 30 * 60
+                    else:
+                        # 按 ATR ratio 动态调整：低波动等更久，高波动快速失效
+                        from config import EXPIRE_LOW_VOL_H, EXPIRE_HIGH_VOL_H, EXPIRE_NORMAL_H, EXPIRE_LOW_VOL_THRESH, EXPIRE_HIGH_VOL_THRESH
+                        _atr_r = sig.get("ind", {}).get("atr_ratio", 3.0)
+                        if _atr_r < EXPIRE_LOW_VOL_THRESH:
+                            expire_sec = EXPIRE_LOW_VOL_H * 3600
+                        elif _atr_r > EXPIRE_HIGH_VOL_THRESH:
+                            expire_sec = EXPIRE_HIGH_VOL_H * 3600
+                        else:
+                            expire_sec = EXPIRE_NORMAL_H * 3600
+                    expire_ts  = time.time() + expire_sec
+
+                    # 预算 entry_price（耗时 IO，在子线程做）
+                    try:
+                        k1h    = api.get_klines(sym, "1h", 50)
+                        closed = k1h[:-1] if len(k1h) > 1 else k1h
+                        closes = [float(k[4]) for k in closed]
+                        atr_v  = _calc_atr(closed)
+                        ema20  = _calc_ema(closes, 20)
+                        # [v3.87 STEP2-2] 在每个标的自己的循环里保存快照（RSI1H/ATR/EMA20）
+                        try:
+                            from shared.indicators import rsi as _calc_rsi_snap
+                            _snap_by_sym[sym] = {
+                                "rsi": _calc_rsi_snap(closes) if len(closes) > 14 else 50.0,
+                                "atr": atr_v, "ema20": ema20,
+                            }
+                        except Exception:
+                            _snap_by_sym[sym] = {"rsi": 50.0, "atr": atr_v, "ema20": ema20}
+                        _range = "24h" if mode in ("reversal","funding_arb") else                                  "7d"  if mode == "breakout" else "3d"
+                        params = _calc_sl_tp(
+                            signal=sig, mark_price=mark_p, atr=atr_v,
+                            liq_zones={"long":  _liq_zones(sym,"LONG", mark_p, range_=_range),
+                                       "short": _liq_zones(sym,"SHORT",mark_p, range_=_range)},
+                            k1h=k1h, ema20=ema20,
+                        )
+                        if "error" not in params:
+                            sig["pre_entry_price"] = params["entry_price"]
+                            sig["pre_params"] = params
+                            sig["_entry_params_ok"] = True
+                        else:
+                            sig["_entry_params_ok"] = False
+                            sig["_calc_sl_tp_error"] = params.get("error", "")
+                            logger.debug(
+                                f"[scanner] {sym} calc_sl_tp 拒绝: {params.get('error','')}"
+                            )
+                        # [add] 追记 entry_params_ok 到 signal_analytics（patch 行， type=entry_params_patch）
+                        try:
+                            import json as _json
+                            _patch = {
+                                "type":            "entry_params_patch",
+                                "ts":              int(__import__('time').time() * 1000),
+                                "symbol":          sym,
+                                "mode":            mode,
+                                "direction":       sig.get("direction", ""),
+                                "entry_params_ok": sig["_entry_params_ok"],
+                                "calc_sl_tp_error": sig.get("_calc_sl_tp_error", None),
+                            }
+                            with open(SIGNAL_ANALYTICS_FILE, "a", encoding="utf-8") as _af:
+                                _af.write(_json.dumps(_patch, ensure_ascii=False) + "\n")
+                        except Exception as _wp:
+                            logger.debug(f"[scanner] {sym} entry_params_patch 写入失败: {_wp}")
+                    except Exception as _pe:
+                        logger.debug(f"[scanner] {sym} 预算 entry_price 失败，用 mark_price: {_pe}")
+
+                    # breakout: 传入 liq_zones 供清算区入场点计算
+                    _liq_l = _liq_r = None
+                    if mode == "breakout":
+                        try:
+                            _liq_l = _liq_zones(sym, "LONG",  mark_p, range_="7d")
+                            _liq_r = _liq_zones(sym, "SHORT", mark_p, range_="7d")
+                        except Exception:
+                            pass  # 失败降级，compute_entry_range 内部处理
+
+                    entry_low, entry_high, entry_p = compute_entry_range(
+                        sig, mark_p, liq_long=_liq_l, liq_short=_liq_r
+                    )
+
+                    # ── 回踩距离检查：若扫描时价格已在触发区间内，不等回踩直接进
+                    # 这说明信号是"贴着EMA20横走"而非"涨上去再回踩"
+                    # 处理：把区间上限收窄到"当前价以下"，强制等价格先离开再回踩
+                    # 等价于：只有价格先涨出 entry_high，然后回踩进入 [lo, mark_p*0.999] 才触发
+                    mode_sig = sig.get("sig_type", "pullback")
+                    direction_sig = sig.get("direction", "LONG").upper()
+                    if mode_sig == "pullback" and direction_sig == "LONG":
+                        if entry_low <= mark_p <= entry_high:
+                            # 当前价就在区间内——把上限收窄到"低于当前价 0.5%"
+                            # 让 signal_watcher 等价格先涨出去，再回踩才触发
+                            adjusted_high = mark_p * 0.995
+                            if adjusted_high > entry_low:
+                                logger.info(
+                                    f"[scanner] {sym} pullback: 扫描时价格已在触发区间内"
+                                    f"({mark_p:.4g} in [{entry_low:.4g},{entry_high:.4g}])"
+                                    f"，收窄上限到 {adjusted_high:.4g}，等回踩"
+                                )
+                                entry_high = adjusted_high
+                    elif mode_sig == "pullback" and direction_sig == "SHORT":
+                        if entry_low <= mark_p <= entry_high:
+                            adjusted_low = mark_p * 1.005
+                            if adjusted_low < entry_high:
+                                logger.info(
+                                    f"[scanner] {sym} pullback SHORT: 扫描时价格已在触发区间内"
+                                    f"，收窄下限到 {adjusted_low:.4g}，等反弹"
+                                )
+                                entry_low = adjusted_low
+
+                    prepared.append((sig, entry_low, entry_high, entry_p, expire_ts))
+                except Exception as e:
+                    logger.warning(f"[scanner] {sym} 预算失败: {e}")
+
+            # ── 第二阶段（主 loop）：add_signal 是纯内存操作，极快 ─────────────────
+            _MAX_PENDING_PER_DIR = 5   # v3.54: 每方向最多同时挂5个 pending 单
+
+            async def _do_register():
+                for sig, lo, hi, ep, exp in prepared:
+                    sym        = sig["symbol"]
+                    entry_p    = ep   # 限价单挂单价（来自 compute_entry_range）
+                    _sig_dir   = sig.get("direction", "LONG").upper()
+                    _sig_score = sig.get("ind", {}).get("final_score", 0)
+
+                    # ── v3.54: 每方向 pending 上限检查，超出则与最低分已挂单比较替换 ──
+                    async with signal_watcher._lock:
+                        _dir_pending = [
+                            (s, e) for s, e in signal_watcher._watched.items()
+                            if not e.triggered and not e.is_expired()
+                            and (e.signal or {}).get("direction", "").upper() == _sig_dir
+                        ]
+                    if len(_dir_pending) >= _MAX_PENDING_PER_DIR:
+                        # 找分最低的已挂单
+                        _min_sym, _min_entry = min(
+                            _dir_pending,
+                            key=lambda x: (x[1].signal or {}).get("ind", {}).get("final_score", 0)
+                        )
+                        _min_score = (_min_entry.signal or {}).get("ind", {}).get("final_score", 0)
+                        if _sig_score <= _min_score:
+                            logger.info(
+                                f"[scanner] {sym} 新信号分({_sig_score}) ≤ 已有最低分({_min_score})，"
+                                f"{_sig_dir} 挂单已满{_MAX_PENDING_PER_DIR}个，跳过"
+                            )
+                            continue
+                        # 新信号分更高，撤掉最低分的再挂新的
+                        logger.info(
+                            f"[scanner] {sym} 替换 {_min_sym}: 新分{_sig_score} > 旧分{_min_score}，"
+                            f"撤旧挂新"
+                        )
+                        if _min_entry.limit_order_id:
+                            try:
+                                import asyncio as _asio2
+                                await _asio2.get_event_loop().run_in_executor(
+                                    None, lambda: api.cancel_all_orders(_min_sym)
+                                )
+                            except Exception as _ce:
+                                logger.warning(f"[scanner] 撤低分挂单 {_min_sym} 失败: {_ce}")
+                        async with signal_watcher._lock:
+                            signal_watcher._watched.pop(_min_sym, None)
+                        if _ws_ref is not None:
+                            _ws_ref.unsubscribe(_min_sym)
+
+                    async def _on_trigger(signal, _sw=signal_watcher):
+                        """
+                        价格进入触发区间时调用。
+                        实时获取最新的 _ws_listener（防止断线重连后引用旧实例）。
+                        直接调 execute_signal，让 executor 以 entry_price（EMA20）下限价单。
+                        signal 里已有 pre_entry_price / pre_params，executor 会优先复用。
+                        """
+                        try:
+                            _ws_live = getattr(_sw, "_ws_listener", None)
+                            ok = await _executor_mod.execute_signal(signal, _ws_live)
+                            if ok:
+                                logger.info(f"[scanner] {signal['symbol']} 触发下单成功")
+                        except Exception as _e:
+                            logger.error(f"[scanner] {signal['symbol']} 触发下单失败: {_e}")
+
+                    # ── v3.67/v3.72 计算触发快照 + 竞争评分字段 ─────────────────
+                    _trigger_price = mark_p
+                    _trigger_rsi_1h = 50.0
+                    _breakout_ref = 0.0
+                    _ema20_at_trigger = 0.0
+                    _atr_at_trigger = 0.0
+                    # [v3.87 STEP2-2] 原写法用 'k1h' in dir() 判断闭包变量：实际读到的是预算循环里「最后一个标的」的 k1h/atr_v/ema20，
+                    #   且 breakout 判断用的 mode 也是残留值，导致所有信号的触发快照（RSI/ATR/EMA20/突破基准）都是别的币的数据。
+                    #   新：按标的从 _snap_by_sym 取值，mode 取自信号自身。已实测确认原写法读到残留值。
+                    try:
+                        _snap = _snap_by_sym.get(sym, {})
+                        if _snap:
+                            _trigger_rsi_1h   = _snap["rsi"]
+                            _atr_at_trigger   = _snap["atr"]
+                            _ema20_at_trigger = _snap["ema20"]
+                        _reason_dict = sig.get('reason', {}) or {}
+                        _dir = sig.get('direction', 'LONG').upper()
+                        if sig.get('sig_type') == 'breakout':
+                            _breakout_ref = _reason_dict.get('breakout_ref_high' if _dir == 'LONG' else 'breakout_ref_low', 0)
+                    except Exception as _snap_e:
+                        logger.debug(f"[scanner] {sym} 触发快照字段计算失败: {_snap_e}")
+
+                    await signal_watcher.add_signal(
+                        signal=sig,
+                        entry_low=lo,
+                        entry_high=hi,
+                        entry_price=entry_p,
+                        expire_ts=exp,
+                        on_trigger=_on_trigger,
+                        # v3.67 触发快照字段
+                        trigger_price=_trigger_price,
+                        trigger_rsi_1h=_trigger_rsi_1h,
+                        breakout_ref=_breakout_ref,
+                        ema20_at_trigger=_ema20_at_trigger,
+                        atr_at_trigger=_atr_at_trigger,
+                        # v3.72 竞争评分字段（score_created_at/expire 在 add_signal 里设默认值）
+                        score_created_at=time.time(),
+                        score_original_expire=exp,
+                    )
+                    result["placed"] += 1
+                    if _ws_ref is not None:
+                        _ws_ref.subscribe(sym)
+
+            try:
+                main_loop = getattr(signal_watcher, "_main_loop", None)
+                if main_loop and main_loop.is_running():
+                    fut = _asyncio.run_coroutine_threadsafe(_do_register(), main_loop)
+                    try:
+                        fut.result(timeout=15)  # add_signal 是内存写，正常 <1s。如果 _trigger 持锁超过 15s 才会超时
+                    except Exception as _timeout_err:
+                        _batch_syms = [s["symbol"] for s, *_ in prepared]
+                        logger.warning(
+                            f"[scanner] SignalWatcher.add_signal 超时或异常，本轮信号批次注册失败"
+                            f" (batch={_batch_syms}): {_timeout_err}"
+                        )
+                else:
+                    _asyncio.run(_do_register())
+            except Exception as _reg_err:
+                logger.warning(f"[scanner] SignalWatcher 注册失败: {_reg_err}")
+        else:
+            # 兼容老路径：signal_watcher=None 时直接同步执行
+            import executor
+            # scanner 在 run_in_executor 子线程里运行，使用同步包装器
+            for sig in avail_signals:
+                try:
+                    ok = executor.execute_signal_sync(sig, ws_listener=None)
+                    if ok:
+                        result["placed"] += 1
+                except Exception as e:
+                    logger.warning(f"[scanner] {sig['symbol']} 开仓失败: {e}")
+

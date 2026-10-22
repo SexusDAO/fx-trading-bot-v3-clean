@@ -1,0 +1,17 @@
+logs/
+ws_cache/
+*.log
+*.pyc
+__pycache__/
+.env
+pos_state.json
+circuit_breaker.json
+cooldown_state.json
+pending_confirm_state.json
+oi_cache.json
+funding_arb_state.json
+candidate_pool.json
+trigger_state.json
+liq_cache_snapshot.json
+*.db
+*.pid
