@@ -349,7 +349,7 @@ TRAIL_STEPS_TREND_LEGACY = [
     (4.0, 1.5),
     (6.0, 2.0),
 ]
-OPT_TRAIL_BE_BUFFER = False   # v3.84：保本档推迟并加缓冲（False=原阶梯）  # [v3.87 合并决策] 默认 False：OPT-4 按评审：先关闭，观察单笔最大回撤后再开
+OPT_TRAIL_BE_BUFFER = True   # v3.84：保本档推迟并加缓冲（False=原阶梯）  # [v3.87 合并决策] 默认 False：OPT-4 按评审：先关闭，观察单笔最大回撤后再开
 TRAIL_STEPS_TREND = [
     (1.0, 0.1),
     (1.8, 0.5),
