@@ -1801,9 +1801,10 @@ class SignalWatcher:
                 return True, f"oi_divergence LONG 价格走反超 0.6ATR: {price:.6g} < 触发价-0.6ATR={trigger_price - atr_trigger * 0.6:.6g}"
             elif direction == 'SHORT' and price > trigger_price + atr_trigger * 0.6:
                 return True, f"oi_divergence SHORT 价格走反超 0.6ATR: {price:.6g} > 触发价+0.6ATR={trigger_price + atr_trigger * 0.6:.6g}"
-            _oi_pre = float((entry.signal.get("ind") or {}).get("oi_1h_ago") or 0)
-            if oi_now > 0 and _oi_pre > 0 and abs(oi_now - _oi_pre) / _oi_pre <= 0.01:
-                return True, f"oi_divergence OI 已恢复到触发前水平 (oi={oi_now:.0f} 触发前={_oi_pre:.0f})"
+            # oi_1h_ago 字段含义有偏差（P-09），暂停使用
+            # _oi_pre = float((entry.signal.get("ind") or {}).get("oi_1h_ago") or 0)
+            # if oi_now > 0 and _oi_pre > 0 and abs(oi_now - _oi_pre) / _oi_pre <= 0.01:
+            #     return True, f"oi_divergence OI 已恢复到触发前水平 (oi={oi_now:.0f} 触发前={_oi_pre:.0f})"
 
         elif mode == 'ema_trend':
             # 核心理由：EMA 趋势跟随——价格在 EMA20/EMA50 多头排列中回踩，等待反弹

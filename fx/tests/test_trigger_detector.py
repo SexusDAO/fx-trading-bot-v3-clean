@@ -387,7 +387,7 @@ def test_stop_hunt_pierce_threshold_and_cooldown_key(env):
 
 def test_oi_divergence_from_cache(env):
     e = env
-    e["hub"].set("AAAUSDT", flat(), price=100.0, hi24=102.0, lo24=80.0)
+    e["hub"].set("AAAUSDT", flat(), price=100.0, chg24=6.0, hi24=102.0, lo24=80.0)   # 价格门槛：chg24≥5% 才检查 OI 背离
     e["det"].poll_once()
     e["oi"]["v"] = (96.0, 100.0, 0.0)                       # 1H -4% + 距高点 1.96%
     recs = poll(e)

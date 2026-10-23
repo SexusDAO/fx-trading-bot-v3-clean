@@ -507,7 +507,16 @@ class TriggerDetector:
         self._track_funding(sym, mp)
         if arb_due:
             self._funding_arb(sym, now, ctx, mp, out)
-        self._oi_div(sym, now, ctx, atr / price if kmode else None, out)
+        # OI 背离不再每秒独立轮询：只有价格条件先满足（chg24 幅度够大或 RSI 1H 极端）才额外检查
+        _rsi1h = ind.get("rsi_1h") if kmode else None
+        _px_gate = (abs(chg) * 100 >= _cfg("TRIGGER_OI_DIV_GATE_CHG24", 5.0)
+                    or (_rsi1h is not None and (_rsi1h >= _cfg("TRIGGER_OI_DIV_GATE_RSI_HI", 70)
+                                                or _rsi1h <= _cfg("TRIGGER_OI_DIV_GATE_RSI_LO", 30))))
+        if _px_gate:
+            self._oi_div(sym, now, ctx, atr / price if kmode else None, out)
+        else:
+            # 未过价格门槛：不读 OI、不计算背离，只把状态置为"未满足"，保证之后价格达标时能按边沿正常触发
+            self._run(sym, "oi_divergence", now, ctx, out, [("SHORT", False, ""), ("LONG", False, "")])
         if not kmode:
             return out
         c15, c1h, c4h = (self._closed.get((sym, iv)) for iv in ("15m", "1h", "4h"))
