@@ -688,7 +688,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
         if _ist(_sym) and not _umo():
             _tmult *= 0.5
         out["position_size_cap"] = round(out.get("position_size_cap", 0.5) * _tmult, 4)
-        out["volatility_tier"]   = _tier
+        out["vol_tier_detail"]   = _tier   # [9-B] L1~L4 另存；volatility_tier 保留 low/mid/high 供 calc_sl_tp
     except Exception:
         pass
 
@@ -1248,28 +1248,31 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
     #           放宽幅度门槛(-5% vs -8%),专门接住分类层路由进来的小跌幅极端信号。
     # v3.46: 根据波动率档位动态决定 reversal chg24 触发门槛
     # [v3.87 STEP3] 删除重复导入 ATR_TIER_MID_MIN（下方 1343 行附近同函数内再次导入，值相同）
-    from config import ATR_TIER_MID_REVERSAL_CHG24, REVERSAL_CHG24_SHORT_MIN
-    _rev_chg24_long  = -ATR_TIER_MID_REVERSAL_CHG24 if ind.get("_vol_tier") == "mid_vol" else -8.0
+    from config import ATR_TIER_MID_REVERSAL_CHG24, REVERSAL_CHG24_SHORT_MIN, ATR_TIER_HIGH_MIN as _AHM, ATR_TIER_MID_MIN as _AMM
+    # [9-A] 波动档内部计算，不读 ind["_vol_tier"]（可能是其他 judge / 上一轮残留）
+    _atr_r0 = _atr_ratio(ind["atr_1h"], ind["price"])
+    _own_vol_tier = "high" if _atr_r0 >= _AHM else ("mid_vol" if _atr_r0 >= _AMM else "low")
+    _rev_chg24_long  = -ATR_TIER_MID_REVERSAL_CHG24 if _own_vol_tier == "mid_vol" else -8.0
     # [v3.87 STEP3 DOC] _rev_chg24_short 是遗留死变量：v3.64 起做空主通道有意放宽并写死为 chg24 >= +5.0（见下方方向路由），
     #   不再读取本变量，因此中波动档的做空涨幅门槛配置不生效。做多仍使用 _rev_chg24_long，多空门槛不对称是有意的。保留不删。
-    _rev_chg24_short =  ATR_TIER_MID_REVERSAL_CHG24 if ind.get("_vol_tier") == "mid_vol" else  8.0
+    _rev_chg24_short =  ATR_TIER_MID_REVERSAL_CHG24 if _own_vol_tier == "mid_vol" else  REVERSAL_CHG24_SHORT_MIN
 
     # v3.64: Reversal SHORT 门槛修复
     # 原问题：chg24>=+8% AND rsi4h>55 中，大涨后rsi4h几乎必然>55，条件形同虚设；
     #         真正瓶颈是chg24>=+8%出现频率极低，导致SHORT方向从未触发。
     # 修复：SHORT 主通道收紧 RSI 要求（>65），同时放宽 chg24 门槛（+5%）；
     #       RSI1H 补充通道也对称放宽（chg24>=4%，RSI1H>72仍保留）。
-    if chg24 <= _rev_chg24_long and rsi_4h < 55:
+    if chg24 <= _rev_chg24_long and rsi_4h < 40:   # [10-A] 55→40 对齐精筛（高波动档精筛仍要求 <30）
         direction = "LONG"
         _rsi1h_channel = False
-    elif chg24 >= REVERSAL_CHG24_SHORT_MIN and rsi_4h > 65:
+    elif chg24 >= _rev_chg24_short and rsi_4h > 65:   # [10-B] 读按档位的动态门槛
         # v3.64: SHORT 主通道: chg24>=+5%（原8%）且 rsi4h>65（原55，提高要求补偿放宽的chg24）
         direction = "SHORT"
         _rsi1h_channel = False
     elif rsi_1h < 28 and chg24 <= -5 and rsi_4h < 55:
         direction = "LONG"    # RSI1H 极端超卖通道
         _rsi1h_channel = True
-    elif rsi_1h > 72 and chg24 >= REVERSAL_CHG24_SHORT_MIN and rsi_4h > 55:   # [fix C2] 4%→10%，与主通道一致
+    elif rsi_1h > 72 and chg24 >= _rev_chg24_short and rsi_4h > 65:   # [10-A] 55→65 对齐精筛；[10-B] 动态门槛   # [fix C2] 4%→10%，与主通道一致
         # v3.64: SHORT RSI1H 补充通道: chg24>=+4%（原5%，略放宽），RSI1H>72 保持
         direction = "SHORT"
         _rsi1h_channel = True
@@ -1716,7 +1719,7 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
         if _ist(_sym) and not _umo():
             _tmult *= 0.5
         out["position_size_cap"] = round(out.get("position_size_cap", 0.5) * _tmult, 4)
-        out["volatility_tier"]   = _tier
+        out["vol_tier_detail"]   = _tier   # [9-B] L1~L4 另存；volatility_tier 保留 low/mid/high 供 calc_sl_tp
     except Exception:
         pass
 
