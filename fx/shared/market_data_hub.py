@@ -61,7 +61,11 @@ try:
 except Exception:
     _HUB_LOAD_MAX_WORKERS = 2
 _LOAD_POOL = ThreadPoolExecutor(max_workers=int(_HUB_LOAD_MAX_WORKERS), thread_name_prefix="hub-load")
-KLINE_FETCH_CONCURRENCY = 6                    # 历史 K 线 REST 拉取并发上限
+try:
+    from config import KLINE_FETCH_CONCURRENCY as _KLINE_FETCH_CONCURRENCY
+except Exception:
+    _KLINE_FETCH_CONCURRENCY = 6
+KLINE_FETCH_CONCURRENCY = int(_KLINE_FETCH_CONCURRENCY)   # 历史 K 线 REST 拉取并发上限（_run 内创建信号量时读取）
 try:
     from config import KLINE_LOAD_BATCH_SIZE as _KLINE_LOAD_BATCH_SIZE
 except Exception:

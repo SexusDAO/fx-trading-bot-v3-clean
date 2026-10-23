@@ -322,6 +322,7 @@ KLINE_REQUEST_MAX_RETRY = 1       # K 线请求最多重试次数（总尝试 = 
 MARKET_DATA_HUB_ENABLED = True   # 公共市场数据 WS 中心（阶段一：全市场标记价/资金费率）；False 时行为与未引入 hub 前完全一致；hub 未就绪/过旧时 scanner 自动回落 REST
 HUB_LOAD_MAX_WORKERS = 8  # hub历史K线加载并发上限
 HUB_NO_MSG_TIMEOUT = 180  # 120→180：给历史加载留余量，减少阻塞引发的假断线； WebSocket 无消息超时（秒），过短会因GIL饿死误触发重连
+KLINE_FETCH_CONCURRENCY = 6  # hub历史K线REST拉取并发上限
 KLINE_LOAD_BATCH_SIZE = 200  # hub 每次对账最多新建的历史K线加载任务数（超出留到下一轮，每 2s 一轮）
 KLINE_GAP_RELOAD_COOLDOWN_SEC = 60  # 同一 series 因K线缺口触发重拉的冷却时间（秒）
 HUB_WS_PROXY = ""  # hub WebSocket 代理，空字符串=直连，"__env__"=跟随环境变量 PROXY_URL
