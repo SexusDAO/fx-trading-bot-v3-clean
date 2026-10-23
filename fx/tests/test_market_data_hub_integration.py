@@ -53,8 +53,9 @@ def test_reconnect_resubscribes_all_and_refetches_history():
         await h._on_market_connected(ws1)
         await asyncio.gather(*list(h._load_tasks))
         assert h.get_klines("BTCUSDT", "1h", 100) is not None and len(calls) == 6
-        h._on_market_disconnect()                                          # 断线：数据全部作废
-        assert h.get_klines("BTCUSDT", "1h", 100) is None and h.kline_ready_counts() == (0, 6)
+        h._on_market_disconnect()                                          # 断线：保留数据，只标记 stale（v3.94）
+        assert all(st.rows is not None and st.stale and not st.loading for st in h._series.values())
+        assert h.get_klines("BTCUSDT", "1h", 100) is None                  # 分片未连接时 get_klines 仍返回 None（行为未改）
         ws2 = FakeWS(); h._market_connected = True
         await h._on_market_connected(ws2)                                   # 重连
         await asyncio.gather(*list(h._load_tasks))

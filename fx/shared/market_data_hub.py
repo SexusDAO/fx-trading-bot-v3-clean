@@ -81,13 +81,14 @@ TICKER_MIN_COVERAGE = 0.9                      # 新鲜条目数 / 已见过的�
 
 class _Series:
     """一个 (标的, 周期) 的 K 线序列。rows=None 表示尚未就绪（历史未拉到/断线/出现缺口）。"""
-    __slots__ = ("rows", "pending", "loading", "retry_at", "shard")
+    __slots__ = ("rows", "pending", "loading", "retry_at", "shard", "stale")
 
     def __init__(self, shard: int = 0):
         self.shard = shard      # 该序列所在的组合流连接编号
         self.rows = None
         self.pending = []      # 历史拉取期间收到的 WS 行，拉完后合并
         self.loading = False
+        self.stale = False               # 断线后保留 rows 但标记过时，重连后重拉历史
         self.retry_at = 0.0
 
 
@@ -484,7 +485,8 @@ class MarketDataHub:
             sh.gen += 1
             for st in self._series.values():
                 if st.shard == idx:
-                    st.rows, st.pending, st.loading, st.retry_at = None, [], False, 0.0
+                    st.stale = True     # 断线时只标记过时，保留数据供 scanner 使用
+                    st.loading = False  # 重置加载状态，允许重连后触发新加载
         sh.ws = None
         sh.subscribed = set()
 
@@ -699,7 +701,7 @@ class MarketDataHub:
             for key, st in self._series.items():
                 if len(todo) >= KLINE_LOAD_BATCH_SIZE:
                     break                            # 本轮已满，其余留到下一次对账
-                if (st.shard == sh.idx and st.rows is None and not st.loading and now >= st.retry_at
+                if (st.shard == sh.idx and (st.rows is None or st.stale) and not st.loading and now >= st.retry_at
                         and f"{key[0].lower()}@kline_{key[1]}" in sh.subscribed):
                     st.loading = True
                     todo.append(key)
@@ -740,6 +742,7 @@ class MarketDataHub:
                 for pr in st.pending:                # 合并拉取期间收到的推送
                     _upsert(new, pr, iv_ms)
                 st.rows, st.pending = new, []
+                st.stale = False
         _loop = asyncio.get_running_loop()
         if _empty:
             _loop.run_in_executor(None, logger.warning, f"[hub] 历史K线拉取返回空 {sym} {iv}，30s后重试")
