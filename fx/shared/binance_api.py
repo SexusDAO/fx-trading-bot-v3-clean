@@ -722,10 +722,18 @@ def get_account() -> dict:
 
 
 def get_order(symbol: str, order_id: int) -> dict:
-    """查询单笔订单状态（用于 WS 超时后 REST 确认成交）"""
+    """查询单笔订单状态（用于 WS 超时后 REST 确认成交）。
+    [fix #46] 成功返回订单 dict；查询失败（重试耗尽/格式异常）抛 ApiQueryError，
+    让调用方区分「查到了」与「查询本身失败」。"""
     def _call():
-        return _signed_get("/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
-    return _retry(_call) or {}
+        d = _signed_get("/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
+        if not isinstance(d, dict):
+            raise ApiQueryError(f"order 返回格式异常: {type(d).__name__}")
+        return d
+    res = _retry(_call)
+    if res is None:
+        raise ApiQueryError(f"get_order({symbol},{order_id}) 查询失败（重试耗尽）")
+    return res
 
 
 def get_open_orders(symbol: str = None) -> list:

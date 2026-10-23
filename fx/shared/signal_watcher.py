@@ -1312,10 +1312,15 @@ class SignalWatcher:
             raise RuntimeError(f"cancel_order({symbol},{order_id}): {e}")
 
     async def _query_order(self, symbol: str, order_id: int) -> dict:
-        """[v3.89 #40] 查询订单状态（失败返回 {}）。"""
+        """[v3.89 #40] 查询订单状态（失败返回 {}，由 _classify_order 归为「未能确认」）。
+        [fix #46] get_order 失败改为抛异常，此处捕获并保持原有 {} 语义。"""
         loop = asyncio.get_running_loop()
         from shared import binance_api as _api
-        return await loop.run_in_executor(None, lambda: _api.get_order(symbol, order_id))
+        try:
+            return await loop.run_in_executor(None, lambda: _api.get_order(symbol, order_id))
+        except Exception as e:
+            logger.warning(f"[sw] 查询订单失败 {symbol} {order_id}: {e}")
+            return {}
 
     @staticmethod
     def _classify_order(d: Any) -> Optional[str]:

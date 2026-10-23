@@ -1869,12 +1869,7 @@ async def _check_pending_expire_static(pos: dict, now_ms: int):
                             logger.error(f"[pm] {symbol} 补挂保护单失败: {ge}")
                             await _notify_async(f"⚠️ {symbol} 已成交但补挂止损失败,请人工介入!\n错误:{ge}")
                         return
-                else:
-                    # api.get_order 返回 None → 订单不存在或查询失败,超过24h再清除
-                    if hold_min > 24 * 60:
-                        _remove_position_checked(pid)
-                        logger.info(f"[pm] {symbol} pending订单 {order_id} 查询失败且超24h,清除本地记录")
-                        return
+                # [fix #46] 查询失败时 od 为 None：保留本地记录，下轮 patrol 重试（删除原 24h 清除死代码）
         except Exception as e:
             logger.warning(f"[pm] {symbol} 核验pending订单失败: {e}")
 
