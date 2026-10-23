@@ -3660,10 +3660,14 @@ def run_scan(dry_run: bool = False, signal_watcher=None) -> dict:
 
     # v3.82: 主动将空闲内存归还 OS（防止 pymalloc arena 水位无限抬高）
     # glibc malloc_trim 将堆顶空闲页归还 OS，不影响正常对象
+    # [perf] 仅在 RSS 超过 800MB 时才归还
     try:
-        import ctypes as _ct
-        _libc = _ct.CDLL("libc.so.6")
-        _libc.malloc_trim(_ct.c_size_t(0))
+        import ctypes as _ct, os as _os
+        _rss_kb = int(open(f"/proc/{_os.getpid()}/status").read()
+                      .split("VmRSS:")[1].split()[0])
+        if _rss_kb > 800 * 1024:  # 超过800MB才归还
+            _libc = _ct.CDLL("libc.so.6")
+            _libc.malloc_trim(_ct.c_size_t(0))
     except Exception:
         pass
 
@@ -3830,7 +3834,10 @@ def _get_oi_history_cached(symbol: str, period: str = "1h", limit: int = 6) -> l
                 for k in [k for k, v in _oi_history_cache.items() if now - v[1] >= _OI_HIST_TTL_SEC]:
                     del _oi_history_cache[k]
                 if len(_oi_history_cache) >= _OI_HIST_CACHE_MAX:
-                    _oi_history_cache.clear()
+                    # [perf] 仍满时只淘汰最旧的 20%，不再整表清空
+                    _sorted = sorted(_oi_history_cache.items(), key=lambda x: x[1][1])
+                    for k, _ in _sorted[:len(_sorted) // 5]:
+                        del _oi_history_cache[k]
             _oi_history_cache[symbol] = (data, now)
         return data[-limit:]
     return data
@@ -4035,14 +4042,9 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
     from shared.judges import judge_funding_arb
     from shared.indicators import rsi as _rsi_fn
 
-    for sym_full, fr_current in candidates:
-        result["scanned"] += 1
-
-        # 同标的已有主策略仓位，跳过
-        if sym_full in active_syms:
-            result["rejected"].append({"symbol": sym_full, "reason": "已有持仓"})
-            continue
-
+    # [perf] 单标的分析抽成独立函数，线程池并发执行；下单仍在主线程串行（避免并发占槽/重复下单）
+    def _analyze_one_arb(sym_full, fr_current):
+        """返回 (sym_full, signal_or_None, reject_reason_or_None)。"""
         try:
             # ── 动态获取结算周期和下次结算时间 ──────────────────────────────
             funding_interval_h = get_funding_interval(sym_full)   # 1/4/8
@@ -4053,7 +4055,7 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
             k4h = api.get_klines(sym_full, "4h", 60)
             k15 = api.get_klines(sym_full, "15m", 40)
             if not k1h or len(k1h) < 25:
-                continue
+                return (sym_full, None, None)
 
             ind = calc_indicators(k15, k1h, k4h)
             ind["symbol"]             = sym_full
@@ -4093,10 +4095,8 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
             ind["funding_interval_h"] = funding_interval_h
             ok, detail = judge_funding_arb(sym_full, fr_current, funding_hist, ind, next_settle_ts, k1h, k4h)
             if not ok:
-                result["rejected"].append({"symbol": sym_full, "reason": detail.get("reject_reason")})
-                continue
+                return (sym_full, None, detail.get("reject_reason"))
 
-            result["signals"] += 1
             direction = detail["direction"]
 
             # ── 计算限价入场价：挂单簿密度 + ATR，取较近者 ─────────────────
@@ -4184,23 +4184,59 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
                 f"cancel_before={_t.strftime('%H:%M', _t.gmtime(cancel_before_ts))}UTC"
             )
 
-            if dry_run:
-                logger.info(f"[arb_scan] DRY RUN: 信号通过，跳过下单")
-                continue
-
-            # 挂限价单入场
-            try:
-                import executor as _exec
-                _ws_listener = getattr(signal_watcher, "_ws_listener", None)
-                ok_exec = _exec.execute_signal_sync(signal, _ws_listener)
-                if ok_exec:
-                    result["placed"] += 1
-                    logger.info(f"[arb_scan] {sym_full} 限价单已挂，等待成交")
-            except Exception as _ee:
-                logger.error(f"[arb_scan] {sym_full} execute_signal 失败: {_ee}")
-
+            return (sym_full, signal, None)
         except Exception as _e:
             logger.warning(f"[arb_scan] {sym_full} 分析异常: {_e}")
+            return (sym_full, None, None)
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _FutTimeout
+    _todo = []
+    for sym_full, fr_current in candidates[:FUNDING_ARB_CANDIDATE_TOP_N]:
+        result["scanned"] += 1
+        # 同标的已有主策略仓位，跳过
+        if sym_full in active_syms:
+            result["rejected"].append({"symbol": sym_full, "reason": "已有持仓"})
+            continue
+        _todo.append((sym_full, fr_current))
+
+    _arb_signals = []
+    _exe = ThreadPoolExecutor(max_workers=8, thread_name_prefix="arb-sym")
+    try:
+        futs = {_exe.submit(_analyze_one_arb, sym, fr): sym for sym, fr in _todo}
+        try:
+            for fut in as_completed(futs, timeout=120):
+                sym = futs[fut]
+                try:
+                    _sym, _sig, _rej = fut.result()
+                except Exception as _fe2:   # 单标的异常不影响其他标的
+                    logger.warning(f"[arb_scan] {sym} 分析线程异常: {_fe2}")
+                    continue
+                if _sig is not None:
+                    _arb_signals.append(_sig)
+                elif _rej is not None:
+                    result["rejected"].append({"symbol": _sym, "reason": _rej})
+        except _FutTimeout:
+            _left = [s for f, s in futs.items() if not f.done()]
+            logger.warning(f"[arb_scan] 并发分析超过 120s，放弃未完成标的: {_left}")
+    finally:
+        _exe.shutdown(wait=False, cancel_futures=True)
+
+    for signal in _arb_signals:
+        sym_full = signal["symbol"]
+        result["signals"] += 1
+        if dry_run:
+            logger.info(f"[arb_scan] DRY RUN: 信号通过，跳过下单")
+            continue
+        # 挂限价单入场（主线程串行）
+        try:
+            import executor as _exec
+            _ws_listener = getattr(signal_watcher, "_ws_listener", None)
+            ok_exec = _exec.execute_signal_sync(signal, _ws_listener)
+            if ok_exec:
+                result["placed"] += 1
+                logger.info(f"[arb_scan] {sym_full} 限价单已挂，等待成交")
+        except Exception as _ee:
+            logger.error(f"[arb_scan] {sym_full} execute_signal 失败: {_ee}")
 
     logger.info(f"[arb_scan] 完成: scanned={result['scanned']} signals={result['signals']} placed={result['placed']}")
     return result
