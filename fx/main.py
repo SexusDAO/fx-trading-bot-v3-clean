@@ -673,21 +673,22 @@ async def _sync_positions_on_startup() -> None:
 
 
 async def _verify_hedge_mode_or_exit() -> None:
-    """[fix #16] 启动时向交易所确认对冲模式；非对冲或无法确认 → 告警并拒绝启动。
+    """[fix #16] 启动时向交易所确认对冲模式；确认非对冲 → 拒绝启动；无法确认 → 告警后继续。
     （代码按对冲模式编写：positionSide=LONG/SHORT，单向模式下对账与保护单会全部错位。）"""
     from shared import binance_api as _b
     loop = asyncio.get_running_loop()
     try:
         dual = await loop.run_in_executor(None, _b.get_position_mode)
     except Exception as e:
-        msg = f"🚨 无法确认账户持仓模式，拒绝启动：{str(e)[:120]}"
-        logger.critical(f"[main] {msg}")
+        # [fix #16] 网络异常等无法确认时允许继续启动，仅告警；确认为单向模式才拒绝
+        msg = f"⚠️ 暂时无法确认账户持仓模式，继续启动（请人工核实为对冲模式）：{str(e)[:120]}"
+        logger.warning(f"[main] {msg}")
         try:
             from shared.notifier import notify_async
             await notify_async(msg)
         except Exception:
             pass
-        raise SystemExit(2)
+        return
     if not dual:
         msg = "🚨 账户当前为单向持仓模式，本系统要求对冲模式(Hedge Mode)，拒绝启动。请在币安合约设置中切换后重启。"
         logger.critical(f"[main] {msg}")
