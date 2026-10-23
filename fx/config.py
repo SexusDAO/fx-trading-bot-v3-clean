@@ -131,6 +131,7 @@ CLASSIFY_REVERSAL_CHG24_MIN    = 15.0
 REVERSAL_CHG24_SHORT_MIN        = 10.0  # [fix C] reversal SHORT 主通道 chg24 门槛（原硬编码 +5.0%）  # 注意：高于判断层8%，8%~14%只走RSI极端通道(rsi_1h<25)，15%+走主通道
                                # 若想让8%~14%走主通道改回8.0，等实盘数据后决定
 CLASSIFY_REVERSAL_FUNDING_MIN  = 0.001
+REVERSAL_RSI1H_SHORT_MIN       = 65    # 做空主通道 RSI1H 下限
 CLASSIFY_REVERSAL_RSI4H_LONG   = REVERSAL_RSI4H_MAX_LONG    # 25
 CLASSIFY_REVERSAL_RSI4H_SHORT  = REVERSAL_RSI4H_MIN_SHORT   # 78
 CLASSIFY_BREAKOUT_CHG24_MIN    = 5.0   # 8% 降至 5%，成交量验证移到 judge_breakout

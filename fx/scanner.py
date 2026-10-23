@@ -1313,6 +1313,10 @@ def analyze_one(symbol: str, ticker: dict,
                     btc_trend=btc_trend, market_mode="",
                 )})
                 _rd = _reason if isinstance(_reason, dict) else {}
+                if _rd.get("set_cooldown"):   # [A-2] judge 请求冷却 → 交由主进程 _apply_post_events 写入
+                    events.append({"kind": "cooldown", "symbol": symbol,
+                                   "hours": _rd.get("cooldown_hours", 4),
+                                   "reason": _rd.get("cooldown_reason", _route)})
                 events.append({"kind": "shadow_reject", "kwargs": dict(
                     symbol=symbol, route=_route, direction=_dir,
                     reason=str(_rd.get("reject_reason", _reason)), ind=dict(ind),

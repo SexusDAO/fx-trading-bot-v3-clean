@@ -1388,7 +1388,8 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
             out["crash_guard_triggered"] = True
             out["cooldown_triggered"]    = True
             out["reject_reason"]         = "连续崩盘拦截"
-            _set_cooldown_safe(symbol, 4, "crash_guard")
+            # [A-2] judge 不写状态：由调用方读 set_cooldown 字段后设置冷却
+            out["set_cooldown"] = True; out["cooldown_hours"] = 4; out["cooldown_reason"] = "crash_guard"
             return False, out
     elif direction == "SHORT":  # 检测急速拉升（防止追空被逼空）
         crash = _check_crash_guard(k1h, k4h, direction, ind)
@@ -1396,7 +1397,7 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
             out["crash_guard_triggered"] = True
             out["cooldown_triggered"]    = True
             out["reject_reason"]         = "急速拉升熔断，不追空"
-            _set_cooldown_safe(symbol, 4, "crash_guard_short")
+            out["set_cooldown"] = True; out["cooldown_hours"] = 4; out["cooldown_reason"] = "crash_guard_short"
             return False, out
 
     # ── 0.5 4H 多头结构保护（仅 SHORT 方向）────────────────────────────────────
@@ -1589,15 +1590,10 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
 
         # 条件四+:1H RSI开始回升(最新RSI > 前一根RSI),防止RSI还在跌时入场
         if len(k1h) >= 16:
+            from shared.indicators import rsi as _rsi_ind   # [A-1] 与 ind["rsi_1h"] 同一实现
             closes_1h = [float(k[4]) for k in k1h[-16:]]
-            def _rsi14(closes):
-                diffs = [closes[i]-closes[i-1] for i in range(1,len(closes))]
-                gains = [d if d>0 else 0 for d in diffs[-14:]]
-                losses= [-d if d<0 else 0 for d in diffs[-14:]]
-                ag = sum(gains)/14; al = sum(losses)/14
-                return 100 - 100/(1+ag/al) if al > 0 else 100
-            rsi_now  = _rsi14(closes_1h)
-            rsi_prev = _rsi14(closes_1h[:-1])
+            rsi_now  = _rsi_ind(closes_1h)
+            rsi_prev = _rsi_ind(closes_1h[:-1])
             if rsi_now < rsi_prev - 1.0:  # RSI还在下跌(给1点容差)
                 out["reject_reason"] = f"1H RSI仍在下跌({rsi_prev:.1f}->{rsi_now:.1f}),未出现回升迹象"
                 return False, out
@@ -1677,6 +1673,23 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
             out["rsi_extreme"] = True
         if rsi_1h > 70:
             out["signal_base_strength"] = "strong"
+
+        # [A-3] 做空主通道 RSI1H 硬性要求（镜像做多的 RSI1H<35 + 不能仍在下行）
+        if not _rsi1h_channel:
+            try:
+                from config import REVERSAL_RSI1H_SHORT_MIN as _R1S
+            except Exception:
+                _R1S = 65
+            if rsi_1h <= _R1S:
+                out["reject_reason"] = f"RSI1H={rsi_1h:.1f} <= {_R1S},未达超买"
+                return False, out
+            if len(k1h) >= 17:
+                from shared.indicators import rsi as _rsi_ind
+                _c1h = [float(k[4]) for k in k1h[-17:]]
+                _r0, _r1, _r2 = _rsi_ind(_c1h[:-2]), _rsi_ind(_c1h[:-1]), _rsi_ind(_c1h)
+                if _r0 < _r1 < _r2:   # 最近 3 根 1H RSI 连续上升
+                    out["reject_reason"] = f"1H RSI仍在上升({_r0:.1f}->{_r1:.1f}->{_r2:.1f}),未出现回落迹象"
+                    return False, out
 
         # 条件三:连续两根15M止涨K线（_rsi1h_channel 也必须通过，不得豁免）
         # 防止「涨势加速」（大阳线推高RSI）被误判为顶部
