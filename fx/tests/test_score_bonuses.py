@@ -86,8 +86,8 @@ def hub(monkeypatch):
 def test_all_three_stack(hub, caplog):
     caplog.set_level(logging.INFO, logger=sc.logger.name)
     sc_, info = sc._apply_score_bonuses("XUSDT", "LONG", "pullback", 60)
-    assert sc_ == 86 and (info["taker"], info["range"], info["volprice"]) == (10, 8, 8)
-    assert "[score] XUSDT taker=+10 range=+8 vol_ratio=1.8(+8) total=86" in caplog.text
+    assert sc_ == 75 and (info["taker"], info["range"], info["volprice"]) == (10, 8, 8)   # 10+8+8=26 → 上限 15
+    assert "[score] XUSDT taker=+10 range=+8 vol_ratio=1.8(+8) total=75" in caplog.text
 
 
 def test_cap_100_and_floor_0(hub):
@@ -99,13 +99,13 @@ def test_cap_100_and_floor_0(hub):
 def test_short_direction_symmetry(hub):
     hub["k6"] = [k(100, 40)] * 6; hub["tk"] = tk(c=10, chg=-1.0)
     s, info = sc._apply_score_bonuses("X", "SHORT", "reversal", 50)
-    assert s == 76 and (info["taker"], info["range"], info["volprice"]) == (10, 8, 8)
+    assert s == 65 and (info["taker"], info["range"], info["volprice"]) == (10, 8, 8)    # 上限 15
 
 
 def test_switches_independent(hub, monkeypatch):
     monkeypatch.setattr(config, "SCORE_TAKER_BONUS", False, raising=False)
     s, info = sc._apply_score_bonuses("X", "LONG", "pullback", 60)
-    assert info["taker"] is None and s == 76
+    assert info["taker"] is None and s == 75                                          # 8+8=16 → 上限 15
     monkeypatch.setattr(config, "SCORE_RANGE_BONUS", False, raising=False)
     monkeypatch.setattr(config, "SCORE_VOLPRICE_BONUS", False, raising=False)
     assert sc._apply_score_bonuses("X", "LONG", "pullback", 60) == (60, {**info, "range": None, "range_pos": None, "volprice": None, "vol_ratio": None})
@@ -114,7 +114,7 @@ def test_switches_independent(hub, monkeypatch):
 def test_one_failure_does_not_affect_others(hub, monkeypatch):
     hub["tk"] = {"symbol": "X", "lastPrice": "bad", "highPrice": "1", "lowPrice": "0", "priceChangePercent": "1"}
     s, info = sc._apply_score_bonuses("X", "LONG", "pullback", 60)
-    assert info["range"] is None and info["taker"] == 10 and info["volprice"] == 8 and s == 78
+    assert info["range"] is None and info["taker"] == 10 and info["volprice"] == 8 and s == 75   # 18 → 上限 15
 
 
 def test_hub_not_ready_skips_all(monkeypatch):
@@ -142,3 +142,9 @@ def test_hub_helpers_respect_flag_and_hub(monkeypatch):
 
 def test_config_switches_default_on():
     assert config.SCORE_TAKER_BONUS is True and config.SCORE_RANGE_BONUS is True and config.SCORE_VOLPRICE_BONUS is True
+
+
+def test_hub_bonus_cap_only_limits_positive(hub, monkeypatch):
+    monkeypatch.setattr(config, "SCORE_HUB_BONUS_CAP", 15, raising=False)
+    hub["k6"] = [k(100, 40)] * 6; hub["tk"] = tk(c=5, chg=0); hub["k24"] = vrows(1000)
+    assert sc._apply_score_bonuses("X", "LONG", "pullback", 60)[0] == 50     # -5 -5：负值照常扣，不受上限影响

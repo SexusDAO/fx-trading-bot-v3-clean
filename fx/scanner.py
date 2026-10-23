@@ -2529,28 +2529,6 @@ def _filter_and_register_signals(
         _sig_type = sig.get("sig_type", ind.get("sig_type", "pullback"))
         strategy_adj = 0
 
-        # ── v3.58 市场周期阶段加分（初期/中段/末期区分）───────────────────────
-        # early_bull: breakout信号最佳(+5)，reversal SHORT最危险(-5)
-        # mid_bull:   pullback信号最佳(+5)，趋势跟随效果最好
-        # late_bull:  所有做多信号降权(-5)，趋势即将耗尽
-        try:
-            from shared.risk_manager import get_market_cycle_phase as _gcyc
-            _cycle = _gcyc()
-            ind["market_cycle"] = _cycle
-            if _cycle == "early_bull":
-                if _sig_type == "breakout" and direction == "LONG":
-                    strategy_adj += 5
-                elif _sig_type == "reversal" and direction == "SHORT":
-                    strategy_adj -= 5
-            elif _cycle == "mid_bull":
-                if _sig_type == "pullback" and direction == "LONG":
-                    strategy_adj += 5
-            elif _cycle == "late_bull":
-                if direction == "LONG" and _sig_type in ("pullback", "reversal", "breakout"):
-                    strategy_adj -= 5
-                    logger.info(f"[scanner] {sig['symbol']} late_bull 做多降权 -5")
-        except Exception:
-            pass
         if _mkt_mode == "bear":
             # v3.38: 读取熊市强度，区分三档惩罚/奖励
             try:
@@ -2659,6 +2637,29 @@ def _filter_and_register_signals(
                 f"(mkt={_mkt_mode} strength={_et_strength})"
             )
 
+        # ── v3.58 市场周期阶段加分（初期/中段/末期区分）
+        # [fix] 移到模式分支与专属覆盖之后，以 += 叠加，避免被 strategy_adj = ... 冲掉───────────────────────
+        # early_bull: breakout信号最佳(+5)，reversal SHORT最危险(-5)
+        # mid_bull:   pullback信号最佳(+5)，趋势跟随效果最好
+        # late_bull:  所有做多信号降权(-5)，趋势即将耗尽
+        try:
+            from shared.risk_manager import get_market_cycle_phase as _gcyc
+            _cycle = _gcyc()
+            ind["market_cycle"] = _cycle
+            if _cycle == "early_bull":
+                if _sig_type == "breakout" and direction == "LONG":
+                    strategy_adj += 5
+                elif _sig_type == "reversal" and direction == "SHORT":
+                    strategy_adj -= 5
+            elif _cycle == "mid_bull":
+                if _sig_type == "pullback" and direction == "LONG":
+                    strategy_adj += 5
+            elif _cycle == "late_bull":
+                if direction == "LONG" and _sig_type in ("pullback", "reversal", "breakout", "range_bounce"):
+                    strategy_adj -= 5
+                    logger.info(f"[scanner] {sig['symbol']} late_bull 做多降权 -5")
+        except Exception:
+            pass
         # ── v3.31 大行情恢复窗口：评分额外 -10 ─────────────────────────────
         post_shock_adj = -10 if _post_shock else 0
         if post_shock_adj:
@@ -3795,7 +3796,9 @@ def _apply_score_bonuses(symbol: str, direction: str, sig_type: str, score: int)
         except Exception as e:
             logger.debug(f"[score] {symbol} volprice 加分失败（跳过）: {e}")
     adds = [info[k] for k in ("taker", "range", "volprice") if info[k] is not None]
-    new_score = min(100, max(0, score + sum(adds)))
+    _cap = getattr(_c, "SCORE_HUB_BONUS_CAP", 15)
+    total_bonus = min(sum(adds), _cap)   # 只限制正向叠加的上限，负值照常扣
+    new_score = min(100, max(0, score + total_bonus))
     if any(v is not None for v in (info["taker"], info["range"], info["volprice"])):
         def f(v):
             return "NA" if v is None else f"{v:+d}"
