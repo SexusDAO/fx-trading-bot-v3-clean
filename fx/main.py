@@ -23,7 +23,6 @@ import time
 import faulthandler
 import threading
 import io
-import tracemalloc
 from pathlib import Path
 
 # ── 启动依赖检查 ─────────────────────────────────────────────────────────────
@@ -46,10 +45,6 @@ def _check_dependencies():
         sys.exit(1)
 
 _check_dependencies()
-
-# ── 临时诊断（定位后删除）────────────────────────────────────────────────
-# 内存分配追踪：保留 10 帧调用栈，用于定位内存泄漏源头
-tracemalloc.start(10)
 
 # ── 临时诊断（定位后删除）────────────────────────────────────────────────
 # 事件循环看门狗：独立线程检测事件循环阻塞，超过 2 秒 dump 所有线程堆栈
@@ -184,8 +179,6 @@ logging.basicConfig(
 logger = logging.getLogger("fx.main")
 logging.getLogger("websockets").setLevel(logging.WARNING)  # 屏蔽 ws 心跳 DEBUG 日志
 logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("fx.kline_cache").setLevel(logging.DEBUG)  # 临时诊断：K线缓存miss原因
-logging.getLogger("shared.kline_cache").setLevel(logging.DEBUG)  # 兼容 __name__ 方式
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -391,39 +384,6 @@ async def _loop_funding_arb(interval_sec: int = 1800, signal_watcher=None) -> No
         except Exception as _e:
             logger.error(f"[main] funding_arb_scan 异常: {_e}", exc_info=True)
         await _aio.sleep(interval_sec)
-
-
-# ── 临时诊断（定位后删除）────────────────────────────────────────────────
-async def _loop_mem_snapshot(interval_sec: int = 1200) -> None:
-    """每 20 分钟检查内存，仅在 RSS > 1500MB 或 asyncio 任务数 > 50 时输出诊断信息。"""
-    await asyncio.sleep(300)  # 启动后 5 分钟开始第一次采样
-    while True:
-        try:
-            # 当前 RSS
-            try:
-                pid = os.getpid()
-                rss_kb = int(open(f"/proc/{pid}/status").read().split("VmRSS:")[1].split()[0])
-                rss_mb = rss_kb // 1024
-            except Exception:
-                rss_mb = -1
-            
-            # asyncio 活跃任务数
-            task_count = len(asyncio.all_tasks())
-            
-            # 仅在异常时输出详细诊断
-            if rss_mb > 1500 or task_count > 50:
-                snapshot = tracemalloc.take_snapshot()
-                top_stats = snapshot.statistics('lineno')
-                lines = ["[mem] TOP15 内存分配:"]
-                for stat in top_stats[:15]:
-                    size_mib = stat.size / 1024 / 1024
-                    lines.append(f"[mem]   {size_mib:.1f} MiB  {stat}")
-                lines.append(f"[mem] RSS={rss_mb}MB asyncio任务数={task_count}")
-                logger.warning("\n".join(lines))
-        except Exception as e:
-            logger.error(f"[mem] 内存快照异常: {e}", exc_info=True)
-        
-        await asyncio.sleep(interval_sec)
 
 
 async def _loop_reset_circuit() -> None:
@@ -844,9 +804,6 @@ async def main() -> None:
         asyncio.create_task(_loop_reset_circuit(),                             name="reset_circuit"),
         asyncio.create_task(_loop_event_latency_monitor(),                     name="loop_latency"),
         asyncio.create_task(_loop_track_outcomes(3600),                        name="track_outcomes"),
-        # ── 临时诊断（定位后删除）────────────────────────────────────────────────
-        # 内存快照：每 20 分钟输出 tracemalloc Top 15 + RSS + asyncio 任务数
-        asyncio.create_task(_loop_mem_snapshot(1200),                          name="mem_snapshot"),
     ]
     if _trigger_det is not None:
         _trigger_det._watcher = signal_watcher
