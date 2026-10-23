@@ -320,7 +320,7 @@ KLINE_CACHE_INTERVALS   = ["1h", "4h", "15m"]  # 缓存哪些周期
 KLINE_REQUEST_TIMEOUT   = (3, 5)  # (connect_s, read_s)：K 线单次 HTTP 请求超时
 KLINE_REQUEST_MAX_RETRY = 1       # K 线请求最多重试次数（总尝试 = 1 + 此值）
 MARKET_DATA_HUB_ENABLED = True   # 公共市场数据 WS 中心（阶段一：全市场标记价/资金费率）；False 时行为与未引入 hub 前完全一致；hub 未就绪/过旧时 scanner 自动回落 REST
-HUB_LOAD_MAX_WORKERS = 2  # hub历史K线加载并发上限
+HUB_LOAD_MAX_WORKERS = 8  # hub历史K线加载并发上限
 HUB_NO_MSG_TIMEOUT = 120  # WebSocket 无消息超时（秒），过短会因GIL饿死误触发重连
 HUB_WS_PROXY = ""  # hub WebSocket 代理，空字符串=直连，"__env__"=跟随环境变量 PROXY_URL
 KLINE_HUB_SYMBOLS_MAX = 220  # 120 → 220，覆盖全部候选池+动态注入余量
