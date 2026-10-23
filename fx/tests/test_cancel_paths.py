@@ -46,6 +46,10 @@ class Base(unittest.TestCase):
             return query if query is not None else {}
         w._cancel_order = fake_cancel
         w._query_order = fake_query
+
+        async def fake_conflict(symbol, own_order_id=None):
+            return None   # [fix #2] 查询失败现在会抛 ApiQueryError → 保守拒绝；测试需显式 mock，不能依赖"失败返回空"
+        w._exchange_conflict = fake_conflict
         return w
 
     async def _add(self, w, sym, oid=100, **over):

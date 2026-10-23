@@ -339,7 +339,8 @@ class WsOrderListener:
                     continue
 
                 url = USER_DATA_URL_TPL.format(listen_key=self._listen_key)
-                logger.info(f"[ws] userData 连接: {url[:60]}…")
+                _lk = str(self._listen_key or "")
+                logger.info(f"[ws] userData 连接: {USER_DATA_URL_TPL.format(listen_key=_lk[:4] + '****')}")  # [fix #39] listenKey 脱敏
 
                 async with websockets.connect(
                     url,

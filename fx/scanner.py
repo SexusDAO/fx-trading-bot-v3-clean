@@ -1322,7 +1322,15 @@ def analyze_one(symbol: str, ticker: dict,
             _q = _calc_route_quality(
                 _route, _reason if isinstance(_reason, dict) else {}, ind, _dir
             )
-            _passed_signals.append({"route": _route, "reason": _reason, "dir": _dir, "quality": _q})
+            # [fix #49] route_quality 仅保留用于日志 schema，不再参与决策；
+            #   择优改用 final_score 的同源基础分（signal_strength → SCORE_BASE_*），
+            #   完整 final_score 在后续评分层统一计算。
+            _rd49 = _reason if isinstance(_reason, dict) else {}
+            from config import SCORE_BASE_STRONG, SCORE_BASE_MEDIUM, SCORE_BASE_WEAK
+            _fs_base = {"strong": SCORE_BASE_STRONG, "medium": SCORE_BASE_MEDIUM,
+                        "weak": SCORE_BASE_WEAK}.get(_rd49.get("signal_strength", "medium"), SCORE_BASE_MEDIUM)
+            _passed_signals.append({"route": _route, "reason": _reason, "dir": _dir, "quality": _q,
+                                    "score": _fs_base})
 
             # 提前终止优化：已有 2 条 strong，或高质量特殊场景（>=75）直接定案
             _strong_count = sum(
@@ -1331,23 +1339,22 @@ def analyze_one(symbol: str, ticker: dict,
             )
             if _strong_count >= 2:
                 break
-            if _route in ("stop_hunt", "oi_divergence") and _q >= 75:
-                break
+            # [fix #49] 原 route_quality>=75 提前定案已删除（不再以质量分做决策）
 
         # 所有路径均失败
         if not _passed_signals:
             return None
 
         # 择出质量最高的路径
-        _best = max(_passed_signals, key=lambda x: x["quality"])
+        _best = max(_passed_signals, key=lambda x: x["score"])   # [fix #49] 统一按 final_score 口径择优（同分保持路径顺序）
         ok, reason, sig_type, direction = True, _best["reason"], _best["route"], _best["dir"]
 
         # 多路通过时记录择优决策日志
         if len(_passed_signals) > 1:
-            _competing = [(s["route"], s["quality"]) for s in _passed_signals if s is not _best]
+            _competing = [(s["route"], s["score"]) for s in _passed_signals if s is not _best]
             logger.info(
                 f"[scanner] {symbol} 多路候选 {len(_passed_signals)} 条，"
-                f"择优选择 {sig_type}(质量={_best['quality']}) "
+                f"择优选择 {sig_type}(分={_best['score']}) "
                 f"vs {_competing}"
             )
 
@@ -1725,7 +1732,17 @@ def maintain_pending_order(pos: dict, ticker: dict) -> str:
     symbol    = pos["symbol"]
     direction = pos["direction"]
     sig_type  = pos.get("sig_type", "pullback")
-    open_ts   = int(pos.get("open_ts", 0))
+    # [fix #33] 原读不存在的 open_ts，elapsed 恒为 0，超时撤单是死代码。
+    #   实际写入的字段是 open_time（毫秒，见 executor 写 pos_state）；兼容 create_ts / entry_ts / 旧名 open_ts。
+    open_ts = 0
+    for _k in ("open_time", "create_ts", "entry_ts", "open_ts"):
+        try:
+            _v = int(pos.get(_k) or 0)
+        except (TypeError, ValueError):
+            _v = 0
+        if _v > 0:
+            open_ts = _v if _v > 10**11 else _v * 1000   # 秒级时间戳自动换算成毫秒
+            break
     elapsed_min = (time.time() * 1000 - open_ts) / 60_000 if open_ts else 0
 
     # 超时撤单
@@ -2657,22 +2674,10 @@ def _filter_and_register_signals(
         if _pulse_penalty:
             logger.info(f"[scanner] {sig['symbol']} pulse_short_penalty={_pulse_penalty:+d}")
 
-        # ── v3.58 Taker Buy/Sell 买卖比加分 ────────────────────────────────────
-        # 买方主导（>0.55）+3分，卖方主导（<0.45）-3分，中性不调
-        # 只对顺方向有效：LONG时需买方主导，SHORT时需卖方主导
-        _tbr = ind.get("taker_buy_ratio", 0.5)
+        # ── [fix #35a] 原 v3.58 在此处按 taker_buy_ratio 加减 ±3 分，而 _apply_score_bonuses 里的
+        #   taker 加分（hub 数据，见 _calc_taker_bonus）读的是同一类信息 → 同一因子被重复计分。
+        #   现删除这里的重复逻辑，只保留 _apply_score_bonuses 的 taker 加分。taker_adj 置 0 以保持日志/字段兼容。
         taker_adj = 0
-        if _sig_type not in ("funding_arb",):
-            if direction == "LONG" and _tbr > 0.55:
-                taker_adj = +3
-            elif direction == "LONG" and _tbr < 0.45:
-                taker_adj = -3
-            elif direction == "SHORT" and _tbr < 0.45:
-                taker_adj = +3
-            elif direction == "SHORT" and _tbr > 0.55:
-                taker_adj = -3
-        if taker_adj:
-            logger.debug(f"[scanner] {sig['symbol']} taker_buy_ratio={_tbr:.3f} taker_adj={taker_adj:+d}")
 
         new_score = min(100, max(0, base_score + btc_adj + cg_bonus + strategy_adj + post_shock_adj + atr_tier_adj + _pulse_penalty + taker_adj))
         # 新增三个加分项（hub 数据；在现有评分之后叠加，总分上限 100）
@@ -3050,18 +3055,12 @@ def _filter_and_register_signals(
                             f"[scanner] {sym} 替换 {_min_sym}: 新分{_sig_score} > 旧分{_min_score}，"
                             f"撤旧挂新"
                         )
-                        if _min_entry.limit_order_id:
-                            try:
-                                import asyncio as _asio2
-                                await _asio2.get_event_loop().run_in_executor(
-                                    None, lambda: api.cancel_all_orders(_min_sym)
-                                )
-                            except Exception as _ce:
-                                logger.warning(f"[scanner] 撤低分挂单 {_min_sym} 失败: {_ce}")
-                        async with signal_watcher._lock:
-                            signal_watcher._watched.pop(_min_sym, None)
-                        if _ws_ref is not None:
-                            _ws_ref.unsubscribe(_min_sym)
+                        # [fix #32] 经 signal_watcher 公开接口撤单并移除；撤单失败/结果未知/已成交时条目保留，
+                        #   不占用该槽位，本次新信号跳过（下一轮扫描再比较）。
+                        _removed = await signal_watcher.cancel_signal(_min_sym, "高分信号替换低分挂单")
+                        if not _removed:
+                            logger.warning(f"[scanner] 撤低分挂单 {_min_sym} 未确认，保留条目，{sym} 本轮跳过")
+                            continue
 
                     async def _on_trigger(signal, _sw=signal_watcher):
                         """
@@ -3180,7 +3179,7 @@ def dispatch_trigger_analysis(symbol: str, ticker: dict, mark: dict | None, klin
     bi["long_cnt"] = sum(1 for p in positions if p.get("direction") == "LONG" and p.get("status") == "open")
     bi["short_cnt"] = sum(1 for p in positions if p.get("direction") == "SHORT" and p.get("status") == "open")
     active_syms = {(p["symbol"], p.get("direction", "").upper()) for p in positions if p.get("status") == "open"}
-    pending_syms = {p["symbol"] for p in positions if p.get("status") in ("pending", "patching")}
+    pending_syms = {p["symbol"] for p in positions if p.get("status") in ("pending", "patching", "pending_guard")}
     mpm = {symbol: mark} if mark else {}
     bi["_mark_price_map"] = mpm
     bi["_mark_price_map_ts"] = time.monotonic()
@@ -3414,7 +3413,7 @@ def run_scan(dry_run: bool = False, signal_watcher=None) -> dict:
     active_sym_set = {p["symbol"] for p in positions if p.get("status") == "open"}
     # patching 也排除：正在补挂止损止盈，不允许再次开仓
     pending_syms = {p["symbol"] for p in positions
-                   if p.get("status") in ("pending", "patching")}
+                   if p.get("status") in ("pending", "patching", "pending_guard")}
 
     # 对已有挂单的标的执行维护
     pending_positions = [p for p in positions if p.get("status") == "pending"]
@@ -3999,7 +3998,7 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
         _max_total_arb = 5
     from shared.state import get_all_positions as _arb_all_pos
     _total_open_arb = sum(1 for p in _arb_all_pos()
-                          if p.get("status") in ("open", "pending", "patching"))
+                          if p.get("status") in ("open", "pending", "patching", "pending_guard"))
     if _total_open_arb >= _max_total_arb:
         logger.info(f"[arb_scan] 总仓位已满({_total_open_arb}/{_max_total_arb})，跳过 funding_arb 扫描")
         return result
@@ -4031,7 +4030,7 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
     # ── 逐标的分析 ─────────────────────────────────────────────────────────────
     from shared.state import get_all_positions
     active_syms = {p["symbol"] for p in get_all_positions()
-                   if p.get("status") in ("open", "pending", "patching")}
+                   if p.get("status") in ("open", "pending", "patching", "pending_guard")}
 
     from shared.judges import judge_funding_arb
     from shared.indicators import rsi as _rsi_fn

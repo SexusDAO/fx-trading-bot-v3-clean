@@ -31,8 +31,8 @@ apt-get update && apt-get install -y \
 ## 2. 拉取代码
 
 ```bash
-# 用 GitHub Personal Access Token（PAT）克隆私有仓库
-git clone https://<YOUR_GITHUB_TOKEN>@github.com/SexusDAO/fx-trading-bot-v3.git \
+# [fix #50] 克隆地址不带令牌；私有仓库请用 SSH key 或 git credential helper 认证
+git clone https://github.com/SexusDAO/fx-trading-bot-v3.git \
   /root/.openclaw/workspace
 cd /root/.openclaw/workspace
 ```

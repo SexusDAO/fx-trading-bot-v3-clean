@@ -1,6 +1,10 @@
 """测试公共夹具。"""
 import pytest
 
+# 跳过非 pytest 的脚本型文件（fx/test_trade.py 会直接 sys.exit）
+collect_ignore_glob = ["**/test_trade.py"]
+collect_ignore = ["../test_trade.py"]
+
 # [v2-7] 撤单结果未知时 signal_watcher 会后台查持仓补止损；
 # 以下旧撤单测试只 mock 了撤单接口，这里把查持仓/补止损也挡掉，避免真实联网。
 _GUARD_FILES = {"test_cancel_paths.py", "test_cancel_state_batch1.py"}

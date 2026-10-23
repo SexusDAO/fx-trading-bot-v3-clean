@@ -60,7 +60,7 @@ def _rev_short(**ev):
          patch("shared.state._load_oi_cache", return_value={}), \
          patch("shared.state.set_cooldown"), \
          patch.object(J, "_detect_rsi_divergence", return_value={"divergence": False}):
-        return J.judge_reversal(k1h, k4h, k15, ind, chg24=8.0, funding=0.0003)
+        return J.judge_reversal(k1h, k4h, k15, ind, chg24=12.0, funding=0.0003)  # SHORT 门槛已提高到 10%
 
 
 def test_2_reversal_short_two_evidence_allowed():

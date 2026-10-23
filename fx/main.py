@@ -23,7 +23,6 @@ import time
 import faulthandler
 import threading
 import io
-import tracemalloc
 from pathlib import Path
 
 # ── 启动依赖检查 ─────────────────────────────────────────────────────────────
@@ -48,10 +47,6 @@ def _check_dependencies():
 _check_dependencies()
 
 # ── 临时诊断（定位后删除）────────────────────────────────────────────────
-# 内存分配追踪：保留 10 帧调用栈，用于定位内存泄漏源头
-tracemalloc.start(10)
-
-# ── 临时诊断（定位后删除）────────────────────────────────────────────────
 # 事件循环看门狗：独立线程检测事件循环阻塞，超过 2 秒 dump 所有线程堆栈
 _loop_heartbeat_ts = time.monotonic()
 
@@ -70,10 +65,16 @@ def _watchdog_thread_fn():
         time.sleep(0.5)
         lag = time.monotonic() - _loop_heartbeat_ts
         if lag > 2.0 and time.monotonic() - last_dump > 10.0:
-            buf = io.StringIO()
-            faulthandler.dump_traceback(file=buf, all_threads=True)
+            # faulthandler 需要真实 fileno，StringIO 会报 UnsupportedOperation，改写磁盘文件
+            try:
+                _dump_path = Path(__file__).parent / "logs" / "watchdog_stack.txt"
+                with open(_dump_path, "w") as _f:
+                    faulthandler.dump_traceback(file=_f, all_threads=True)
+                _stack = _dump_path.read_text()
+            except Exception as _fe:
+                _stack = f"堆栈获取失败: {_fe}"
             logger.error(
-                f"[watchdog] 事件循环阻塞 {lag:.1f}s，线程堆栈:\n{buf.getvalue()}"
+                f"[watchdog] 事件循环阻塞 {lag:.1f}s，线程堆栈:\n{_stack}"
             )
             last_dump = time.monotonic()
 
@@ -117,6 +118,37 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── 自写 main.pid，供 daemon_start.py 精确管理 ──────────────────────────────
 _MAIN_PID_FILE = LOG_DIR / "main.pid"
+
+
+def _pid_is_running_main(pid: int) -> bool:
+    """pid 对应进程仍存活（Linux 下额外核对 cmdline 含 main.py，避免 pid 复用误判）。"""
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as _f:
+            return b"main.py" in _f.read()
+    except FileNotFoundError:
+        return True      # 无 /proc（非 Linux）：进程存在即视为在运行
+    except Exception:
+        return True
+
+
+# [fix #6] 单实例保护：pid 文件存在且进程仍在运行 → 直接退出并报错，不覆盖 pid 文件
+try:
+    _old_pid = int(_MAIN_PID_FILE.read_text().strip())
+except Exception:
+    _old_pid = 0
+if _old_pid and _pid_is_running_main(_old_pid):
+    sys.stderr.write(f"[main] 已有 main.py 实例在运行 (pid={_old_pid})，本进程退出，避免双实例重复下单\n")
+    sys.exit(1)
 try:
     _MAIN_PID_FILE.write_text(str(os.getpid()))
 except Exception:
@@ -126,7 +158,9 @@ import atexit
 @atexit.register
 def _cleanup_main_pid():
     try:
-        _MAIN_PID_FILE.unlink(missing_ok=True)
+        # 只清理自己写的 pid 文件，不误删其他实例的
+        if _MAIN_PID_FILE.exists() and _MAIN_PID_FILE.read_text().strip() == str(os.getpid()):
+            _MAIN_PID_FILE.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -151,8 +185,6 @@ logging.basicConfig(
 logger = logging.getLogger("fx.main")
 logging.getLogger("websockets").setLevel(logging.WARNING)  # 屏蔽 ws 心跳 DEBUG 日志
 logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("fx.kline_cache").setLevel(logging.DEBUG)  # 临时诊断：K线缓存miss原因
-logging.getLogger("shared.kline_cache").setLevel(logging.DEBUG)  # 兼容 __name__ 方式
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -360,39 +392,6 @@ async def _loop_funding_arb(interval_sec: int = 1800, signal_watcher=None) -> No
         await _aio.sleep(interval_sec)
 
 
-# ── 临时诊断（定位后删除）────────────────────────────────────────────────
-async def _loop_mem_snapshot(interval_sec: int = 1200) -> None:
-    """每 20 分钟检查内存，仅在 RSS > 1500MB 或 asyncio 任务数 > 50 时输出诊断信息。"""
-    await asyncio.sleep(300)  # 启动后 5 分钟开始第一次采样
-    while True:
-        try:
-            # 当前 RSS
-            try:
-                pid = os.getpid()
-                rss_kb = int(open(f"/proc/{pid}/status").read().split("VmRSS:")[1].split()[0])
-                rss_mb = rss_kb // 1024
-            except Exception:
-                rss_mb = -1
-            
-            # asyncio 活跃任务数
-            task_count = len(asyncio.all_tasks())
-            
-            # 仅在异常时输出详细诊断
-            if rss_mb > 1500 or task_count > 50:
-                snapshot = tracemalloc.take_snapshot()
-                top_stats = snapshot.statistics('lineno')
-                lines = ["[mem] TOP15 内存分配:"]
-                for stat in top_stats[:15]:
-                    size_mib = stat.size / 1024 / 1024
-                    lines.append(f"[mem]   {size_mib:.1f} MiB  {stat}")
-                lines.append(f"[mem] RSS={rss_mb}MB asyncio任务数={task_count}")
-                logger.warning("\n".join(lines))
-        except Exception as e:
-            logger.error(f"[mem] 内存快照异常: {e}", exc_info=True)
-        
-        await asyncio.sleep(interval_sec)
-
-
 async def _loop_reset_circuit() -> None:
     """每天 UTC 00:00 重置熔断器。"""
     while True:
@@ -405,8 +404,12 @@ async def _loop_reset_circuit() -> None:
         )
         await asyncio.sleep(seconds_until_midnight)
         try:
-            from shared.risk_manager import reset_circuit
+            from shared.risk_manager import reset_circuit, backup_daily_logs
             reset_circuit()
+            try:
+                backup_daily_logs()   # [fix #48] 备份与熔断重置分离
+            except Exception as _be:
+                logger.warning(f"[main] 日志备份失败: {_be}")
             logger.info("[main] 熔断器日重置完成")
         except Exception as e:
             logger.error(f"[main] task_reset_circuit 异常: {e}", exc_info=True)
@@ -473,7 +476,18 @@ async def _sync_positions_on_startup() -> None:
 
     try:
         # ── 拉取真实持仓 ──────────────────────────────────────────────────────
-        pos_risk = _bapi.get_position()  # 走 binance_api 封装：_retry + Session + key 轮询
+        # [fix #2] 查询失败（ApiQueryError）≠ 交易所无持仓：直接中止对齐，不做任何清理
+        try:
+            pos_risk = _bapi.get_position()  # 走 binance_api 封装：_retry + Session + key 轮询
+            open_orders = _bapi.get_open_orders()
+        except Exception as _qe:
+            logger.error(f"[startup_sync] 查询交易所持仓/挂单失败，本次对齐中止（不清理、不补挂）: {_qe}")
+            try:
+                from shared.notifier import notify_async
+                await notify_async(f"⚠️ 持仓对齐中止：交易所持仓/挂单查询失败，未做任何清理\n{str(_qe)[:120]}")
+            except Exception:
+                pass
+            return
         # HEDGE 模式：多单 positionSide=LONG，空单 positionSide=SHORT，两者都要对齐
         # 用 (symbol, positionSide) 作为 key，避免同一标的多空各一条记录时互相覆盖
         real = {(p["symbol"], p["positionSide"]): p for p in pos_risk
@@ -481,7 +495,6 @@ async def _sync_positions_on_startup() -> None:
                 and abs(float(p.get("positionAmt", 0))) > 0}
 
         # ── 拉取开放挂单（普通限价单：TP）──────────────────────────────────────
-        open_orders = _bapi.get_open_orders()  # 走 binance_api 封装
         live_ids = {int(o["orderId"]) for o in open_orders}
         order_by_sym = {}
         for o in open_orders:
@@ -499,126 +512,89 @@ async def _sync_positions_on_startup() -> None:
         ps_map = {p["symbol"]: p for p in positions}
 
         removed,補挂, errors = [], [], []
+        orphans_rebuilt = []
 
-        # ── 1. 清僵尸记录 ─────────────────────────────────────────────────────
-        for sym, ps in ps_map.items():
-            if ps.get("status") != "open":
+        # ── 1. 清僵尸记录（仅在上面持仓/挂单查询都成功时才会走到这里）────────────
+        _live_statuses = ("open", "pending_guard")
+        for sym, ps in list(ps_map.items()):
+            if ps.get("status") not in _live_statuses:
                 continue
             ps_side = ps.get("direction", "long").upper()  # pos_state 里存的是 direction
-            real_key = (sym, ps_side)
-            if real_key not in real:
+            if (sym, ps_side) not in real:
                 # 交易所已无此方向持仓，用 state.py 的加锁原子接口清除
                 pid = ps.get("pos_id", sym)
                 remove_position(pid)
                 removed.append(sym)
                 logger.info(f"[startup_sync] 清除僵尸记录: {sym} ({ps_side})")
 
-        # ── 2. 检查有持仓但缺 TP 挂单的仓位，自动补挂 ───────────────────────
+        # ── 2. 对齐每个真实持仓：孤儿建档 + 统一走 position_manager._补挂保护单 ──────
+        # [fix #3] 孤儿仓位（交易所有、本地无）：用交易所数据重建完整记录并 add_position，
+        #          方向取 positionSide，不使用默认值。
+        # [fix #4/#13] 保护单补挂只走一条路径：position_manager._补挂保护单
+        #          （SL 存活不重复挂；缺失先撤旧单；新 SL id 写回 pos_state）。
+        from position_manager import _补挂保护单
+        from shared.state import add_position
+        ps_by_key = {}
+        for _p in get_all_positions():
+            if _p.get("status") in ("open", "pending_guard", "patching"):
+                ps_by_key[(_p.get("symbol"), str(_p.get("direction", "")).upper())] = _p
+
         for (sym, pos_side), rp in real.items():
             entry = float(rp["entryPrice"])
             qty   = abs(float(rp["positionAmt"]))
-            ps    = ps_map.get(sym, {})
-            pid   = ps.get("pos_id", sym)
+            ps    = ps_by_key.get((sym, pos_side))
+
+            if ps is None:
+                _now_ms = int(_time.time() * 1000)
+                ps = {
+                    "pos_id":             f"rec_{sym}_{pos_side[0]}_{_now_ms}",
+                    "symbol":             sym,
+                    "direction":          pos_side.lower(),   # 取自交易所 positionSide
+                    "status":             "open",
+                    "mode":               "recovered",
+                    "sig_type":           "recovered",
+                    "entry_price":        entry,
+                    "fill_price":         entry,
+                    "quantity":           qty,
+                    "quantity_remaining": qty,
+                    "leverage":           int(float(rp.get("leverage", 0) or 0)),
+                    "open_time":          _now_ms,
+                    "fill_time":          _now_ms,
+                    "tp1_filled":         False,
+                    "tp2_filled":         False,
+                    "source":             "orphan_recovered",
+                }
+                if not add_position(ps):
+                    errors.append(f"{sym}({pos_side}) 孤儿仓位建档失败")
+                    logger.error(f"[startup_sync] {sym}({pos_side}) 孤儿仓位建档失败，请人工核查")
+                    continue
+                orphans_rebuilt.append(f"{sym}({pos_side})")
+                logger.warning(f"[startup_sync] {sym}({pos_side}) 孤儿仓位已按交易所数据建档: qty={qty} entry={entry}")
+
+            pid    = ps.get("pos_id", sym)
             tp1_id = ps.get("tp1_order_id")
             tp2_id = ps.get("tp2_order_id")
-
-            # 单TP模式：tp2_price=None 表示本仓位不需要 TP2
             single_tp_mode = (ps.get("tp2_price") is None)
+            sl_id_ps = ps.get("sl_order_id")
 
             tp1_alive = bool(tp1_id and int(tp1_id) in live_ids)
             tp2_alive = bool(tp2_id and int(tp2_id) in live_ids) if not single_tp_mode else True
-
-            # v3.56: 检查 SL 是否仍在交易所（重启期间可能被交易所自动撤销）
-            sl_id_ps  = ps.get("sl_order_id")
             sl_alive  = bool(sl_id_ps and int(sl_id_ps) in live_algo_ids)
-            if sl_id_ps and not sl_alive:
-                logger.warning(f"[startup_sync] {sym}: SL单 {sl_id_ps} 不在交易所，需补挂")
-                try:
-                    from executor import _get_precision
-                    from shared.calc_sl_tp import calc_sl_tp as _csltp
-                    _direction_sl = ps.get("direction", "LONG").upper()
-                    _sl_price_sv  = float(ps.get("sl_price", 0))
-                    _qty_sv       = abs(float(rp.get("positionAmt", 0)))
-                    _prec_sv      = _get_precision(sym)
-                    if _sl_price_sv > 0 and _qty_sv > 0:
-                        _resp_sv = await _place_guards_async.__wrapped__(
-                            sym, _direction_sl, _qty_sv,
-                            _sl_price_sv, ps.get("tp1_price", 0), ps.get("tp2_price"), _prec_sv
-                        ) if False else None  # 只补SL，不重复挂TP
-                        # 直接调 api.place_sl
-                        from shared import binance_api as _bapi2
-                        _sl_resp = await __import__('asyncio').get_event_loop().run_in_executor(
-                            None, lambda: _bapi2.place_sl(
-                                symbol=sym,
-                                side="SELL" if _direction_sl=="LONG" else "BUY",
-                                position_side=_direction_sl,
-                                trigger_price=round(_sl_price_sv / _prec_sv["tick"]) * _prec_sv["tick"],
-                                quantity=round(_qty_sv / _prec_sv["step"]) * _prec_sv["step"],
-                            )
-                        )
-                        _new_sl_id_sv = _sl_resp.get("orderId") or _sl_resp.get("algoId")
-                        if _new_sl_id_sv:
-                            from shared.state import update_position as _upd
-                            _upd(ps.get("pos_id", sym), {"sl_order_id": int(_new_sl_id_sv)})
-                            logger.info(f"[startup_sync] {sym}: SL补挂成功 id={_new_sl_id_sv}")
-                            補挂.append(f"{sym} sl={_new_sl_id_sv}")
-                        else:
-                            errors.append(f"{sym} SL补挂失败: {_sl_resp}")
-                except Exception as _sv_e:
-                    errors.append(f"{sym} SL补挂异常: {_sv_e}")
-                    logger.error(f"[startup_sync] {sym} SL补挂失败: {_sv_e}")
 
-            if tp1_alive and tp2_alive and sl_alive:
+            if tp1_alive and tp2_alive and sl_alive and ps.get("status") == "open":
                 logger.info(f"[startup_sync] {sym}: SL✅ TP1✅ {'(单TP)' if single_tp_mode else 'TP2✅'} 无需补挂")
                 continue
 
-            # TP1 缺失才需补挂
-            if tp1_alive and single_tp_mode and sl_alive:
-                logger.info(f"[startup_sync] {sym}: SL✅ TP1✅ 单TP模式 无需补挂")
-                continue
-
-            logger.info(f"[startup_sync] {sym}: tp1_alive={tp1_alive} tp2_alive={tp2_alive} single_tp={single_tp_mode}，开始补挂")
+            logger.info(f"[startup_sync] {sym}: sl_alive={sl_alive} tp1_alive={tp1_alive} "
+                        f"tp2_alive={tp2_alive} single_tp={single_tp_mode}，委托 position_manager 补挂")
             try:
-                klines = _bapi.get_klines(sym, "1h", 22)
-                now_ms = _time.time() * 1000
-                closed = [k for k in klines if float(k[6]) < now_ms]
-                trs = [max(float(closed[i][2]) - float(closed[i][3]),
-                           abs(float(closed[i][2]) - float(closed[i-1][4])),
-                           abs(float(closed[i][3]) - float(closed[i-1][4])))
-                       for i in range(1, len(closed))]
-                atr = sum(trs[-14:]) / 14 if trs else entry * 0.01
-                tier = ps.get("volatility_tier", "mid")
-                from config import SL_MULT_LOW, SL_MULT_MID, SL_MULT_HIGH
-                sl_mult = {"low": SL_MULT_LOW, "mid": SL_MULT_MID, "high": SL_MULT_HIGH}.get(tier, SL_MULT_MID)
-
-                direction_ps = ps.get("direction", "long").upper()
-                sl_price  = ps.get("sl_price") or (
-                    entry - atr * sl_mult if direction_ps == "LONG" else entry + atr * sl_mult)
-                tp1_price = ps.get("tp1_price") or (
-                    entry + atr * 1.5 if direction_ps == "LONG" else entry - atr * 1.5)
-                # tp2_price 严格从 pos_state 取，None 表示单TP模式
-                tp2_price = ps.get("tp2_price")  # None → 不挂 TP2
-
-                precision = _get_precision(sym)
-                guard = await _place_guards_async(
-                    sym, direction_ps, qty, sl_price, tp1_price, tp2_price, precision
-                )
-
-                update_position(pid, {
-                    "status": "open",
-                    "fill_price": entry,
-                    "quantity": qty,
-                    "sl_price": sl_price,
-                    "tp1_price": tp1_price,
-                    "tp2_price": tp2_price,
-                    "tp1_order_id": guard.get("tp1_id"),
-                    "tp2_order_id": guard.get("tp2_id"),
-                })
-                補挂.append(f"{sym} tp1={guard.get('tp1_id')}")
-                logger.info(f"[startup_sync] {sym} 补挂完成: {guard}")
+                await _补挂保护单(ps, entry, qty, pid, sym)
+                補挂.append(f"{sym}({pos_side})")
             except Exception as e:
                 errors.append(f"{sym}: {e}")
                 logger.error(f"[startup_sync] {sym} 补挂失败: {e}")
+
+        ps_map = {p["symbol"]: p for p in get_all_positions()}
 
         # ── 3. 推送摘要 ───────────────────────────────────────────────────────
         lines = [f"🔄 重启持仓对齐完成"]
@@ -636,6 +612,8 @@ async def _sync_positions_on_startup() -> None:
             t2_ok  = "✅" if (tp2_id and int(tp2_id) in live_ids) else "❌"
             lines.append(f"  {sym}({pos_side}): entry={entry:.6g} qty={qty} PnL={pnl:+.2f}U")
             lines.append(f"    SL={sl_str}(patrol) TP1{t1_ok} TP2{t2_ok}")
+        if orphans_rebuilt:
+            lines.append(f"  🧩 孤儿仓位已建档: {', '.join(orphans_rebuilt)}")
         if removed:
             lines.append(f"  🗑 清除僵尸: {', '.join(removed)}")
         if 補挂:
@@ -660,8 +638,40 @@ async def _sync_positions_on_startup() -> None:
         logger.error(f"[startup_sync] 对齐失败: {e}", exc_info=True)
 
 
+async def _verify_hedge_mode_or_exit() -> None:
+    """[fix #16] 启动时向交易所确认对冲模式；确认非对冲 → 拒绝启动；无法确认 → 告警后继续。
+    （代码按对冲模式编写：positionSide=LONG/SHORT，单向模式下对账与保护单会全部错位。）"""
+    from shared import binance_api as _b
+    loop = asyncio.get_running_loop()
+    try:
+        dual = await loop.run_in_executor(None, _b.get_position_mode)
+    except Exception as e:
+        # [fix #16] 网络异常等无法确认时允许继续启动，仅告警；确认为单向模式才拒绝
+        msg = f"⚠️ 暂时无法确认账户持仓模式，继续启动（请人工核实为对冲模式）：{str(e)[:120]}"
+        logger.warning(f"[main] {msg}")
+        try:
+            from shared.notifier import notify_async
+            await notify_async(msg)
+        except Exception:
+            pass
+        return
+    if not dual:
+        msg = "🚨 账户当前为单向持仓模式，本系统要求对冲模式(Hedge Mode)，拒绝启动。请在币安合约设置中切换后重启。"
+        logger.critical(f"[main] {msg}")
+        try:
+            from shared.notifier import notify_async
+            await notify_async(msg)
+        except Exception:
+            pass
+        raise SystemExit(2)
+    logger.info("[main] 持仓模式校验通过：对冲模式")
+
+
 async def main() -> None:
     logger.info("[main] fx 交易系统 V3.0 启动")
+    import config as _cfg_req
+    _cfg_req.require_env()   # [fix #39] 必填项缺失直接报错退出
+    await _verify_hedge_mode_or_exit()
 
     # ── 临时诊断（定位后删除）────────────────────────────────────────────────
     # 启动事件循环看门狗线程：检测阻塞 > 2s 时 dump 所有线程堆栈
@@ -730,6 +740,13 @@ async def main() -> None:
         await _sync_positions_on_startup()
     ws.on_reconnect(_on_ws_reconnect)
 
+    # [fix #36] 注册断线补偿回调：userData 断线期间由 ws_listener 的有界补偿任务周期性 REST 对齐
+    #   （此前 on_disconnect 从未注册，补偿任务永远不启动）。对齐函数查询失败时会整体中止，不会误清仓。
+    async def _on_ws_disconnect():
+        logger.info("[main] WS 断线补偿：REST 对齐持仓/保护单...")
+        await _sync_positions_on_startup()
+    ws.on_disconnect(_on_ws_disconnect)
+
     # ── 2. 初始化 PositionManager，注入 ws ────────────────────────────────
     from position_manager import PositionManager, _set_manager, _adjust_sl_tp_loop_static
     pm = PositionManager(ws_listener=ws)
@@ -793,9 +810,6 @@ async def main() -> None:
         asyncio.create_task(_loop_reset_circuit(),                             name="reset_circuit"),
         asyncio.create_task(_loop_event_latency_monitor(),                     name="loop_latency"),
         asyncio.create_task(_loop_track_outcomes(3600),                        name="track_outcomes"),
-        # ── 临时诊断（定位后删除）────────────────────────────────────────────────
-        # 内存快照：每 20 分钟输出 tracemalloc Top 15 + RSS + asyncio 任务数
-        asyncio.create_task(_loop_mem_snapshot(1200),                          name="mem_snapshot"),
     ]
     if _trigger_det is not None:
         _trigger_det._watcher = signal_watcher
@@ -843,10 +857,45 @@ async def main() -> None:
 
     logger.info("[main] 所有任务已启动，等待退出信号...")
     # 监控所有 task，任意一个提前结束就记录
+    # [fix #37] 把 position_manager / signal_watcher / ws_listener 的内部后台 task 纳入监控：
+    #   关键 task（持仓巡检、userData/keepalive/markPrice、挂单轮询）意外结束 → 与主 task 同样处理（触发退出由守护重启）；
+    #   非关键 task（gc/health/forceOrder）只记录错误并推送一次。
+    def _internal_tasks():
+        crit, noncrit = [], []
+        try:
+            crit.extend(getattr(pm, "_tasks", []) or [])
+        except Exception:
+            pass
+        for _name in ("_polling_task", "_recheck_task", "_btc_guard_task"):
+            _t = getattr(signal_watcher, _name, None)
+            if _t is not None:
+                crit.append(_t)
+        _g = getattr(signal_watcher, "_gc_task", None)
+        if _g is not None:
+            noncrit.append(_g)
+        for _name in ("_user_data_task", "_mark_price_task", "_keepalive_task"):
+            _t = getattr(ws, _name, None)
+            if _t is not None:
+                crit.append(_t)
+        for _name in ("_force_order_task", "_health_task"):
+            _t = getattr(ws, _name, None)
+            if _t is not None:
+                noncrit.append(_t)
+        return crit, noncrit
+
     async def _watchdog():
+        _reported = set()
         while True:
             await asyncio.sleep(10)
             done = [t for t in tasks if t.done()]
+            _crit, _noncrit = _internal_tasks()
+            done += [t for t in _crit if t.done()]
+            for t in _noncrit:
+                if t.done() and id(t) not in _reported:
+                    _reported.add(id(t))
+                    _exc = t.exception() if not t.cancelled() else None
+                    logger.error(f"[main] WATCHDOG: 非关键内部 task {t.get_name()} 已结束 "
+                                 f"cancelled={t.cancelled()} exc={_exc}")
             if done:
                 for t in done:
                     exc = t.exception() if not t.cancelled() else None

@@ -32,6 +32,7 @@ import math
 import os
 import random
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -110,10 +111,18 @@ def _refresh_precision_cache() -> None:
         logger.warning(f"[executor] 精度缓存刷新失败: {e}")
 
 
+class PrecisionUnavailableError(RuntimeError):
+    """[fix #25] 交易所精度（tickSize/stepSize）获取失败。"""
+
+
 def _get_precision(symbol: str) -> dict:
     if time.time() - _PRECISION_TS > _PRECISION_TTL or symbol not in _PRECISION_CACHE:
         _refresh_precision_cache()
-    return _PRECISION_CACHE.get(symbol, {"tick": 0.01, "step": 0.001})
+    prec = _PRECISION_CACHE.get(symbol)
+    if not prec or not prec.get("tick") or not prec.get("step"):
+        # [fix #25] 取不到精度不再用默认值（0.01/0.001 会让价格/数量错位被拒或下错价）→ 拒绝下单
+        raise PrecisionUnavailableError(f"{symbol} 精度信息不可用（tick/step），拒绝下单")
+    return prec
 
 
 def _round_price(price: float, tick: float) -> float:
@@ -180,11 +189,11 @@ def _precheck(signal: dict) -> tuple[bool, str]:
     for p in positions:
         if p["symbol"] == symbol:
             status = p.get("status", "")
-            if status in ("open", "pending", "patching"):
+            if status in ("open", "pending", "patching", "pending_guard"):
                 return False, f"{symbol} 已有机器人{'持仓' if status=='open' else ('补挂中' if status=='patching' else '挂单')}"
 
     # 1-2: 检查 pending/patching orders（兼容不同字段名）
-    pending = [p for p in positions if p.get("status") in ("pending", "patching")]
+    pending = [p for p in positions if p.get("status") in ("pending", "patching", "pending_guard")]
     for p in pending:
         if p["symbol"] == symbol:
             return False, f"{symbol} 已有挂单"
@@ -203,8 +212,10 @@ def _precheck(signal: dict) -> tuple[bool, str]:
                and o.get("type") in ("LIMIT", "MARKET")]
         if dup:
             return False, f"{symbol} 交易所已有同向入场挂单({len(dup)}笔)，跳过重复开仓"
-    except Exception:
-        pass  # 查不到不阻断，保守跳过
+    except Exception as _lo_e:
+        # [fix #23] 兜底检查失败 → 拒绝开仓，不静默放行
+        logger.error(f"[executor] {symbol} 查询交易所挂单失败，拒绝开仓: {_lo_e}")
+        return False, f"{symbol} 交易所挂单查询失败，无法排除重复开仓，拒绝开仓"
 
     # 1-3/1-4: 持仓总量 + 方向上限（用 risk_manager.check_position_limits 而非静态上限，和 scanner 动态上限保持一致）
     open_pos  = [p for p in positions if p.get("status") in ("open", "pending")]
@@ -280,7 +291,7 @@ def _precheck(signal: dict) -> tuple[bool, str]:
         _acc_d   = api.get_account()
         _equity  = float(_acc_d.get("totalMarginBalance", 0)) or float(_acc_d.get("totalWalletBalance", 1))
         # v3.59: 同时计入 open 和 pending 持仓，避免多个同向 pending 等待成交时 Delta 被低估
-        _nom_statuses = ("open", "pending", "patching")
+        _nom_statuses = ("open", "pending", "patching", "pending_guard")
         _long_nom  = sum(
             float(p.get("quantity", 0)) * float(p.get("entry_price", 0))
             for p in _all_pos if p.get("status") in _nom_statuses and p.get("direction","").upper() == "LONG"
@@ -302,7 +313,9 @@ def _precheck(signal: dict) -> tuple[bool, str]:
                 f"限制新增空头（已计入 open+pending）"
             )
     except Exception as _de:
-        logger.debug(f"[executor] {symbol} 净Delta检查失败，降级放行: {_de}")
+        # [fix #28] 检查异常 → 拒绝开仓（原为降级放行）
+        logger.error(f"[executor] {symbol} 净Delta检查失败，拒绝开仓: {_de}")
+        return False, f"{symbol} 净Delta检查异常，拒绝开仓: {_de}"
 
     # 1-12: sl_degraded + score 双重过滤（v3.78 APR 复盘教诛）
     # 背景： sl_degraded=True 说明止损不在结构位（容易被噪音打到）
@@ -575,7 +588,7 @@ def _account_final_check(notional: float, notifier_fn=None) -> tuple[bool, str]:
         positions = get_all_positions()
         total_notional = sum(
             p.get("quantity", 0) * p.get("entry_price", 0)
-            for p in positions if p.get("status") in ("open", "pending", "patching")
+            for p in positions if p.get("status") in ("open", "pending", "patching", "pending_guard")
         )
         max_notional = total_balance * _max_nom
         if total_notional + notional > max_notional:
@@ -586,14 +599,16 @@ def _account_final_check(notional: float, notifier_fn=None) -> tuple[bool, str]:
             from shared.risk_manager import check_max_drawdown as _cmd, update_drawdown_high_water as _udw
             _total_margin = float(acc.get("totalMarginBalance", total_balance))
             # v3.59: 高水位只在无活跃持仓时更新，避免含浮亏的权益虚假拉高高水位
-            _open_pos_count = sum(1 for p in get_all_positions() if p.get("status") in ("open", "pending", "patching"))
+            _open_pos_count = sum(1 for p in get_all_positions() if p.get("status") in ("open", "pending", "patching", "pending_guard"))
             if _open_pos_count == 0:
                 _udw(_total_margin)
             _dd_ok, _dd_reason = _cmd(_total_margin, notifier_fn=notifier_fn)
             if not _dd_ok:
                 return False, _dd_reason
-        except Exception:
-            pass
+        except Exception as _dd_e:
+            # [fix #28] 回撤保护检查异常 → 拒绝开仓（原为静默放行）
+            logger.error(f"[executor] {symbol} 回撤保护检查失败，拒绝开仓: {_dd_e}")
+            return False, f"回撤保护检查异常，拒绝开仓: {_dd_e}"
 
         # 功能三：保证金安全垫检查
         try:
@@ -607,8 +622,10 @@ def _account_final_check(notional: float, notifier_fn=None) -> tuple[bool, str]:
                 _MARGIN_TIGHT_HINT[0] = ""
             # 保证金偏紧时将 scale 写入全局供开仓逻辑读取
             _MARGIN_SCALE[0] = _mstats.get("position_scale", 1.0)
-        except Exception:
-            pass
+        except Exception as _ms_e:
+            # [fix #28/#29] 保证金安全垫检查异常 → 拒绝开仓
+            logger.error(f"[executor] {symbol} 保证金安全垫检查失败，拒绝开仓: {_ms_e}")
+            return False, f"保证金安全垫检查异常，拒绝开仓: {_ms_e}"
 
         return True, ""
     except Exception as e:
@@ -692,8 +709,8 @@ def _place_open_order(symbol: str, direction: str, mode: str,
     step = precision["step"]
     side = "BUY" if direction.upper() == "LONG" else "SELL"
 
-    price_str = str(_round_price(entry_price, tick))
-    qty_str   = str(_round_qty(quantity, step))
+    price_str = api.fmt_num(_round_price(entry_price, tick))   # [fix #25] 统一定点格式
+    qty_str   = api.fmt_num(_round_qty(quantity, step))
 
     # [fix] -4024 预检：若计算价格低于历史已记录的最低限价，直接拒绝不提交
     _min_price_key = f"_min_price_{symbol}"
@@ -736,6 +753,16 @@ def _place_open_order(symbol: str, direction: str, mode: str,
                 quantity=float(qty_str),
                 price=float(price_str),
                 timeInForce="GTX",
+            )
+        elif expire_ts:
+            # [fix #34] immediate 入场单：GTD，有效期由 ORDER_EXPIRE_* 决定
+            order = api.place_order(
+                symbol=symbol, side=side,
+                order_type="LIMIT",
+                quantity=float(qty_str),
+                price=float(price_str),
+                timeInForce="GTD",
+                goodTillDate=expire_ts,
             )
         else:
             order = api.place_order(
@@ -908,6 +935,7 @@ async def _place_guards_async(
     symbol: str, direction: str,
     fill_qty: float, sl_price: float, tp1_price: float, tp2_price: float | None,
     precision: dict,
+    skip_sl: bool = False,
 ) -> dict:
     """
     提交保护单：SL + TP1（必选）+ TP2（可选，tp2_price=None 时不挂）。
@@ -1006,8 +1034,8 @@ async def _place_guards_async(
                 f"错误：{e}"
             )
 
-    coros = [
-        _place_algo_sl_with_verify(),
+    coros = [] if skip_sl else [_place_algo_sl_with_verify()]   # [fix #4] skip_sl: SL 已存活时不重复挂
+    coros += [
         _place("tp1", dict(
             symbol=symbol, side=close_side,
             order_type="LIMIT",
@@ -1035,7 +1063,7 @@ async def _place_guards_async(
     logger.info(f"[executor] {symbol} 保护单模式: {tp_mode}")
 
     return {
-        "protection_status": "complete" if results.get("sl") and results.get("tp1") and (not has_tp2 or results.get("tp2")) else "partial",
+        "protection_status": "complete" if (skip_sl or results.get("sl")) and results.get("tp1") and (not has_tp2 or results.get("tp2")) else "partial",
         "unallocated_qty": max(0.0, fill_qty - sl_qty_f),
         "sl_id":   results.get("sl"),
         "tp1_id":  results.get("tp1"),
@@ -1047,7 +1075,7 @@ async def _place_guards_async(
         "tp_mode": "dual" if has_tp2 else "single",
         "sl_qty":  sl_qty_f,
         "tp1_qty": tp1_qty_f,
-        "tp2_qty": tp2_qty_f,
+        "tp2_quantity": tp2_qty_f,
     }
 
 
@@ -1203,7 +1231,7 @@ def _persist_position_record(rec: dict, kind: str) -> bool:
         from shared import state as _st
         corrupted = bool(getattr(_st, "_POS_STATE_CORRUPTED", False))
         dup = [p for p in get_all_positions()
-               if p.get("symbol") == sym and p.get("status") in ("open", "pending", "patching")]
+               if p.get("symbol") == sym and p.get("status") in ("open", "pending", "patching", "pending_guard")]
     except Exception:
         corrupted, dup = False, []
     if err is None and not corrupted and dup:
@@ -1239,7 +1267,7 @@ def _write_position(
     """写入 pos_state.json，返回 pos_id；写入失败返回 None（[v3.89 #52]）。问题一修复：加入 atr 参数写入 atr_at_entry"""
     pos_id = str(uuid.uuid4())[:8]
     tp1_qty = guard["tp1_qty"]
-    tp2_qty = guard["tp2_qty"]
+    tp2_qty = guard["tp2_quantity"]
 
     _pos_rec = {
         "pos_id":                pos_id,
@@ -1443,7 +1471,39 @@ def execute_signal_sync(signal: dict, ws_listener: Any = None) -> bool:
         asyncio.set_event_loop(None)
 
 
+# ── [fix #7/#8] 按 symbol 的开仓互斥锁 ───────────────────────────────────────────
+# 主扫描/signal_watcher（主事件循环）与 funding_arb（execute_signal_sync 在独立线程+独立 event loop 中运行）
+# 共用同一把锁，因此用线程锁（跨 event loop 有效）；异步侧用非阻塞轮询获取，不阻塞事件循环。
+# 锁覆盖「预检(读 state) → 下单 → add_position 写 state」完整区间，消除先检查后执行的竞态窗口。
+_SYMBOL_OPEN_LOCKS: dict = {}
+_SYMBOL_OPEN_LOCKS_GUARD = threading.Lock()
+_SYMBOL_LOCK_TIMEOUT = 90.0
+
+
+def _get_symbol_open_lock(symbol: str) -> "threading.Lock":
+    with _SYMBOL_OPEN_LOCKS_GUARD:
+        lk = _SYMBOL_OPEN_LOCKS.get(symbol)
+        if lk is None:
+            lk = _SYMBOL_OPEN_LOCKS[symbol] = threading.Lock()
+        return lk
+
+
 async def _execute_async(signal: dict, ws_listener: Any = None) -> bool:
+    symbol = signal.get("symbol", "")
+    lk = _get_symbol_open_lock(symbol)
+    deadline = time.time() + _SYMBOL_LOCK_TIMEOUT
+    while not lk.acquire(blocking=False):
+        if time.time() >= deadline:
+            logger.warning(f"[executor] {symbol} 等待开仓互斥锁超时({_SYMBOL_LOCK_TIMEOUT:.0f}s)，放弃本次开仓")
+            return False
+        await asyncio.sleep(0.05)
+    try:
+        return await _execute_async_locked(signal, ws_listener)
+    finally:
+        lk.release()
+
+
+async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     symbol    = signal.get("symbol", "")
     direction = (signal.get("direction") or "LONG").upper()
     mode      = signal.get("mode", "pullback")
@@ -1789,7 +1849,13 @@ async def _execute_async(signal: dict, ws_listener: Any = None) -> bool:
     elif entry_mode == "pending_order":
         expire_ts = int((time.time() + 4 * 3600) * 1000)
     else:
-        expire_ts = None
+        # [fix #34] immediate 模式原为无过期的 GTC：改用 GTD，有效期取 ORDER_EXPIRE_* 配置
+        #   （交易所要求 goodTillDate 至少晚于当前 600 秒，这里取配置分钟数并保证 >= 11 分钟）
+        try:
+            from config import ORDER_EXPIRE_PULLBACK_MIN as _exp_min
+        except ImportError:
+            _exp_min = 240
+        expire_ts = int((time.time() + max(float(_exp_min), 11.0) * 60) * 1000)
 
     order_id, err = _place_open_order(
         symbol, direction, mode, entry_price, quantity, precision,

@@ -1247,7 +1247,7 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
     #           放宽幅度门槛(-5% vs -8%),专门接住分类层路由进来的小跌幅极端信号。
     # v3.46: 根据波动率档位动态决定 reversal chg24 触发门槛
     # [v3.87 STEP3] 删除重复导入 ATR_TIER_MID_MIN（下方 1343 行附近同函数内再次导入，值相同）
-    from config import ATR_TIER_MID_REVERSAL_CHG24
+    from config import ATR_TIER_MID_REVERSAL_CHG24, REVERSAL_CHG24_SHORT_MIN
     _rev_chg24_long  = -ATR_TIER_MID_REVERSAL_CHG24 if ind.get("_vol_tier") == "mid_vol" else -8.0
     # [v3.87 STEP3 DOC] _rev_chg24_short 是遗留死变量：v3.64 起做空主通道有意放宽并写死为 chg24 >= +5.0（见下方方向路由），
     #   不再读取本变量，因此中波动档的做空涨幅门槛配置不生效。做多仍使用 _rev_chg24_long，多空门槛不对称是有意的。保留不删。
@@ -1261,14 +1261,14 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
     if chg24 <= _rev_chg24_long and rsi_4h < 55:
         direction = "LONG"
         _rsi1h_channel = False
-    elif chg24 >= 5.0 and rsi_4h > 65:
+    elif chg24 >= REVERSAL_CHG24_SHORT_MIN and rsi_4h > 65:
         # v3.64: SHORT 主通道: chg24>=+5%（原8%）且 rsi4h>65（原55，提高要求补偿放宽的chg24）
         direction = "SHORT"
         _rsi1h_channel = False
     elif rsi_1h < 28 and chg24 <= -5 and rsi_4h < 55:
         direction = "LONG"    # RSI1H 极端超卖通道
         _rsi1h_channel = True
-    elif rsi_1h > 72 and chg24 >= 4.0 and rsi_4h > 55:
+    elif rsi_1h > 72 and chg24 >= REVERSAL_CHG24_SHORT_MIN and rsi_4h > 55:   # [fix C2] 4%→10%，与主通道一致
         # v3.64: SHORT RSI1H 补充通道: chg24>=+4%（原5%，略放宽），RSI1H>72 保持
         direction = "SHORT"
         _rsi1h_channel = True

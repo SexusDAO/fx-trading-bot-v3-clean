@@ -121,6 +121,7 @@ _last_daily_report_date: str = ""      # 上次日报日期(UTC date string)
 
 # 补挂互斥锁:key = pos_id,防止 executor 和 patrol 同时对同一仓位补挂 TP/SL
 _guard_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+_pg_retry_ts: dict = {}   # [fix #10] pending_guard 重试节流
 
 # v3.56 平仓幂等保护:防止 WS路径 和 patrol路径 并发对同一仓位发出两次市价平仓
 _closing_set: set[str] = set()   # 正在平仓的 pos_id 集合
@@ -723,7 +724,21 @@ class PositionManager:
                 try:
                     precision = _get_precision(symbol)
                     _sl_qty   = _round_qty(tp2_qty, precision["step"])
-                    _sl_p     = _round_price(sl_price, precision["tick"])
+                    # [fix F] TP1 成交后剩余仓位止损移到入场价保本：
+                    # LONG 取 max(原止损, 入场成交价)，SHORT 取 min(原止损, 入场成交价)，
+                    # 保证止损至少不劣于原止损、且不劣于保本价。
+                    _fill_ref = float(pos.get("fill_price") or pos.get("entry_price") or 0.0)
+                    if _fill_ref > 0:
+                        _sl_be = (max(sl_price, _fill_ref) if direction == "LONG"
+                                  else min(sl_price, _fill_ref))
+                    else:
+                        _sl_be = sl_price
+                    _sl_p     = _round_price(_sl_be, precision["tick"])
+                    if abs(_sl_p - sl_price) > 0:
+                        logger.info(
+                            f"[pm] {symbol} TP1后剩余仓位止损移向保本: "
+                            f"{sl_price} → {_sl_p} (入场参考 {_fill_ref})"
+                        )
                     _close_side = "SELL" if direction == "LONG" else "BUY"
                     _pos_side   = "LONG" if direction == "LONG" else "SHORT"
                     _resp = await asyncio.get_running_loop().run_in_executor(
@@ -745,7 +760,7 @@ class PositionManager:
                                 )
                             except Exception:
                                 pass
-                        update_position(pid, {"sl_order_id": int(_new_sl_id)})
+                        update_position(pid, {"sl_order_id": int(_new_sl_id), "sl_price": _sl_p})
                         logger.info(
                             f"[pm] {symbol} TP1后补挂SL单成功: "
                             f"qty={_sl_qty} price={_sl_p} id={_new_sl_id}"
@@ -1060,6 +1075,9 @@ class PositionManager:
                     (pos.get("judge_detail") or {}).get("vol_ratio", 0) or 0), 4),
                 "judge_detail":      pos.get("judge_detail", {}),
                 "max_correlation":   round(float(pos.get("max_correlation", 0.0)), 4),
+                "signal_id":         pos.get("_sig_id", ""),          # [fix #44]
+                "fees_usdt":         round(_manual_fees, 6),          # [fix #44]
+                "pnl_net_usdt":      round(_real_pnl - _manual_fees, 4),
             }
             TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(TRADE_LOG_PATH, "a", encoding="utf-8") as _f:
@@ -1068,9 +1086,11 @@ class PositionManager:
                 f"[pm] {symbol} {_inferred_close_reason} trade_log 已补写: "
                 f"exit={_exit_price:.6g} pnl={_real_pnl:+.4f}U close_reason={_inferred_close_reason}"
             )
-            # 补写到燃断器盘口
+            # 补写熔断器盘口（[fix #44] 带实际手续费）
+            _manual_fees = _fetch_actual_fees(symbol, int(pos.get("open_time", 0) or 0),
+                                              float(pos.get("quantity", 0) or 0) * float(_exit_price or 0))
             try:
-                _record_pnl(_real_pnl, symbol=symbol)
+                _record_pnl(_real_pnl, symbol=symbol, fee=_manual_fees)
             except Exception:
                 pass
         except Exception as _te:
@@ -1118,6 +1138,22 @@ class PositionManager:
                 logger.info(f"[pm] {symbol} v3.47 TP1后持仓满72H硬上限,强制平仓(浮盈{pnl_pct*100:.1f}%)")
                 await self._force_close(pos, "time_stop_hard_72h")
                 return
+
+        # ── [fix E] 接入 TIME_STOP_PROFIT_THRESHOLD：浮盈达到 ATR × 阈值后不再触发时间止损 ──
+        # 原常量在 config 里标注「代码未引用」，实际未生效；此处接入。
+        try:
+            from config import TIME_STOP_PROFIT_THRESHOLD as _TSPT
+            _atr_ref = float(pos.get("atr_at_entry", 0.0) or 0.0)
+            if _atr_ref > 0:
+                _profit_abs = (price - entry) if direction == "LONG" else (entry - price)
+                if _profit_abs >= _atr_ref * float(_TSPT):
+                    logger.info(
+                        f"[pm] {symbol} 浮盈 {_profit_abs:.6g} ≥ ATR({_atr_ref:.6g})×{_TSPT}"
+                        f"={_atr_ref * float(_TSPT):.6g}，跳过时间止损"
+                    )
+                    return
+        except Exception as _ts_e:
+            logger.debug(f"[pm] {symbol} 时间止损浮盈豁免检查异常，按原逻辑继续: {_ts_e}")
 
         # SL 辅助确认:每5分钟检查 Algo SL 是否仍在交易所,不在则重挂
         # 注意:本账号 SL 走 /fapi/v1/algoOrder,必须查 openAlgoOrders 而非 openOrders
@@ -1750,6 +1786,37 @@ def _health_score_detail(direction: str,
 
 
     # ── B4. 挂单有效期检查 ────────────────────────────────────────────────────
+async def _recover_partial_fill(pos: dict, od: dict, pid: str, symbol: str) -> bool:
+    """[fix #14] 挂单被撤/过期时若已有部分成交（executedQty>0），不能直接删本地记录：
+    交易所里已经有真实持仓，按"孤儿仓位"处理——用实际成交量/均价补挂保护单并保留记录。
+    返回 True 表示已按部分成交接管（调用方不得再删记录）。"""
+    try:
+        exec_qty = float((od or {}).get("executedQty", 0) or 0)
+    except (TypeError, ValueError):
+        exec_qty = 0.0
+    if exec_qty <= 0:
+        return False
+    try:
+        fill_price = float((od or {}).get("avgPrice") or (od or {}).get("price") or 0)
+    except (TypeError, ValueError):
+        fill_price = 0.0
+    if fill_price <= 0:
+        fill_price = float(pos.get("entry_price") or 0)
+    logger.warning(f"[pm] {symbol} 挂单已{(od or {}).get('status')}但部分成交 executedQty={exec_qty} "
+                   f"avg={fill_price}，按孤儿仓位处理：保留记录并补挂保护单")
+    update_position(pid, {"status": "patching", "quantity": exec_qty, "quantity_remaining": exec_qty,
+                          "fill_price": fill_price, "entry_price": fill_price or pos.get("entry_price"),
+                          "partial_fill": True})
+    mark_system_order_update(symbol)
+    try:
+        await _补挂保护单(pos, fill_price, exec_qty, pid, symbol)
+    except Exception as ge:
+        update_position(pid, {"status": "pending_guard", "missing_guards": ["sl", "tp1"]})
+        logger.error(f"[pm] {symbol} 部分成交补挂保护单失败，置 pending_guard: {ge}")
+        await _notify_async(f"⚠️ {symbol} 挂单部分成交({exec_qty})后补挂保护单失败，已标记 pending_guard，patrol 将重试\n错误:{ge}")
+    return True
+
+
 async def _check_pending_expire_static(pos: dict, now_ms: int):
     pid      = pos.get("pos_id", pos.get("symbol","unknown"))
     symbol   = pos["symbol"]
@@ -1778,6 +1845,8 @@ async def _check_pending_expire_static(pos: dict, now_ms: int):
                 if od is not None:
                     status = od.get("status","")
                     if status in ("CANCELED","EXPIRED","REJECTED"):
+                        if await _recover_partial_fill(pos, od, pid, symbol):   # [fix #14]
+                            return
                         _remove_position_checked(pid)
                         logger.info(f"[pm] {symbol} pending订单 {order_id} 已{status},清除本地记录")
                         return
@@ -1800,12 +1869,7 @@ async def _check_pending_expire_static(pos: dict, now_ms: int):
                             logger.error(f"[pm] {symbol} 补挂保护单失败: {ge}")
                             await _notify_async(f"⚠️ {symbol} 已成交但补挂止损失败,请人工介入!\n错误:{ge}")
                         return
-                else:
-                    # api.get_order 返回 None → 订单不存在或查询失败,超过24h再清除
-                    if hold_min > 24 * 60:
-                        _remove_position_checked(pid)
-                        logger.info(f"[pm] {symbol} pending订单 {order_id} 查询失败且超24h,清除本地记录")
-                        return
+                # [fix #46] 查询失败时 od 为 None：保留本地记录，下轮 patrol 重试（删除原 24h 清除死代码）
         except Exception as e:
             logger.warning(f"[pm] {symbol} 核验pending订单失败: {e}")
 
@@ -1821,11 +1885,25 @@ async def _check_pending_expire_static(pos: dict, now_ms: int):
     for attempt in range(2):
         try:
             api.cancel_order(symbol, int(order_id))
+            # [fix #14] 撤单后复查成交量：撤单前可能已部分成交，不能直接删记录
+            try:
+                _od_after = api.get_order(symbol, int(order_id))
+            except Exception as _qe:
+                _od_after = None
+                logger.warning(f"[pm] {symbol} 撤单后查询订单失败: {_qe}")
+            if _od_after and await _recover_partial_fill(pos, _od_after, pid, symbol):
+                return
             break
         except Exception as e:
             err_str = str(e).lower()
             # GTD 单可能已被交易所自动撤销(订单不存在),静默处理即可
             if any(kw in err_str for kw in ("unknown order", "order does not exist", "-2011", "-2013")):
+                try:
+                    _od_gone = api.get_order(symbol, int(order_id))
+                except Exception:
+                    _od_gone = None
+                if _od_gone and await _recover_partial_fill(pos, _od_gone, pid, symbol):   # [fix #14]
+                    return
                 logger.info(f"[pm] {symbol} 挂单 {order_id} 已不存在(可能 GTD 已自动到期),直接清除本地记录")
                 break
             if attempt == 0:
@@ -1929,10 +2007,14 @@ async def _force_close_static_inner(pos: dict, close_reason: str):
                     logger.info(f"[pm] {symbol} 清理残余 algo 单 algoId={aid}")
                 except Exception:
                     pass
-        # 清理残余普通挂单
-        open_orders = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: api.get_open_orders(symbol)
-        )
+        # 清理残余普通挂单（[fix #2] 查询失败时跳过清理，不当作"无挂单"）
+        try:
+            open_orders = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: api.get_open_orders(symbol)
+            )
+        except Exception as _qe:
+            logger.warning(f"[pm] {symbol} 查询残余挂单失败，跳过清理: {_qe}")
+            open_orders = []
         for oo in (open_orders or []):
             oid = int(oo.get("orderId", 0))
             if oid:
@@ -1954,7 +2036,8 @@ async def _force_close_static_inner(pos: dict, close_reason: str):
             symbol=symbol, side=close_side,
             order_type="MARKET",
             quantity=qty,
-            position_side="LONG" if direction.upper()=="LONG" else "SHORT",
+            # [fix #26] 对冲模式平仓单必须显式带 positionSide（原先已带，这里加校验）
+            position_side=("SHORT" if direction.upper() == "SHORT" else "LONG"),
         )
         order_id = resp.get("orderId") or resp.get("algoId")
         # 尝试从订单历史得到实际成交均价
@@ -2048,6 +2131,29 @@ def _count_recent_sl(symbol: str, days: int = 7) -> tuple[int, list]:
     return len(records), records
 
 
+def _fetch_actual_fees(symbol: str, since_ms: int = 0, notional: float = 0.0) -> float:
+    """[fix #44] 从交易所成交回报（userTrades.commission）取本仓位实际手续费合计（USDT）。
+    取不到时按名义价值 × 双边费率估算。"""
+    try:
+        from shared.binance_api import get_user_trades as _gut
+        _t = _gut(symbol, start_time=int(since_ms) if since_ms else None, limit=100) or []
+        _tot = 0.0
+        for _x in _t:
+            try:
+                _tot += abs(float(_x.get("commission", 0) or 0))
+            except (TypeError, ValueError):
+                continue
+        if _tot > 0:
+            return round(_tot, 6)
+    except Exception as _e:
+        logger.warning(f"[pm] {symbol} 查询实际手续费失败，改用估算: {_e}")
+    try:
+        from config import TAKER_FEE_RATE as _tfr
+    except Exception:
+        _tfr = 0.0005
+    return round(abs(float(notional or 0.0)) * float(_tfr) * 2, 6)
+
+
 async def _close_position_post_static(
     pos_id: str, symbol: str, close_reason: str, event: dict,
     fill_price: float = 0, fill_qty: float = 0,
@@ -2087,8 +2193,10 @@ async def _close_position_post_static(
     hold_minutes = (close_ms - open_ms) / 60000
 
     # 步骤2:更新熔断器(v3.16 修复:record_pnl 正确区分盈亏,盈利不再计入 daily_loss)
+    # [fix #44] 用交易所成交回报里的实际手续费，并计入总亏损
+    _fees = _fetch_actual_fees(symbol, open_ms, nominal)
     try:
-        _record_pnl(pnl_usdt, symbol=symbol)
+        _record_pnl(pnl_usdt, symbol=symbol, fee=_fees)
     except Exception as e:
         logger.error(f"[pm] record_pnl 失败: {e}")
 
@@ -2153,6 +2261,9 @@ async def _close_position_post_static(
             "nominal_value":     round(nominal, 2),
             "pnl_usdt":          round(pnl_usdt, 4),
             "pnl_pct":           round(pnl_pct, 4),
+            "fees_usdt":         round(_fees, 6),              # [fix #44] 实际手续费
+            "pnl_net_usdt":      round(pnl_usdt - _fees, 4),   # [fix #44] 净盈亏
+            "signal_id":         pos.get("_sig_id", ""),       # [fix #44] 信号↔成交关联
             "holding_minutes":   round(hold_minutes, 1),
             "open_time":         open_ms,
             "close_time":        close_ms,
@@ -2860,7 +2971,7 @@ async def _daily_report_loop_static():
 PositionManager._check_pending_expire   = lambda self, p, n: _check_pending_expire_static(p, n)
 PositionManager._force_close            = lambda self, p, r: _force_close_static(p, r)
 PositionManager._close_position_post    = lambda self, pid, sym, reason, ev, **kw: \
-    _close_position_post_static(pid, sym, reason, ev, **kw)
+    _close_position_post_static(pid, sym, reason, ev, **kw)   # async 函数，调用方需 await
 PositionManager._daily_report_loop      = lambda self: _daily_report_loop_static()
 
 
@@ -2891,7 +3002,7 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent))
-    from executor import _place_guards_async, _get_precision
+    from executor import _place_guards_async, _get_precision, _round_price, _round_qty as _rq_exec
     from shared.state import update_position
     from shared.calc_sl_tp import calc_sl_tp
     from shared import binance_api as _api
@@ -2932,6 +3043,49 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
         except Exception as qty_err:
             logger.warning(f"[pm] {symbol} 查询实际持仓量失败(继续补挂): {qty_err}")
 
+        # ── [fix #4] SL 状态只判一次，后续只走一条路径 ───────────────────────────
+        #   存活 → 不重复挂；缺失 → 先撤旧单(若有 id)再统一补挂；查询失败 → 本轮不挂 SL（避免重复），
+        #   由 patrol 下一轮重试。新 SL 的 id 一律写回 pos_state。
+        sl_id_old = pos.get("sl_order_id")
+        sl_alive = None   # None = 未知
+        try:
+            _algo_now = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: _api.get_algo_open_orders(symbol)
+            )
+            _algo_ids = {int(o.get("algoId", 0)) for o in (_algo_now or []) if o.get("algoId")}
+            sl_alive = bool(sl_id_old and int(sl_id_old) in _algo_ids)
+        except Exception as _sl_qe:
+            logger.warning(f"[pm] {symbol} 查询 Algo SL 失败，本轮不补挂 SL（避免重复）: {_sl_qe}")
+        if sl_alive is False and sl_id_old:
+            try:   # 缺失判定后仍尝试撤旧 id（已失效则静默）
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: _api.cancel_algo_order(symbol, int(sl_id_old))
+                )
+            except Exception:
+                pass
+
+        async def _repair_sl_only() -> "int | None":
+            """只补 SL（TP 已在交易所）。成功则把新 id 写回 pos_state。"""
+            if sl_alive is not False or not sl_price:
+                return None
+            _prec = _get_precision(symbol)
+            _resp = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: _api.place_sl(
+                    symbol=symbol,
+                    side="SELL" if direction == "LONG" else "BUY",
+                    position_side=pos_side,
+                    trigger_price=_round_price(float(sl_price), _prec["tick"]),
+                    quantity=_rq_exec(float(fill_qty), _prec["step"]),
+                )
+            )
+            _nid = (_resp or {}).get("algoId") or (_resp or {}).get("orderId")
+            if _nid:
+                update_position(pid, {"sl_order_id": int(_nid)})
+                logger.info(f"[pm] {symbol} SL 补挂成功 id={_nid}")
+                return int(_nid)
+            logger.error(f"[pm] {symbol} SL 补挂失败: {_resp}")
+            return None
+
         # ── 防重复:查交易所是否已有 TP/SL 挂单 ──────────────────────────────
         try:
             open_orders = await asyncio.get_running_loop().run_in_executor(
@@ -2968,7 +3122,7 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                             await asyncio.get_running_loop().run_in_executor(
                                 None, lambda: _api.cancel_order(symbol, tp2_id)
                             )
-                            tp2_qty = pos.get("tp2_quantity") or pos.get("tp2_qty") or 0
+                            tp2_qty = pos.get("tp2_quantity") or 0
                             prec = _get_precision(symbol)
                             tp2_price_r = round(float(tp2_state_price) / prec["tick"]) * prec["tick"]
                             tp2_qty_r   = _round_qty(float(tp2_qty), prec["step"])
@@ -2992,12 +3146,15 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                     f"[pm] {symbol} 交易所已有 {len(existing_tp)} 个 TP 挂单 "
                     f"(tp1={tp1_id} tp2={tp2_id}),跳过补挂,同步 pos_state"
                 )
+                _new_sl = await _repair_sl_only()
+                _sl_ok = (sl_alive is True) or bool(_new_sl)
                 update_position(pid, {
-                    "status":       "open",
+                    "status":       "open" if _sl_ok else "pending_guard",
                     "fill_price":   fill_price,
                     "quantity":     fill_qty,
                     "tp1_order_id": tp1_id,
                     "tp2_order_id": tp2_id,
+                    **({} if _sl_ok else {"missing_guards": ["sl"]}),
                 })
                 return
         except Exception as chk_err:
@@ -3030,27 +3187,46 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                 raise RuntimeError(f"计算止损价失败: {e}")
 
         precision = _get_precision(symbol)
+        # SL 存活或状态未知 → 不重复挂 SL（skip_sl）
+        _skip_sl = sl_alive is not False
         guard = await _place_guards_async(
             symbol, direction, fill_qty,
             sl_price, tp1_price, tp2_price,
-            precision,
+            precision, skip_sl=_skip_sl,
         )
 
         # 更新 pos_state:pending → open,写入保护单 id
         # 注意:_place_guards_async 返回 key 为 sl_id / tp1_id / tp2_id
+        # [fix #10] 保护单只部分成功 → 不写 open，写 pending_guard 并记录缺失项，由 patrol 重试
         import time as _time_fill
-        update_position(pid, {
-            "status":      "open",
+        _sl_id_final = guard.get("sl_id") or (int(sl_id_old) if (sl_alive is not False and sl_id_old) else None)
+        _missing = []
+        if not _sl_id_final:
+            _missing.append("sl")
+        if not guard.get("tp1_id"):
+            _missing.append("tp1")
+        if tp2_price is not None and not guard.get("tp2_id"):
+            _missing.append("tp2")
+        _upd = {
+            "status":      "open" if not _missing else "pending_guard",
             "fill_price":  fill_price,
             "fill_time":   int(_time_fill.time()),  # v3.39: 补挂路径补写 fill_time,时间止损用真实成交时间
             "quantity":    fill_qty,
-            "sl_order_id": guard.get("sl_id"),
+            "sl_order_id": _sl_id_final,
             "tp1_order_id":guard.get("tp1_id"),
             "tp2_order_id":guard.get("tp2_id"),
             "sl_price":    sl_price,
             "tp1_price":   tp1_price,
             "tp2_price":   tp2_price,
-        })
+            "missing_guards": _missing,
+        }
+        update_position(pid, _upd)
+        if _missing:
+            logger.error(f"[pm] {symbol} 保护单不完整，状态置为 pending_guard，缺失: {_missing}")
+            try:
+                await _notify_async(f"⚠️ {symbol} 保护单不完整（缺失: {', '.join(_missing)}），已标记 pending_guard，patrol 将重试")
+            except Exception:
+                pass
         logger.info(
             f"[pm] {symbol} 补挂完成: "
             f"sl_id={guard.get('sl_id')} tp1_id={guard.get('tp1_id')} tp2_id={guard.get('tp2_id')}"
@@ -3128,6 +3304,21 @@ async def patrol_once() -> dict:
         positions = get_all_positions()
         open_pos  = [p for p in positions if p.get("status") == "open"]
         now_ms = int(__import__("time").time() * 1000)
+
+        # [fix #10] pending_guard：保护单曾只部分成功，节流重试补挂（有真实持仓、缺保护单）
+        for _pg in [p for p in positions if p.get("status") == "pending_guard"]:
+            _pgid = _pg.get("pos_id", _pg.get("symbol"))
+            if time.time() - _pg_retry_ts.get(_pgid, 0) < 60:
+                continue
+            _pg_retry_ts[_pgid] = time.time()
+            try:
+                await _补挂保护单(_pg, float(_pg.get("fill_price") or 0),
+                                  float(_pg.get("quantity_remaining") or _pg.get("quantity") or 0),
+                                  _pgid, _pg["symbol"])
+            except Exception as _pge:
+                logger.error(f"[pm] {_pg.get('symbol')} pending_guard 重试补挂失败: {_pge}")
+        positions = get_all_positions()
+        open_pos  = [p for p in positions if p.get("status") == "open"]
 
         # 手动平仓检测(孤单清理)
         for pos in list(open_pos):
@@ -3367,6 +3558,25 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
         elif sl_move < -1e-8:
             # v3.6: 禁止做空止损上移(向不利方向调整)
             pass  # SHORT 止损只允许下移,不允许上移
+
+    # ── [fix #42] 止损上限检查：调整后的止损距离不得超过开仓时的初始风险上限 RISK_PER_TRADE × 入场价。
+    #   当前实现只允许 SL 向有利方向移动，天然不会外扩；这里是防御性硬上限，
+    #   防止以后放开外扩（TP_SL_ADJUST_SL_WIDEN_ATR）或 calc_sl_tp 异常时突破初始风险。
+    if sl_changed:
+        try:
+            from config import RISK_PER_TRADE as _RPT
+            _ref_entry = float(entry_price or pos.get("entry_price") or 0)
+            _max_dist = float(_RPT) * _ref_entry
+            _new_dist = abs(_ref_entry - float(new_sl))
+            _old_dist = abs(_ref_entry - float(old_sl))
+            if _ref_entry > 0 and _new_dist > _max_dist and _new_dist > _old_dist:
+                sl_changed = False
+                sl_reason = (f"blocked: 新止损距离 {_new_dist:.6g} 超过初始风险上限 "
+                             f"{_max_dist:.6g}(RISK_PER_TRADE×入场价)")
+                logger.warning(f"[adjust_sltp] {symbol} 拒绝调整 SL: {sl_reason}")
+        except Exception as _rle:
+            sl_changed = False
+            logger.error(f"[adjust_sltp] {symbol} 止损上限检查异常，保守不调整 SL: {_rle}")
 
     # ── TP1 判断(双向,下调有门槛)────────────────────────────────────────────
     if not tp1_filled:

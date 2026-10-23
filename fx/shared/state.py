@@ -55,28 +55,60 @@ _locks = {
 _POS_STATE_CORRUPTED = False
 
 
+def _corrupt_marker(path: Path) -> Path:
+    return path.with_name(path.name + ".CORRUPTED")
+
+
+def _backup_file(path: Path, tag: str = "corrupted") -> Path:
+    """[fix #15a] 复制保留原文件；失败抛异常（调用方不得继续覆盖原文件）。"""
+    import shutil
+    backup = path.with_name(f"{path.name}.{tag}_{int(time.time() * 1000)}")
+    shutil.copy2(path, backup)
+    return backup
+
+
 def _backup_corrupted_pos(path: Path, err) -> None:
-    """[v3.89 #11] 把损坏的持仓文件重命名保留，记录错误并设置损坏标志。"""
+    """[v3.89 #11 / fix #5] 把损坏的持仓文件备份保留，并持久化损坏标志（文件 + 内存）。
+    备份失败 → 抛异常，原文件保持不动（fix #15a）。"""
     global _POS_STATE_CORRUPTED
     _POS_STATE_CORRUPTED = True
-    backup = path.with_name(f"{path.name}.corrupted_{int(time.time() * 1000)}")
     try:
-        path.replace(backup)
-        logger.error(f"[state] {path.name} 已损坏，已备份为 {backup.name}，持仓写入已被阻止，请人工检查: {err}")
+        _corrupt_marker(path).write_text(
+            f"{datetime.now(timezone.utc).isoformat()} {err}\n删除本文件前请人工核对持仓后再清除。\n",
+            encoding="utf-8")
+    except Exception as me:
+        logger.error(f"[state] 写入损坏标志文件失败: {me}")
+    try:
+        backup = _backup_file(path, "corrupted")
     except Exception as e:
-        logger.error(f"[state] {path.name} 已损坏且备份失败（原文件保留）: {err} / 备份错误: {e}")
+        logger.critical(f"[state] {path.name} 已损坏且备份失败（原文件保持不动，不覆盖）: {err} / 备份错误: {e}")
+        raise
+    logger.critical(f"[state] {path.name} 已损坏/为空，已备份为 {backup.name}，持仓写入已被阻止，"
+                    f"需人工核对交易所持仓后删除 {_corrupt_marker(path).name} 方可恢复: {err}")
+
+
+# 进程重启后仍保持损坏标志（fix #5b）
+try:
+    _POS_STATE_CORRUPTED = _corrupt_marker(_POS_FILE).exists()
+except Exception:
+    pass
 
 
 def _read_json(path: Path, default):
     # [v3.89 #11] 仅持仓文件区分「不存在」与「损坏」；其他状态文件保持原有行为。
-    if "pos_state" in path.name:
+    if "pos_state" in path.name and not path.name.endswith(".CORRUPTED"):
         if not path.exists():
             return default
         try:
-            raw = path.read_text(encoding="utf-8").strip()
-            return json.loads(raw) if raw else default
+            raw = path.read_text(encoding="utf-8")
+            if not raw.strip():          # [fix #5a] 0 字节/仅空白 = 损坏，不是合法空仓
+                raise ValueError("pos_state 文件为空（0字节或仅空白）")
+            return json.loads(raw)
         except Exception as e:
-            _backup_corrupted_pos(path, e)
+            try:
+                _backup_corrupted_pos(path, e)
+            except Exception:
+                pass
             return default
     try:
         if not path.exists():
@@ -161,7 +193,7 @@ def add_position(record: dict) -> bool:
         data = _load_pos()
         # 检查是否已有同标的持仓（包括 open / pending / patching，防止补挂进行中资已开仓的标的被二次开仓）
         existing = [p for p in data if p.get("symbol") == sym
-                    and p.get("status") in ("open", "pending", "patching")]
+                    and p.get("status") in ("open", "pending", "patching", "pending_guard")]
         if existing:
             logger.error(f"[state] add_position 拒绝：{sym} 已有记录")
             return False
@@ -294,7 +326,10 @@ def get_pending_orders() -> list:
 # ═══════════════════════════════════════════════════════════════════════════════
 _CB_DEFAULT = {
     "is_open":          False,
-    "daily_loss":       0.0,
+    "daily_loss":       0.0,   # = max(0, -(daily_pnl - daily_fees - daily_funding))
+    "daily_pnl":        0.0,   # 当日净已实现盈亏（正负都累计，不含费用）
+    "daily_fees":       0.0,   # 当日手续费（支出）
+    "daily_funding":    0.0,   # 当日资金费（支出为正）
     "last_reset_date":  "",
     "triggered_at":     None,
     "triggered_reason": None,
@@ -340,15 +375,22 @@ def is_circuit_open() -> bool:
         return True
 
 
-def record_pnl(pnl: float) -> bool:
+def record_pnl(pnl: float, fee: float = 0.0, funding: float = 0.0) -> bool:
     """
-    记录盈亏。pnl < 0 累加到 daily_loss。
+    [fix #12] 记录净盈亏：盈利与亏损都累计（正负抵消）；手续费、资金费单独字段累计，
+    并计入总亏损：daily_loss = max(0, -(daily_pnl - daily_fees - daily_funding))。
+      pnl     已实现盈亏（正=盈利，负=亏损，不含手续费/资金费）
+      fee     手续费（正数=支出）
+      funding 资金费（正数=支出，负数=收入）
     返回本次是否触发熔断。
     """
     with _locks["cb"]:
         d = _load_cb()
-        if pnl < 0:
-            d["daily_loss"] = round(d.get("daily_loss", 0.0) + abs(pnl), 4)
+        d["daily_pnl"]     = round(float(d.get("daily_pnl", 0.0)) + float(pnl), 6)
+        d["daily_fees"]    = round(float(d.get("daily_fees", 0.0)) + abs(float(fee or 0.0)), 6)
+        d["daily_funding"] = round(float(d.get("daily_funding", 0.0)) + float(funding or 0.0), 6)
+        net = d["daily_pnl"] - d["daily_fees"] - d["daily_funding"]
+        d["daily_loss"] = round(max(0.0, -net), 4)
         try:
             from config import CIRCUIT_BREAKER_DAILY_LOSS
             limit = float(CIRCUIT_BREAKER_DAILY_LOSS)
@@ -358,7 +400,7 @@ def record_pnl(pnl: float) -> bool:
         if d["daily_loss"] >= limit and not d.get("is_open"):
             d["is_open"]          = True
             d["triggered_at"]     = int(time.time() * 1000)
-            d["triggered_reason"] = f"日亏损 {d['daily_loss']:.1f}U 超限 {limit}U"
+            d["triggered_reason"] = f"日净亏损 {d['daily_loss']:.1f}U 超限 {limit}U"
             d["notified"]         = False  # 待 risk_manager 推送后置 True
             triggered = True
             logger.warning(f"[state] 熔断触发：{d['triggered_reason']}")
@@ -712,19 +754,35 @@ def _ensure_files() -> None:
         (_OI_FILE,  {}),
     ]:
         if not path.exists():
+            if path == _POS_FILE and _POS_STATE_CORRUPTED:
+                # [fix #5c] 损坏标志仍在：不自动新建空仓文件，等待人工确认
+                logger.critical(f"[state] {path.name} 缺失且损坏标志存在，不自动重置，等待人工确认")
+                continue
             _write_json(path, default)
         else:
             try:
                 raw = path.read_text(encoding="utf-8").strip()
                 if raw:
                     json.loads(raw)   # 格式校验
+                elif path == _POS_FILE:
+                    raise ValueError("pos_state 文件为空（0字节或仅空白）")   # [fix #5a]
             except Exception as e:
                 if path == _POS_FILE:
-                    # [v3.89 #11] 持仓文件损坏：备份保留 + 设标志，再写默认值维持启动
-                    _backup_corrupted_pos(path, e)
+                    # [fix #5c] 持仓文件损坏：备份 + 持久化标志 + 告警日志，不自动重置，等人工确认
+                    try:
+                        _backup_corrupted_pos(path, e)
+                    except Exception:
+                        pass
+                    logger.critical(f"[state] ⚠️ {path.name} 损坏，系统将拒绝写入持仓，请人工用交易所持仓重建后清除标志")
                 else:
-                    logger.error(f"[state] {path.name} 格式损坏，重置: {e}")
-                _write_json(path, default)
+                    # [fix #15b] 其他状态文件（含 circuit_breaker / cooldown）：先备份，备份失败则不覆盖
+                    try:
+                        bk = _backup_file(path, "corrupted")
+                        logger.error(f"[state] {path.name} 格式损坏，已备份为 {bk.name} 后重置: {e}")
+                    except Exception as be:
+                        logger.critical(f"[state] {path.name} 格式损坏且备份失败，不覆盖原文件: {e} / {be}")
+                        continue
+                    _write_json(path, default)
 
 
 # 模块导入时自动执行

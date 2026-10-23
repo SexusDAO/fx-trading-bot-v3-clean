@@ -177,9 +177,9 @@ def is_circuit_open() -> bool:
 # record_pnl — 平仓后调用
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def record_pnl(pnl: float, symbol: str = "", reason: str = "") -> dict:
+def record_pnl(pnl: float, symbol: str = "", reason: str = "", fee: float = 0.0, funding: float = 0.0) -> dict:
     """
-    记录盈亏。pnl<0 累加 daily_loss。
+    记录净盈亏（正负都累计）；fee/funding 单独记录并计入总亏损。
     返回 {"circuit_triggered": bool|None, "daily_loss": float|None, "persisted": bool[, "error": str]}
     [v3.89 #63] persisted=False 表示本次盈亏没有记入 state（circuit_triggered 此时为 None=未知）。
     """
@@ -190,7 +190,7 @@ def record_pnl(pnl: float, symbol: str = "", reason: str = "") -> dict:
     persisted = True
     persist_error = None
     try:
-        triggered = _state_record(pnl)
+        triggered = _state_record(pnl, fee=fee, funding=funding)
     except Exception as e:
         # [v3.89 #63] 持久化失败不再伪装成「已记账、未触发熔断」：circuit_triggered 置 None（未知，且为假值，
         #   兼容 if result["circuit_triggered"] 的既有用法），并带 persisted=False 与 error 供上游识别、对账。
@@ -340,18 +340,30 @@ def check_account_margin(nominal_value: float, leverage: int) -> bool:
 # reset_circuit
 # ═══════════════════════════════════════════════════════════════════════════════
 def reset_circuit() -> None:
-    """UTC 00:00 定时任务调用。重置熔断 + 备份日志。"""
+    """UTC 00:00 定时任务调用。[fix #48] 只负责重置熔断；日志备份拆到 backup_daily_logs()。"""
     from shared.state import reset_circuit as _state_reset, get_daily_loss
     from shared.notifier import notify
-    import shutil
-    from pathlib import Path
-    from config import TRADE_LOG_FILE, POS_STATE_FILE
 
     yesterday_loss = get_daily_loss()
     _state_reset()
     logger.info(f"[risk] 熔断器重置，昨日亏损={yesterday_loss:.1f}U")
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        notify(
+            f"📅 日重置完成 {date_str}\n"
+            f"昨日累计亏损：{yesterday_loss:.1f}U\n"
+            f"今日熔断器：正常"
+        )
+    except Exception:
+        pass
 
-    # 备份
+
+def backup_daily_logs() -> None:
+    """[fix #48] 每日日志备份（原 reset_circuit 内的第二职责）。"""
+    import shutil
+    from pathlib import Path
+    from config import TRADE_LOG_FILE, POS_STATE_FILE
+
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     archive  = Path(__file__).parent.parent / "logs" / "archive"  # fx/logs/archive
     archive.mkdir(parents=True, exist_ok=True)
@@ -366,15 +378,6 @@ def reset_circuit() -> None:
                 _clean_old_backups(archive, src.stem, 30)
             except Exception as e:
                 logger.warning(f"[risk] 备份 {src_path} 失败: {e}")
-
-    try:
-        notify(
-            f"📅 日重置完成 {date_str}\n"
-            f"昨日累计亏损：{yesterday_loss:.1f}U\n"
-            f"今日熔断器：正常"
-        )
-    except Exception:
-        pass
 
 
 def _clean_old_backups(archive: "Path", stem: str, keep_days: int) -> None:
@@ -690,8 +693,9 @@ def check_margin_safety(notifier_fn=None) -> tuple[bool, str, dict]:
         return True, "", stats
 
     except Exception as e:
-        logger.warning(f"[risk] check_margin_safety 异常，降级允许开仓: {e}")
-        return True, "", stats  # 降级放行，不因查询失败阻断开仓
+        # [fix #29] 统一口径：检查异常 → 拒绝开仓
+        logger.error(f"[risk] check_margin_safety 异常，拒绝开仓: {e}")
+        return False, f"保证金安全垫检查异常: {e}", stats
 
 
 def get_risk_summary() -> dict:
@@ -958,10 +962,13 @@ def check_systemic_risk() -> tuple[bool, str]:
                         f"{pos['symbol']} 资金费率极端 {fr*100:.2f}%（非套利仓位），"
                         f"疑似交易所异常，暂停新开仓"
                     )
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as _fe:
+                # [fix #29] 单仓位资金费率查询失败 → 拒绝开仓
+                logger.error(f"[risk] 系统性风险检查：{pos.get('symbol')} 资金费率查询失败，拒绝开仓: {_fe}")
+                return False, f"系统性风险检查异常（{pos.get('symbol')} 资金费率查询失败）"
+    except Exception as _se:
+        logger.error(f"[risk] 系统性风险检查异常，拒绝开仓: {_se}")
+        return False, f"系统性风险检查异常: {_se}"
 
     return True, ""
 
@@ -1167,7 +1174,7 @@ def calc_leverage_remaining(direction: str, equity: float) -> float:
             d = (direction or "").upper()
             used = 0.0
             for p in _gap():
-                if p.get("status") not in ("open", "pending", "patching"):
+                if p.get("status") not in ("open", "pending", "patching", "pending_guard"):
                     continue
                 if (p.get("direction") or "").upper() != d:
                     continue
@@ -1184,7 +1191,9 @@ def calc_leverage_remaining(direction: str, equity: float) -> float:
             logger.debug(f"[leverage] {d} ratio={ratio} budget={budget:.0f} used={used:.0f} remaining={remaining:.0f}")
             return min(remaining, single_cap)
         except Exception as e:
-            logger.warning(f"[leverage] calc_leverage_remaining 异常，降级放行: {e}")
-            return single_cap
-    except Exception:
-        return float("inf")
+            # [fix #29] 异常 → 剩余预算 0（调用方据此拒绝开仓）
+            logger.error(f"[leverage] calc_leverage_remaining 异常，剩余预算置 0（拒绝开仓）: {e}")
+            return 0.0
+    except Exception as e:
+        logger.error(f"[leverage] calc_leverage_remaining 外层异常，剩余预算置 0（拒绝开仓）: {e}")
+        return 0.0

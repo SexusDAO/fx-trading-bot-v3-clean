@@ -6,6 +6,7 @@ shared/binance_api.py — 所有币安 API 请求唯一出口
 """
 
 import time
+import uuid
 import threading
 import logging
 import os
@@ -106,6 +107,40 @@ def reset_session():
     logger.info(f"[api] Session 已重建（累计第 {count} 次），旧会话已关闭")
 
 # ── 内部重试装饰器 ────────────────────────────────────────────────────────────
+def fmt_num(value) -> str:
+    """[fix #25] 统一数字格式化：定点 8 位小数并去掉末尾 0 / 小数点，杜绝科学计数法（如 1e-05）。"""
+    out = f"{float(value):.8f}".rstrip("0").rstrip(".")
+    return out if out not in ("", "-") else "0"
+
+
+class BinanceAPIError(Exception):
+    """[fix #9] 带原始错误码的业务错误。str() 保持 "BinanceError code=.. msg=.. http=.." 旧格式，
+    旧代码里 `"-4024" in str(e)` 的判断继续有效。"""
+
+    def __init__(self, code, msg="", http=None):
+        self.code = code
+        self.msg = msg
+        self.http = http
+        super().__init__(f"BinanceError code={code} msg={msg} http={http}")
+
+
+def _is_business_error(e: Exception) -> bool:
+    """业务拒绝（参数/余额/价格/持仓状态等，重试无意义）：Binance 负数错误码，
+    但 -1000/-1001/-1003/-1006/-1007/-1008/-1015/-1021 属服务端繁忙/限频/时间戳类，不算业务拒绝。"""
+    code = getattr(e, "code", None)
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return False
+    return code < 0 and code not in (-1000, -1001, -1003, -1006, -1007, -1008, -1015, -1021)
+
+
+def _is_rate_limited(e: Exception) -> bool:
+    code = getattr(e, "code", None)
+    http = getattr(e, "http", None)
+    return code in (-1003, "-1003") or http in (429, "429")
+
+
 class WriteTimeoutError(Exception):
     """[v3.89 #83] 写请求超时/断连，交易所是否已受理未知，需调用方对账，禁止盲目重发。"""
 
@@ -151,7 +186,7 @@ def _order_timeout():
 _ORDER_PATHS = ("/fapi/v1/order", "/fapi/v1/batchOrders", "/fapi/v1/algoOrder")
 
 
-def _retry(fn, *args, retries=None, suppress_codes=None, is_write: bool = False, **kwargs):
+def _retry(fn, *args, retries=None, suppress_codes=None, is_write: bool = False, raise_business: bool = False, **kwargs):
     """
     suppress_codes: 包含这些 Binance 错误码时不打 ERROR，直接返回 None
     连接类错误（SOCKS/Timeout）自动重建 Session 后重试，最多降级一次。
@@ -170,6 +205,26 @@ def _retry(fn, *args, retries=None, suppress_codes=None, is_write: bool = False,
         except Exception as e:
             last_err = e
             err_str = str(e)
+            # [fix #9/#24a] 业务拒绝（负数错误码，如 -4024/-2019/-2022）：不重试，保留原始错误码。
+            #   写请求直接抛 BinanceAPIError 让调用方按错误码处理；读请求仍返回 None（旧行为）。
+            #   suppress_codes 命中的仍按原逻辑静默返回 None。
+            if isinstance(e, BinanceAPIError) and _is_business_error(e):
+                if suppress_codes and any(str(c) == str(e.code) for c in suppress_codes):
+                    return None
+                _record_api_outcome(True)    # 交易所已正常响应，不计入链路失败率
+                logger.warning(f"[api] 业务拒绝，不重试: {err_str[:160]}")
+                if is_write or raise_business:
+                    raise
+                return None
+            # [fix #24a] 限频（429/-1003）：退避后重试；418（IP 封禁）不重试
+            if isinstance(e, BinanceAPIError) and getattr(e, "http", None) in (418, "418"):
+                logger.error(f"[api] IP 被临时封禁(418)，不重试: {err_str[:160]}")
+                break
+            if isinstance(e, BinanceAPIError) and _is_rate_limited(e):
+                logger.warning(f"[api] 触发限频，退避重试: {err_str[:120]}")
+                if attempt < retries - 1:
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
             # 静默抑制指定错误码
             if suppress_codes and any(
                 str(c) in err_str or f"code={c}" in err_str
@@ -234,10 +289,10 @@ def _signed_post(path, params: dict):
             body = r.json()
             code = body.get("code", "")
             msg  = body.get("msg", "")
-            raise Exception(f"BinanceError code={code} msg={msg} http={r.status_code}")
-        except Exception as e:
-            if "BinanceError" in str(e):
-                raise
+            raise BinanceAPIError(code, msg, r.status_code)
+        except BinanceAPIError:
+            raise
+        except Exception:
             r.raise_for_status()
     return r.json()
 
@@ -395,6 +450,20 @@ def is_hedge_mode() -> bool:
     return _HEDGE_MODE
 
 
+def get_position_mode() -> bool:
+    """[fix #16] 向交易所查询账户真实持仓模式。True=对冲模式(dualSidePosition)；失败抛 ApiQueryError。"""
+    def _call():
+        d = _signed_get("/fapi/v1/positionSide/dual", {})
+        if not isinstance(d, dict) or "dualSidePosition" not in d:
+            raise ApiQueryError(f"positionSide/dual 返回异常: {d!r}"[:200])
+        return d
+    res = _retry(_call)
+    if res is None:
+        raise ApiQueryError("get_position_mode 查询失败（重试耗尽）")
+    v = res.get("dualSidePosition")
+    return v is True or str(v).lower() == "true"
+
+
 def _validate_sl_order(
     order_type: str, side: str,
     stop_price: float, entry_price: float | None,
@@ -537,13 +606,19 @@ def place_order(symbol: str, side: str, order_type: str,
         "type":      order_type,
         "quantity":  quantity,
     }
+    params["quantity"] = fmt_num(quantity)          # [fix #25] 避免浮点科学计数法
     if price:
-        params["price"] = price
+        params["price"] = fmt_num(price)
     if stop_price:
-        params["stopPrice"] = stop_price
+        params["stopPrice"] = fmt_num(stop_price)
 
-    # Hedge Mode 处理
+    # [fix #26] 对冲模式下的平仓单（reduceOnly 语义）必须显式指定 positionSide=LONG/SHORT。
+    #   对冲模式不发 reduceOnly，若缺少 positionSide 交易所会按错误方向处理，可能反向开仓。
     hedge = is_hedge_mode()
+    if hedge and reduce_only and str(position_side or "").upper() not in ("LONG", "SHORT"):
+        logger.error(f"[place_order] {symbol} 对冲模式平仓单缺少 positionSide，拒绝下单")
+        return {"error": "hedge 模式下平仓单必须显式指定 positionSide=LONG/SHORT"}
+
     if hedge:
         # 明确传入的 position_side 优先；否则根据 side+reduceOnly 推断
         if position_side:
@@ -566,14 +641,35 @@ def place_order(symbol: str, side: str, order_type: str,
     # 本账号止损走 place_sl（/fapi/v1/algoOrder），TP 走 TAKE_PROFIT_MARKET，均不经此路径
 
     params.update(extra)
+    # [fix #24b] 幂等：每笔下单带 clientOrderId（uuid），任何重发/对账都先按它查单
+    params.setdefault("newClientOrderId", "fx" + uuid.uuid4().hex[:30])
+    _cid = params["newClientOrderId"]
 
     def _call():
+        # 重发前先按 clientOrderId 查单：已被交易所接收则直接返回，避免重复下单
+        if _call.sent:
+            try:
+                _o = _signed_get("/fapi/v1/order", {"symbol": symbol, "origClientOrderId": _cid})
+                if isinstance(_o, dict) and _o.get("orderId"):
+                    logger.warning(f"[place_order] {symbol} 重发前按 clientOrderId 查到已提交订单 {_o.get('orderId')}，不重复下单")
+                    return _o
+            except Exception:
+                pass   # -2013 订单不存在：确认未提交，继续发送
+        _call.sent = True
         return _signed_post("/fapi/v1/order", params)
+    _call.sent = False
     # [v3.89 #83] 写请求超时不盲目重发：先查挂单对账，找到唯一匹配视为已提交
     since_ms = int(time.time() * 1000) - 5000   # 留 5 秒本地时钟偏差余量
     try:
         result = _retry(_call, is_write=True)
     except WriteTimeoutError as e:
+        try:
+            _o = _signed_get("/fapi/v1/order", {"symbol": symbol, "origClientOrderId": _cid})
+            if isinstance(_o, dict) and _o.get("orderId"):
+                logger.warning(f"[place_order] {symbol} 写超时，按 clientOrderId 对账找到订单 orderId={_o.get('orderId')} status={_o.get('status')}")
+                return _o
+        except Exception:
+            pass
         try:
             found, n = _find_unique_open_order(get_open_orders(symbol), params, since_ms)
         except Exception as qe:
@@ -595,15 +691,28 @@ def cancel_order(symbol: str, order_id: int) -> dict:
         return _signed_delete("/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
     return _retry(_call) or {}
 
+class ApiQueryError(RuntimeError):
+    """查询类接口失败（重试耗尽 / 返回格式异常）。
+
+    [fix #2] 区分「交易所确实没有持仓/挂单（返回 []）」与「查询失败（抛本异常）」，
+    调用方不得把失败当作空结果处理。
+    """
+
+
 def get_position(symbol: str = None) -> list:
-    """查当前持仓，失败返回 []"""
+    """查当前持仓。成功返回列表（可为空 = 交易所确实无持仓）；失败抛 ApiQueryError。"""
     def _call():
         params = {}
         if symbol:
             params["symbol"] = symbol
         d = _signed_get("/fapi/v2/positionRisk", params)
-        return d if isinstance(d, list) else []
-    return _retry(_call) or []
+        if not isinstance(d, list):
+            raise ApiQueryError(f"positionRisk 返回格式异常: {type(d).__name__}")
+        return d
+    res = _retry(_call)
+    if res is None:
+        raise ApiQueryError("get_position 查询失败（重试耗尽）")
+    return res
 
 def get_account() -> dict:
     """查账户余额，失败返回 {}"""
@@ -613,21 +722,34 @@ def get_account() -> dict:
 
 
 def get_order(symbol: str, order_id: int) -> dict:
-    """查询单笔订单状态（用于 WS 超时后 REST 确认成交）"""
+    """查询单笔订单状态（用于 WS 超时后 REST 确认成交）。
+    [fix #46] 成功返回订单 dict；查询失败（重试耗尽/格式异常）抛 ApiQueryError，
+    让调用方区分「查到了」与「查询本身失败」。"""
     def _call():
-        return _signed_get("/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
-    return _retry(_call) or {}
+        d = _signed_get("/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
+        if not isinstance(d, dict):
+            raise ApiQueryError(f"order 返回格式异常: {type(d).__name__}")
+        return d
+    res = _retry(_call)
+    if res is None:
+        raise ApiQueryError(f"get_order({symbol},{order_id}) 查询失败（重试耗尽）")
+    return res
 
 
 def get_open_orders(symbol: str = None) -> list:
-    """查所有未成交挂单，失败返回 []"""
+    """查所有未成交挂单。成功返回列表（可为空）；失败抛 ApiQueryError。"""
     def _call():
         params = {}
         if symbol:
             params["symbol"] = symbol
         d = _signed_get("/fapi/v1/openOrders", params)
-        return d if isinstance(d, list) else []
-    return _retry(_call) or []
+        if not isinstance(d, list):
+            raise ApiQueryError(f"openOrders 返回格式异常: {type(d).__name__}")
+        return d
+    res = _retry(_call)
+    if res is None:
+        raise ApiQueryError("get_open_orders 查询失败（重试耗尽）")
+    return res
 
 def get_user_trades(symbol: str, start_time: int = None, limit: int = 20) -> list:
     """查某标的最近成交记录（含 realizedPnl），失败返回 []"""
@@ -919,8 +1041,8 @@ def place_sl(symbol: str, side: str, position_side: str,
         "symbol":       symbol,
         "side":         side,
         "type":         "STOP_MARKET",
-        "triggerPrice": f"{trigger_price}",
-        "quantity":     f"{quantity}",
+        "triggerPrice": fmt_num(trigger_price),
+        "quantity":     fmt_num(quantity),
         "workingType":  "MARK_PRICE",
         "algoType":     "CONDITIONAL",
     }
@@ -1007,6 +1129,8 @@ def get_algo_open_orders(symbol: str = None) -> list:
         params = {"symbol": symbol} if symbol else {}
         return _signed_get("/fapi/v1/openAlgoOrders", params)
     result = _retry(_call)
+    if result is None:   # [fix #4] 查询失败≠无 Algo 单，抛出由调用方决定，避免据此重复挂 SL
+        raise ApiQueryError("get_algo_open_orders 查询失败（重试耗尽）")
     if isinstance(result, dict):
         return result.get("orders", [])
     return result or []

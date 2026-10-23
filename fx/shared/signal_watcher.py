@@ -1241,13 +1241,13 @@ class SignalWatcher:
                 async with _tl:
                     await entry.on_trigger(entry.signal)
         except _PreOrderError as _pe:
-            # [v3.89 #102] 下单前失败：交易所确认没有订单，复位触发标记保留条目，等下一次价格触发重试
-            _keep_entry = True
-            async with self._lock:
-                if self._watched.get(symbol) is entry:
-                    entry.triggered = False
-                    entry.trigger_state = "none"
-            logger.warning(f"[signal_watcher] {symbol} 下单前失败，已保留信号等待下次触发重试: {_pe}")
+            # [fix #47] 下单前失败（设杠杆/拉行情/前置校验失败）：交易所确认没有订单。
+            #   不重试，直接移除条目（_keep_entry 保持 False，finally 中按身份 pop）。
+            #   原因：原逻辑复位触发标记等下次价格触发重试，但同方向 5 分钟冷却仍生效，
+            #   重试与冷却互相冲突，且前置失败多为持续性原因，重试大概率重复失败。
+            #   5 分钟方向冷却保留不变，由下一轮扫描重新产生信号。
+            _keep_entry = False
+            logger.warning(f"[signal_watcher] {symbol} 下单前失败，不重试，移除信号条目（方向冷却保留）: {_pe}")
         except Exception as e_:
             # [v3.89 #102] 其他异常可能发生在已下单之后（结果未知）：标记待对账，不自动清理
             _keep_entry = True
@@ -1312,10 +1312,15 @@ class SignalWatcher:
             raise RuntimeError(f"cancel_order({symbol},{order_id}): {e}")
 
     async def _query_order(self, symbol: str, order_id: int) -> dict:
-        """[v3.89 #40] 查询订单状态（失败返回 {}）。"""
+        """[v3.89 #40] 查询订单状态（失败返回 {}，由 _classify_order 归为「未能确认」）。
+        [fix #46] get_order 失败改为抛异常，此处捕获并保持原有 {} 语义。"""
         loop = asyncio.get_running_loop()
         from shared import binance_api as _api
-        return await loop.run_in_executor(None, lambda: _api.get_order(symbol, order_id))
+        try:
+            return await loop.run_in_executor(None, lambda: _api.get_order(symbol, order_id))
+        except Exception as e:
+            logger.warning(f"[sw] 查询订单失败 {symbol} {order_id}: {e}")
+            return {}
 
     @staticmethod
     def _classify_order(d: Any) -> Optional[str]:
@@ -1419,8 +1424,24 @@ class SignalWatcher:
             side = "SELL" if d == "LONG" else "BUY"
             pside = ps if ps != "BOTH" else d
             try:
-                await loop.run_in_executor(None, lambda: _api.place_sl(symbol, side, pside, sl, abs(amt)))
-                logger.warning(f"[CANCEL-UNKNOWN] {symbol} 可能已成交，已补止损 (sl={sl} qty={abs(amt)})")
+                # [fix #27] 与 executor 相同的取整逻辑；成功判断改为检查返回的 algoId 是否有效
+                from executor import _get_precision, _round_price, _round_qty
+                _prec = _get_precision(symbol)
+                sl_r  = _round_price(sl, _prec["tick"])
+                qty_r = _round_qty(abs(amt), _prec["step"])
+                if sl_r <= 0 or qty_r <= 0:
+                    logger.error(f"[CANCEL-UNKNOWN] {symbol} 取整后止损价/数量无效 sl={sl_r} qty={qty_r}，请人工处理")
+                    return False
+                _resp = await loop.run_in_executor(None, lambda: _api.place_sl(symbol, side, pside, sl_r, qty_r))
+                _aid = (_resp or {}).get("algoId") or (_resp or {}).get("orderId")
+                try:
+                    _aid_ok = int(_aid) > 0
+                except (TypeError, ValueError):
+                    _aid_ok = False
+                if not _aid_ok:
+                    logger.error(f"[CANCEL-UNKNOWN] {symbol} 补止损未得到有效 algoId，resp={_resp}，请人工处理")
+                    return False
+                logger.warning(f"[CANCEL-UNKNOWN] {symbol} 可能已成交，已补止损 algoId={_aid} (sl={sl_r} qty={qty_r})")
                 return True
             except Exception as e:
                 logger.error(f"[CANCEL-UNKNOWN] {symbol} 补止损失败: {e}")
@@ -2147,6 +2168,18 @@ class SignalWatcher:
         except Exception as e:
             logger.error(f'[recheck] 价格位移重挂：旧单已撤但新单注册失败 {sym}，旧条目保留继续监控（limit_order_id 已置空）: {e}')
             raise
+
+    async def cancel_signal(self, symbol: str, reason: str = "") -> bool:
+        """[fix #32] 公开接口：撤销某标的的监控挂单并移除条目（供 scanner 竞争替换使用）。
+        复用 _cancel_and_remove 的撤单确认流程；撤单失败/结果未知/已成交时条目保留。
+        返回 True 表示条目已确认移除（可安全占用该槽位），False 表示未移除。"""
+        async with self._lock:
+            entry = self._watched.get(symbol)
+        if entry is None:
+            return True
+        await self._cancel_and_remove(symbol, entry, reason or "外部请求撤销")
+        async with self._lock:
+            return symbol not in self._watched
 
     async def _cancel_and_remove(self, sym: str, entry: WatchEntry, reason: str) -> None:
         """
