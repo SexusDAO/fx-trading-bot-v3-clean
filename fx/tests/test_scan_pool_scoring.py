@@ -25,7 +25,6 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "ENABLE_USDC_PAIRS", False, raising=False)
     monkeypatch.setattr(config, "SCAN_POOL_MAX", 200, raising=False)
     monkeypatch.setattr(config, "SCAN_POOL_MIN_OI_U", 1_000_000, raising=False)
-    monkeypatch.setattr(config, "SCAN_POOL_EXCLUDE_VOLATILE", True, raising=False)
     monkeypatch.setattr(sc, "POOL_GAINERS_N", 0); monkeypatch.setattr(sc, "POOL_LOSERS_N", 0)
     st = types.SimpleNamespace(tickers=[], marks=[], oi={}, oi_calls=[], liq=[])
     monkeypatch.setattr(sc.api, "get_ticker_24h", lambda: st.tickers)
@@ -63,13 +62,6 @@ def test_coarse_filters(env):
         tk("BTCUSDT_250627"),                               # 交割合约（后缀不是 USDT）
     ])
     assert set(sc.refresh_pool()) == {"GOODUSDT", "EDGEUSDT"}
-
-
-def test_volatile_switch_off_uses_old_60pct(env, monkeypatch):
-    import config
-    monkeypatch.setattr(config, "SCAN_POOL_EXCLUDE_VOLATILE", False, raising=False)
-    set_market(env, [tk("A55USDT", chg=55), tk("A65USDT", chg=65)])
-    assert set(sc.refresh_pool()) == {"A55USDT"}
 
 
 def test_usdc_allowed_when_flag_true(env, monkeypatch):
@@ -161,4 +153,4 @@ def test_api_failure_returns_empty(env, monkeypatch):
 def test_config_values():
     import config
     assert config.SCAN_POOL_MAX == 200 and config.SCAN_POOL_MIN_OI_U == 1_000_000
-    assert config.SCAN_POOL_EXCLUDE_VOLATILE is True and config.ENABLE_USDC_PAIRS is False
+    assert config.POOL_MAX_CHG24_PCT == 50.0 and config.ENABLE_USDC_PAIRS is False

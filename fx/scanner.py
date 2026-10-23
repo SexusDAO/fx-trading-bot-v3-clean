@@ -1938,10 +1938,10 @@ def refresh_pool() -> list:
 
         from config import ENABLE_USDC_PAIRS
         try:
-            from config import SCAN_POOL_MAX, SCAN_POOL_MIN_OI_U, SCAN_POOL_EXCLUDE_VOLATILE
+            from config import SCAN_POOL_MAX, SCAN_POOL_MIN_OI_U
         except ImportError:
-            SCAN_POOL_MAX, SCAN_POOL_MIN_OI_U, SCAN_POOL_EXCLUDE_VOLATILE = 200, 1_000_000, True
-        _max_chg = 50.0 if SCAN_POOL_EXCLUDE_VOLATILE else POOL_MAX_CHG24_PCT
+            SCAN_POOL_MAX, SCAN_POOL_MIN_OI_U = 200, 1_000_000
+        _max_chg = POOL_MAX_CHG24_PCT   # 24h 涨跌幅上限（50%）
         _mark_px = {}
         for mp in (mp_list or []):
             try:

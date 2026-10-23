@@ -716,6 +716,27 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
                     )
                     return False, out
 
+    # [C-1] 镜像：底部放量拉升（SHORT）——近10根4H 上涨段最大量 > 下跌均量 1.5x 且近10根跌幅 >= 15%，
+    #   说明下跌后有资金放量接盘拉升，不适合 pullback 空
+    # TODO(C-1): 60日谷值反弹保护 / 60日高分位保护（SHORT 镜像）待数据确认阈值后再补
+    if direction == "SHORT" and len(k4h) >= 8:
+        _drop_k_s = [k for k in k4h[-10:] if float(k[4]) < float(k[1])]
+        _rise_k_s = [k for k in k4h[-10:] if float(k[4]) >= float(k[1])]
+        if len(_drop_k_s) >= 2 and _rise_k_s:
+            _avg_drop_vol = sum(float(k[5]) for k in _drop_k_s) / len(_drop_k_s)
+            _max_rise_vol = max(float(k[5]) for k in _rise_k_s)
+            if _max_rise_vol > _avg_drop_vol * 1.5:
+                _p_start_s  = float(k4h[-10][1]) if len(k4h) >= 10 else float(k4h[0][1])
+                _p_trough_s = min(float(k[4]) for k in k4h[-10:])
+                _drop_total_pct = (_p_start_s - _p_trough_s) / (_p_start_s + 1e-9) * 100
+                if _drop_total_pct >= 15.0:
+                    out["reject_reason"] = (
+                        f"底部放量拉升：上涨段最大量{_max_rise_vol/1e6:.0f}M"
+                        f" > 下跌均量{_avg_drop_vol/1e6:.0f}M 的1.5x"
+                        f"，近10根跌幅{_drop_total_pct:.0f}%，低位有资金承接，不适合 pullback 空"
+                    )
+                    return False, out
+
     return True, out
 
 
@@ -2497,6 +2518,10 @@ def _judge_funding_arb_impl(symbol: str, funding: float, funding_hist: list,
         if _trend_strength == "strong":
             out["signal_strength"]   = "strong"
             out["position_size_cap"] = FUNDING_ARB_SIZE_STRONG
+        elif _trend_strength == "weak":
+            # [C-2] 费率只到 medium 门槛且趋势收窄 → 直接拒绝（原注释意图"让门槛过滤"，旧代码会覆盖成 medium 放行）
+            out["reject_reason"] = f"费率仅达 medium 门槛且趋势收窄({out.get('fr_trend')})，套利持续性不足"
+            return False, out
         else:
             out["signal_strength"]   = "medium"
             out["position_size_cap"] = FUNDING_ARB_SIZE_MEDIUM
