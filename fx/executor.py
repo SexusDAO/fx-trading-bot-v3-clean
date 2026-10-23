@@ -1536,14 +1536,19 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     try:
         import pathlib as _pl, json as _js, time as _tm
         _flag = Path(__file__).parent.parent / "ws_cache" / "margin_pause.json"
-        if _flag.exists():
-            _pause = _js.loads(_flag.read_text())
+
+        def _read_margin_pause(_p):
+            # v3.95: 同步文件读移出事件循环（不存在返回 None）
+            return _js.loads(_p.read_text()) if _p.exists() else None
+
+        _pause = await asyncio.to_thread(_read_margin_pause, _flag)
+        if _pause is not None:
             if _tm.time() < _pause.get("until", 0):
                 _remain = int((_pause["until"] - _tm.time()) / 60)
                 logger.info(f"[executor] {symbol} 保证金暂停中（{_remain}分钟后恢复），跳过")
                 return False
             else:
-                _flag.unlink(missing_ok=True)  # 过期，清除
+                await asyncio.to_thread(_flag.unlink, missing_ok=True)  # 过期，清除
     except Exception:
         pass
 
