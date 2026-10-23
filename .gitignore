@@ -15,3 +15,6 @@ trigger_state.json
 liq_cache_snapshot.json
 *.db
 *.pid
+
+# 运行时快照目录（已从 git 追踪移除）
+fx/snapshots/
