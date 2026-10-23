@@ -460,7 +460,8 @@ POOL_LOSERS_N               = UNIVERSE_LOSS_TOP
 POOL_FUNDING_EXTREME_N      = UNIVERSE_FUNDING_TOP
 POOL_LIQ_TOP_N              = 30          # CG 清算量 Top N（新来源）
 POOL_FUNDING_EXTREME_MIN    = UNIVERSE_FUNDING_MIN_ABS
-SCAN_POOL_MAX               = 200          # 候选池上限（评分降序截断）
+SCAN_POOL_MAX               = 165          # 200 → 165，对齐理论最大来源数，让评分排序真正生效
+                                           # 配额：成交额 50 + 涨幅 30 + 跌幅 30 + 费率极端 25 + 清算量 30 = 165
 SCAN_POOL_MIN_OI_U          = 1_000_000    # 已停用：_pool_filter_by_oi 在 a8b87e1d 停用，此参数保留供恢复时使用
 # JUDGE_PULLBACK_PARAMS — 已废弃，judges 直接使用 config 参数
 # JUDGE_PULLBACK_PARAMS = {}

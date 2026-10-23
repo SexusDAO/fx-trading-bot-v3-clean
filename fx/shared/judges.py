@@ -2774,78 +2774,65 @@ def _judge_stop_hunt_impl(k1h, k4h, k15, ind, chg24, funding):
         out["reject_reason"] = f"k1h不足，len={len(k1h)}"
         return False, out
 
-    closes_1h = _closes(k1h)
-    recent_1h = closes_1h[-(  _LB1H + 1):-1]  # 最近_LB1H根已闭合（去掉最后一根未闭合/刺穿K）
-
-    if len(recent_1h) < _LB1H:
+    # [C-2] 前高/前低改用影线口径（K线最高/最低价），与 15M 刺穿检查一致
+    recent_k1h = k1h[-(  _LB1H + 1):-1]       # 最近_LB1H根已闭合（去掉最后一根未闭合/刺穿K）
+    if len(recent_k1h) < _LB1H:
         out["reject_reason"] = "1H K线历史不足"
         return False, out
+    highs_1h = [float(k[2]) for k in recent_k1h]
+    lows_1h  = [float(k[3]) for k in recent_k1h]
 
-    # 找前低：最低收盘价，且该索引前后各有 _CONF_BARS 根K线（不是边缘点）
     pivot_low_idx  = None
     pivot_low_val  = None
     pivot_high_idx = None
     pivot_high_val = None
 
-    for i in range(_CONF_BARS, len(recent_1h) - _CONF_BARS):
-        c = recent_1h[i]
-        # 前低：该点是左右 _CONF_BARS 根中的最低
-        if all(c <= recent_1h[i - j] for j in range(1, _CONF_BARS + 1)) and \
-           all(c <= recent_1h[i + j] for j in range(1, _CONF_BARS + 1)):
-            if pivot_low_val is None or c < pivot_low_val:
-                pivot_low_val = c
+    for i in range(_CONF_BARS, len(recent_k1h) - _CONF_BARS):
+        lo_i, hi_i = lows_1h[i], highs_1h[i]
+        # 前低：该根最低价 <= 左右各 _CONF_BARS 根的最低价
+        if all(lo_i <= lows_1h[i - j] for j in range(1, _CONF_BARS + 1)) and \
+           all(lo_i <= lows_1h[i + j] for j in range(1, _CONF_BARS + 1)):
+            if pivot_low_val is None or lo_i < pivot_low_val:
+                pivot_low_val = lo_i
                 pivot_low_idx = i
-        # 前高：该点是左右 _CONF_BARS 根中的最高
-        if all(c >= recent_1h[i - j] for j in range(1, _CONF_BARS + 1)) and \
-           all(c >= recent_1h[i + j] for j in range(1, _CONF_BARS + 1)):
-            if pivot_high_val is None or c > pivot_high_val:
-                pivot_high_val = c
+        # 前高：该根最高价 >= 左右各 _CONF_BARS 根的最高价
+        if all(hi_i >= highs_1h[i - j] for j in range(1, _CONF_BARS + 1)) and \
+           all(hi_i >= highs_1h[i + j] for j in range(1, _CONF_BARS + 1)):
+            if pivot_high_val is None or hi_i > pivot_high_val:
+                pivot_high_val = hi_i
                 pivot_high_idx = i
 
     if pivot_low_val is None and pivot_high_val is None:
         out["reject_reason"] = "找不到有效前高/前低（需左右各3根确认）"
         return False, out
 
-    # ── 1b. pivot 触碰次数检查（硬拒绝）───────────────────────────────────
-    # 逻辑：被触碰 N 次以上但未突破的位置，止损单堆积更高，猎杀价値更大
-    # 定义：K 线高点或收盘价进入 pivot ±0.2% 范围 = 一次触碰（排除 pivot 所在那根自身）
+    # ── 1b. pivot 触碰次数检查 ─────────────────────────────────────────────
+    # [C-1] 前高、前低各自独立验证（原 elif 只验证前低）；未通过的一侧作废，不能进入该方向
+    # [C-2] 触碰按影线：前低看 K 线最低价、前高看最高价进入 pivot ±0.2%（排除 pivot 自身）
     _TOUCH_RANGE = 0.002
     _TOUCH_MIN   = 2
-    _touch_count = 0
-    # 取 k1h 里对应 recent_1h 的原始 K 线（包含 high/low）
-    _k1h_window = k1h[-(  _LB1H + 2):-1]   # 与 recent_1h 对齐，多取一根干扰排除
+    _touch_low = _touch_high = 0
     if pivot_low_val is not None:
-        _pl_lo = pivot_low_val * (1 - _TOUCH_RANGE)
-        _pl_hi = pivot_low_val * (1 + _TOUCH_RANGE)
-        for _ki, _k in enumerate(_k1h_window):
-            if _ki == pivot_low_idx:   # 排除 pivot 自身
-                continue
-            if _pl_lo <= float(_k[3]) <= _pl_hi or _pl_lo <= float(_k[4]) <= _pl_hi:
-                _touch_count += 1
-        if _touch_count < _TOUCH_MIN:
-            out["reject_reason"] = (
-                f"insufficient_pivot_touches: 前低 {pivot_low_val:.4g} "
-                f"仅被触碰 {_touch_count} 次（需>={_TOUCH_MIN}）"
-            )
-            return False, out
-    elif pivot_high_val is not None:
-        _ph_lo = pivot_high_val * (1 - _TOUCH_RANGE)
-        _ph_hi = pivot_high_val * (1 + _TOUCH_RANGE)
-        for _ki, _k in enumerate(_k1h_window):
-            if _ki == pivot_high_idx:  # 排除 pivot 自身
-                continue
-            if _ph_lo <= float(_k[2]) <= _ph_hi or _ph_lo <= float(_k[4]) <= _ph_hi:
-                _touch_count += 1
-        if _touch_count < _TOUCH_MIN:
-            out["reject_reason"] = (
-                f"insufficient_pivot_touches: 前高 {pivot_high_val:.4g} "
-                f"仅被触碰 {_touch_count} 次（需>={_TOUCH_MIN}）"
-            )
-            return False, out
+        _pl_lo, _pl_hi = pivot_low_val * (1 - _TOUCH_RANGE), pivot_low_val * (1 + _TOUCH_RANGE)
+        _touch_low = sum(1 for _ki, _lo in enumerate(lows_1h)
+                         if _ki != pivot_low_idx and _pl_lo <= _lo <= _pl_hi)
+        if _touch_low < _TOUCH_MIN:
+            pivot_low_val = pivot_low_idx = None
+    if pivot_high_val is not None:
+        _ph_lo, _ph_hi = pivot_high_val * (1 - _TOUCH_RANGE), pivot_high_val * (1 + _TOUCH_RANGE)
+        _touch_high = sum(1 for _ki, _hi in enumerate(highs_1h)
+                          if _ki != pivot_high_idx and _ph_lo <= _hi <= _ph_hi)
+        if _touch_high < _TOUCH_MIN:
+            pivot_high_val = pivot_high_idx = None
+    if pivot_low_val is None and pivot_high_val is None:
+        out["reject_reason"] = (
+            f"insufficient_pivot_touches: 前低触碰 {_touch_low} 次 / 前高触碰 {_touch_high} 次"
+            f"（各需>={_TOUCH_MIN}）"
+        )
+        return False, out
     logger.debug(
-        f"[judge_stop_hunt] pivot 触碰次数通过: "
-        f"pivot={'low='+str(pivot_low_val) if pivot_low_val else 'high='+str(pivot_high_val)} "
-        f"触碰={_touch_count}次"
+        f"[judge_stop_hunt] pivot 触碰次数通过: low={pivot_low_val}({_touch_low}次) "
+        f"high={pivot_high_val}({_touch_high}次)"
     )
 
     # ── 2. 15M K线刺穿检测 ──────────────────────────────────────────────────

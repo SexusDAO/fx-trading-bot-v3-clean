@@ -152,5 +152,5 @@ def test_api_failure_returns_empty(env, monkeypatch):
 
 def test_config_values():
     import config
-    assert config.SCAN_POOL_MAX == 200 and config.SCAN_POOL_MIN_OI_U == 1_000_000
+    assert config.SCAN_POOL_MAX == 165 and config.SCAN_POOL_MIN_OI_U == 1_000_000
     assert config.POOL_MAX_CHG24_PCT == 50.0 and config.ENABLE_USDC_PAIRS is False
