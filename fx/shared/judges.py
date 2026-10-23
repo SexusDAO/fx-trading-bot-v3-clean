@@ -593,12 +593,15 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
             return False, out
 
         # EMA:参考加分,不拒绝
+        # [B-1] 1H EMA20/50 与方向一致 → "aligned_1h"（计入 strong），否则仍为 ref_only
         if direction == "LONG":
-            out["ema_structure"] = "ref_only"
+            out["ema_structure"] = "aligned_1h" if ema20_1h > ema50_1h else "ref_only"
             out["ema_direction"] = "bullish" if ema20_1h > ema50_1h else "bearish"
         else:
-            out["ema_structure"] = "ref_only"
+            out["ema_structure"] = "aligned_1h" if ema20_1h < ema50_1h else "ref_only"
             out["ema_direction"] = "bearish" if ema20_1h < ema50_1h else "bullish"
+        # [B-1] 高波动档补算 15M 缩量（与低/中档同一函数）
+        out["volume_shrink"] = _volume_shrink_15m(k15)
 
         # 条件二:成交密集区(硬性)
         dense_low, dense_high = _vwap_dense_zone(k1h)
@@ -647,7 +650,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
     # v3.6: ema_structure=weak 时强度上限为 medium，不能被缩量+清算区拉到 strong
     # 避免「4H中性仓位 0.3」却被评为 strong 的矛盾
     strong_count = 0
-    if out["ema_structure"] == "strong": strong_count += 1
+    if out["ema_structure"] in ("strong", "aligned_1h"): strong_count += 1
     if out.get("volume_shrink"):         strong_count += 1
     if out.get("liq_zone_valid"):        strong_count += 1
     if strong_count >= 2 and out["ema_structure"] != "weak":
@@ -656,7 +659,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
         # 高波动层的 ema_structure = "ref_only",原逻辑会给 "weak" 直接拒绝。
         # 高波动层已经过了成交密集区/资金费率/1H反转信号三道硬性门槛,
         # 应至少给 "medium",门槛不应比低中波动层更严。
-        out["signal_strength"] = "medium" if out["ema_structure"] in ("strong","weak","ref_only") else "weak"
+        out["signal_strength"] = "medium" if out["ema_structure"] in ("strong","weak","ref_only","aligned_1h") else "weak"
 
     if out["signal_strength"] == "weak":
         out["reject_reason"] = "信号强度弱,跳过"
@@ -1131,9 +1134,7 @@ def _judge_breakout_impl(k1h, k4h, k15, ind, chg24, funding):
         out["oi_change_pct"] = round(oi_chg, 2)
         oi_ok = oi_chg >= oi_req_pct
         out["oi_confirm"] = oi_ok
-        if not oi_ok:
-            out["reject_reason"] = f"OI上升不足:{oi_chg:.1f}% < {oi_req_pct}%"
-            return False, out
+        # [B-2] OI 不足不再拒绝：达标才计入 strong 加分，不足中性处理
     else:
         out["oi_confirm"]    = False   # v3.6: 无 OI 缓存时不再 failopen，标记缺失
         out["oi_cache_miss"] = True    # 限制：此信号强度上限为 medium（在信号强度分级处处理）
@@ -1153,7 +1154,7 @@ def _judge_breakout_impl(k1h, k4h, k15, ind, chg24, funding):
 
     # 信号强度分级
     vol_strong  = vol_ratio >= (2.5 if tier == "low" else 3.0)
-    oi_strong   = (out.get("oi_change_pct") or 0) >= (5 if tier != "high" else 8)
+    oi_strong   = bool(out.get("oi_confirm"))   # [B-2] OI 涨幅达标（3% / 高波动 5%）才加分
     rsi_healthy = (50 <= rsi_1h <= 65) if direction == "LONG" else (35 <= rsi_1h <= 50)
     # v3.6: 数据缺失时不计 liq_clear 分（原 None→0→True 默认乐观）
     # 做多看上方清算压力，做空看下方清算压力（按方向取对应字段）
