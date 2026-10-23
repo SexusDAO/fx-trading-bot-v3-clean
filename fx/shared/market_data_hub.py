@@ -568,6 +568,7 @@ class MarketDataHub:
             try:
                 async with websockets.connect(
                     self._url, ping_interval=20, ping_timeout=120, proxy=_PROXY, max_queue=64,
+                    compression=None,   # 禁用 permessage-deflate：免解压，缓解 GIL 争抢
                 ) as ws:
                     self._connected = True
                     delay = RECONNECT_BASE
@@ -605,6 +606,7 @@ class MarketDataHub:
             try:
                 async with websockets.connect(
                     self._market_url, ping_interval=20, ping_timeout=120, proxy=_PROXY, max_queue=32,
+                    compression=None,   # 禁用 permessage-deflate：免解压，缓解 GIL 争抢
                 ) as ws:
                     self._shards[idx].connected = True
                     delay = RECONNECT_BASE

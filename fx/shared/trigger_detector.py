@@ -126,11 +126,24 @@ def _default_oi(symbol, snapshot=None):
         return 0.0, 0.0, 0.0
 
 
-def _default_pool():
+_pool_cache: list = []
+_pool_cache_ts: float = 0.0
+_POOL_CACHE_TTL = 300.0  # 5分钟内复用，不重复读文件
+
+
+def _default_pool() -> list:
+    global _pool_cache, _pool_cache_ts
+    now = time.time()
+    if _pool_cache and now - _pool_cache_ts < _POOL_CACHE_TTL:
+        return _pool_cache
     try:
-        return list(json.loads(POOL_FILE.read_text(encoding="utf-8")).get("pool", []))
+        _pool_cache = list(
+            json.loads(POOL_FILE.read_text(encoding="utf-8")).get("pool", [])
+        )
+        _pool_cache_ts = now
+        return _pool_cache
     except Exception:
-        return []
+        return _pool_cache or []
 
 
 def _default_exinfo():
@@ -375,7 +388,7 @@ class TriggerDetector:
                 logger.debug(f"[trigger] 读持仓失败: {e}")
         if self._tradable is None:
             return []
-        syms = set(self._pool() or [])
+        syms = set(await asyncio.to_thread(self._pool) or [])   # 读候选池文件移出事件循环
         try:
             with hub._kl_lock:
                 syms |= {s for (s, iv) in hub._series.keys() if iv == "1h"}
