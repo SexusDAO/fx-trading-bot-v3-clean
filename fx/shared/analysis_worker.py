@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import multiprocessing as mp
+import multiprocessing.spawn as _mp_spawn
 import os
 import threading
 import time
@@ -118,10 +119,9 @@ class _ReEmit(logging.Handler):
 
 
 def _patch_spawn_no_main() -> None:
-    import multiprocessing.spawn as sp
-    if getattr(sp.get_preparation_data, "_fx_nomain", False):
+    if getattr(_mp_spawn.get_preparation_data, "_fx_nomain", False):
         return
-    orig = sp.get_preparation_data
+    orig = _mp_spawn.get_preparation_data
 
     def gpd(name):
         d = orig(name)
@@ -129,7 +129,7 @@ def _patch_spawn_no_main() -> None:
         d.pop("init_main_from_path", None)
         return d
     gpd._fx_nomain = True
-    sp.get_preparation_data = gpd
+    _mp_spawn.get_preparation_data = gpd
 
 
 def worker_count() -> int:
