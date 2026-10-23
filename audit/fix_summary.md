@@ -54,3 +54,29 @@ cd fx && python3 -m pytest tests/ -q
 - 本基线是「全量运行」口径，所含 8 条顺序污染使该数字略高于「逐文件运行」的真实遗留数（真实遗留约 49 条）。
 - 整体测试仍无法覆盖 `fx/test_trade.py`、`test_analyze_one.py`、`test_shutdown.py`、`test_task_exception.py` 四个文件，原因见上表。
 - 沙箱内 `test_online_fixes.py` 曾出现卡住（挂起）现象，本轮全量运行未复现。
+
+
+## 第一~四批修复提交（fix/system-overhaul）
+
+| Commit | 说明 |
+|---|---|
+| `8052b4c957` | fix(#risk): RISK_PER_TRADE 从 5% 降到 1% |
+| `48453e0dc0` | fix(#signal): breakout做多RSI上限从65改到75，避免系统性过滤强势突破 |
+| `f14d901c05` | fix(#signal): reversal SHORT chg24门槛提高到10% |
+| `e5afd2ccb2` | fix(#risk): 恢复日内亏损熔断，改为权益8%触发 |
+| `ffaae5e6d3` | fix(#strategy): TIME_STOP_PROFIT_THRESHOLD接入时间止损逻辑 |
+| `1690d57fab` | fix(#strategy): TP1成交后剩余仓位止损移到入场价保本 |
+| `c7c6dffab0` | fix(#46): get_order 查询失败抛 ApiQueryError，删除 24h 清除死代码 |
+| `41c486a8a5` | fix(#48): 清理代码未引用的失效常量，日重置拆分熔断重置与日志备份 |
+| `d751ce8c06` | fix(#39): watchdog 令牌走环境变量，必填项缺失启动报错，listenKey 日志脱敏 |
+| `5fefacb24d` | fix(#50): DEPLOY 克隆地址去令牌，LLM 中转地址移到 .env，日志轮转统一由 main.py 负责 |
+| `9b9deb525d` | fix(#35b): LLM 调用加 60 秒总超时，超时跳过评分用默认分值并记 WARNING |
+| `fcae54097a` | fix(#16): 仅确认非对冲模式时拒绝启动，无法确认时告警后继续 |
+| `e9703c4159` | fix(#signal): reversal SHORT RSI1H补充通道chg24门槛提高到10%，与主通道一致 |
+| `19e4d861cc` | test(#signal): reversal SHORT 用例 chg24 8%→12%，匹配提高后的10%门槛 |
+| `796464269d` | feat(#perf): 开启触发器驱动与市场数据hub，兜底扫描改为15分钟 |
+| `c2add5236e` | test(#perf): 触发器单测隔离开关默认值，适配生产默认开启 |
+| `dce13ac6cb` | perf(4-B): liq_cache 预热改为固定5线程池，去掉每标的一线程 |
+| `ba5a97e96c` | chore(4-C): 删除 tracemalloc 内存快照与 kline_cache DEBUG 临时诊断 |
+
+**最终测试**：57 failed / 969 passed / 19 skipped（与基线一致，无新增失败）。
