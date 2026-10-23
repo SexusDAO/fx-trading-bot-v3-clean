@@ -1051,8 +1051,9 @@ def _prescreen_ticker(symbol: str, ticker: dict, loss_blacklist, is_weekend: boo
         _p = float(ticker.get("lastPrice", 0))
         if _h > 0 and _l > 0 and _p > 0:
             _amp_proxy = (_h - _l) / (_l + 1e-9) * 100
-            if _amp_proxy < 0.8:
-                return False  # v3.46: 周末振幅代理 < 0.8%，预筛拒绝
+            from config import WEEKEND_AMP_PROXY_MIN
+            if _amp_proxy < WEEKEND_AMP_PROXY_MIN:
+                return False  # v3.46: 周末振幅代理低于门槛，预筛拒绝
     return True
 
 
@@ -1852,9 +1853,9 @@ def maintain_pending_order(pos: dict, ticker: dict) -> str:
 
 # ── 候选池刷新（每30分钟） ────────────────────────────────────────────────────
 _POOL_SCORE_VOL_TOP = 80          # 成交额排名前 N 加分
-_POOL_SCORE_VOL = 40
-_POOL_SCORE_MOVER = 20            # 涨幅 Top / 跌幅 Top
-_POOL_SCORE_FUNDING = 20          # 资金费率绝对值 > POOL_FUNDING_EXTREME_MIN
+_POOL_SCORE_VOL = 30              # 40→30：避免候选池退化成成交额排名
+_POOL_SCORE_MOVER = 25            # 涨幅 Top / 跌幅 Top（20→25）
+_POOL_SCORE_FUNDING = 25          # 资金费率绝对值 > POOL_FUNDING_EXTREME_MIN（20→25）
 _POOL_SCORE_LIQ = 20              # CG 清算量 Top
 # v3.xx: 候选池 OI 过滤已停用，以下两个常量仅供 _pool_filter_by_oi 恢复时使用
 _POOL_OI_WORKERS = 6
@@ -2775,8 +2776,9 @@ def _filter_and_register_signals(
                 result["rejected"].append({"symbol": sig["symbol"],
                     "reason": f"周末低分过滤: score={sc}<{_min_sc}({_strength})"})
                 continue
-            if sc > 80:
-                sig["ind"]["final_score"] = 80
+            from config import WEEKEND_SCORE_CAP
+            if sc > WEEKEND_SCORE_CAP:
+                sig["ind"]["final_score"] = WEEKEND_SCORE_CAP
                 sig["ind"]["weekend_capped"] = True
             _weekend_filtered.append(sig)
         avail_signals = _weekend_filtered
@@ -2913,7 +2915,8 @@ def _filter_and_register_signals(
                     sig["pre_entry_price"] = mark_p
 
                     if mode == "breakout":
-                        expire_sec = 30 * 60
+                        from config import EXPIRE_BREAKOUT_MIN
+                        expire_sec = EXPIRE_BREAKOUT_MIN * 60
                     else:
                         # 按 ATR ratio 动态调整：低波动等更久，高波动快速失效
                         from config import EXPIRE_LOW_VOL_H, EXPIRE_HIGH_VOL_H, EXPIRE_NORMAL_H, EXPIRE_LOW_VOL_THRESH, EXPIRE_HIGH_VOL_THRESH

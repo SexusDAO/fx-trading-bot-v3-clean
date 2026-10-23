@@ -115,7 +115,7 @@ def test_score_components_and_stacking():
     q = [{"symbol": s, "_fr_abs": f} for s, f in
          [("ALL", 0.002), ("VOLONLY", 0.0), ("MOVER", 0.0), ("FUND", 0.002), ("LIQ", 0.0), ("NONE", 0.0)]]
     out = sc._pool_scores(q, vol_top={"ALL", "VOLONLY"}, mover_syms={"ALL", "MOVER"}, liq_syms={"ALL", "LIQ"})
-    assert out == {"ALL": 100, "VOLONLY": 40, "MOVER": 20, "FUND": 20, "LIQ": 20, "NONE": 0}
+    assert out == {"ALL": 100, "VOLONLY": 30, "MOVER": 25, "FUND": 25, "LIQ": 20, "NONE": 0}   # 30+25+25+20
 
 
 def test_volume_rank_top80_gets_40_over_whole_market(env):
@@ -123,7 +123,7 @@ def test_volume_rank_top80_gets_40_over_whole_market(env):
     pool = sc.refresh_pool()
     assert pool[:90] == [f"V{i:02d}USDT" for i in range(90)]            # 评分相同的部分按成交额降序
     out = sc._pool_scores([{"symbol": "a", "_fr_abs": 0}], {"a"}, set(), set())
-    assert out["a"] == 40 and sc._POOL_SCORE_VOL_TOP == 80
+    assert out["a"] == 30 and sc._POOL_SCORE_VOL_TOP == 80
 
 
 def test_ranking_by_score_then_volume_and_cap(env, monkeypatch):
@@ -135,7 +135,7 @@ def test_ranking_by_score_then_volume_and_cap(env, monkeypatch):
                      tk("BOTHUSDT", vol=5_000_000), tk("PLAINUSDT", vol=800_000_000)],
                funding={"FUNDUSDT": 0.002, "BOTHUSDT": 0.002})
     env.liq = [{"symbol": "LIQ", "liq_usd": 5}, {"symbol": "BOTH", "liq_usd": 4}]
-    assert sc.refresh_pool() == ["BOTHUSDT", "LIQUSDT", "FUNDUSDT"]      # 40 > 20(成交额大) > 20；BIG/PLAIN 评分为 0 被截断
+    assert sc.refresh_pool() == ["BOTHUSDT", "FUNDUSDT", "LIQUSDT"]      # 45 > 25(费率) > 20(清算)；BIG/PLAIN 评分为 0 被截断
 
 
 def test_gainers_losers_get_mover_points(env, monkeypatch):

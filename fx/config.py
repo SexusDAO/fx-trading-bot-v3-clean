@@ -155,6 +155,9 @@ EXPIRE_HIGH_VOL_H              = 2     # ATR>5% 高波动：等2H
 EXPIRE_NORMAL_H                = 4     # 正常波动：等4H（原默认）
 EXPIRE_LOW_VOL_THRESH          = 2.0   # ATR ratio 低波动阈值
 EXPIRE_HIGH_VOL_THRESH         = 5.0   # ATR ratio 高波动阈值
+EXPIRE_BREAKOUT_MIN            = 30    # breakout 信号有效期（分钟）
+WEEKEND_AMP_PROXY_MIN          = 0.8   # 周末振幅代理最低门槛（%）
+WEEKEND_SCORE_CAP              = 85    # 周末评分上限（80→85，保留 hub 加分空间）
 MIN_SIGNAL_SCORE_WEEKEND       = 70    # 周末最低信号分（已有逻辑，此处参数化）
 # signal_strength → base_score 映射
 SCORE_BASE_STRONG              = 70
@@ -857,7 +860,7 @@ PYRAMID_RSI_LONG_MAX              = 75     # LONG 加仓时 RSI1H 上限（避�
 PYRAMID_RSI_SHORT_MIN             = 25     # SHORT 加仓时 RSI1H 下限
 
 # ── 资金费率 + 主策略协同（v3.72）────────────────────────────────────────────────
-FUNDING_SYNERGY_BONUS             = 1.25   # 方向与费率一致时仓位上浮系数
+FUNDING_SYNERGY_BONUS             = 1.15   # 方向与费率一致时仓位上浮系数（1.25→1.15，原值加成过激）
 FUNDING_SYNERGY_PENALTY           = 0.80   # 方向与费率相反时仓位下调系数
 FUNDING_SYNERGY_THRESH            = 0.0005 # 费率绝对值 > 0.05% 才触发协同逻辑
 
