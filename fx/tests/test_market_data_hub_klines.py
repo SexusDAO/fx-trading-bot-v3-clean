@@ -98,7 +98,10 @@ def test_gap_invalidates_series():
 def test_stale_last_candle_returns_none():
     h = ready_hub()
     assert h.get_klines("BTCUSDT", "1h", 10) is not None
-    h._wall = lambda: (T0 + 201 * HMS + 20_000) / 1000               # 最后一根已结束 20s 仍没有新推送
+    _grace = H._KLINE_STALE_GRACE_MS["1h"]
+    h._wall = lambda: (T0 + 201 * HMS + _grace - 1_000) / 1000       # 仍在 1h 周期 grace 内 → 不算过旧
+    assert h.get_klines("BTCUSDT", "1h", 10) is not None
+    h._wall = lambda: (T0 + 201 * HMS + _grace + 1_000) / 1000       # 超过 1h 周期 grace 仍没有新推送 → 过旧
     assert h.get_klines("BTCUSDT", "1h", 10) is None
 
 

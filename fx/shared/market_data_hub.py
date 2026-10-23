@@ -44,7 +44,8 @@ TICKER_MAX_AGE_SEC = 10.0
 KLINE_INTERVALS = ("15m", "1h", "4h")
 _INTERVAL_MS = {"15m": 900_000, "1h": 3_600_000, "4h": 14_400_000}
 KLINE_HISTORY = 100                            # 每个 (标的, 周期) 保留/初始化拉取的 K 线根数
-KLINE_STALE_GRACE_MS = 10_000                  # 最后一根 K 线的结束时间已过去这么久仍无新推送 → 视为过旧，读取返回 None
+# 按周期动态 grace：最后一根 K 线的结束时间已过去这么久仍无新推送 → 视为过旧，读取返回 None
+_KLINE_STALE_GRACE_MS = {"15m": 60_000, "1h": 300_000, "4h": 600_000}
 # 历史 K 线拉取专用线程池：不占用 asyncio 默认线程池，避免与扫描等线程竞争
 from concurrent.futures import ThreadPoolExecutor
 _LOAD_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hub-load")
@@ -284,7 +285,7 @@ class MarketDataHub:
                 return None
             if not self._shards[min(st.shard, self._nshards - 1)].connected:
                 return None
-            if self._wall() * 1000 > float(st.rows[-1][6]) + KLINE_STALE_GRACE_MS:
+            if self._wall() * 1000 > float(st.rows[-1][6]) + _KLINE_STALE_GRACE_MS.get(interval, 60_000):
                 return None
             return [list(r) for r in st.rows[-n:]]
 
@@ -591,7 +592,7 @@ class MarketDataHub:
             first = False
             try:
                 async with websockets.connect(
-                    self._market_url, ping_interval=30, ping_timeout=60, proxy=_PROXY, max_queue=256,
+                    self._market_url, ping_interval=30, ping_timeout=60, proxy=_PROXY, max_queue=32,
                 ) as ws:
                     self._shards[idx].connected = True
                     delay = RECONNECT_BASE
