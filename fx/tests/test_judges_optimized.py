@@ -147,7 +147,11 @@ def _ema_short(rsi_4h):
                                  ind, chg24=-2.0, funding=0.0)
 
 
-def test_10_ema_trend_short_rsi4h_60_rejected():
+def test_10_ema_trend_short_rsi4h_60_rejected(monkeypatch):
+    # 本用例验证 4H RSI 门槛；1H 做空区间已改为 [32,52]，这里固定为旧区间让样本先通过 1H 检查
+    import config
+    monkeypatch.setattr(config, "EMA_TREND_RSI1H_SHORT_MIN", 48, raising=False)
+    monkeypatch.setattr(config, "EMA_TREND_RSI1H_SHORT_MAX", 70, raising=False)
     ok, out = _ema_short(60)
     assert ok is False and "4H RSI=60.0" in _rr(out) and "[28, 55]" in _rr(out)
 

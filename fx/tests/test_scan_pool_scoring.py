@@ -133,6 +133,7 @@ def test_ranking_by_score_then_volume_and_cap(env, monkeypatch):
 def test_gainers_losers_get_mover_points(env, monkeypatch):
     monkeypatch.setattr(sc, "POOL_GAINERS_N", 1); monkeypatch.setattr(sc, "POOL_LOSERS_N", 1)
     monkeypatch.setattr(sc, "_POOL_SCORE_VOL_TOP", 0)
+    monkeypatch.setattr(sc, "POOL_MIN_VOLUME_USD", 3_000_000)   # 用例样本成交额 4M/5M，按旧门槛测排序逻辑
     set_market(env, [tk("MIDUSDT", chg=0.0, vol=900_000_000), tk("UPUSDT", chg=9.0, vol=1_000_000 * 5),
                      tk("DOWNUSDT", chg=-9.0, vol=1_000_000 * 4)])
     assert sc.refresh_pool() == ["UPUSDT", "DOWNUSDT", "MIDUSDT"]

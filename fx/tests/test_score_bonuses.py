@@ -10,6 +10,14 @@ import config
 import scanner as sc
 
 
+@pytest.fixture(autouse=True)
+def _pin_hub_cap_floor(monkeypatch):
+    # 用例按旧上下限 +15/-10 编写；生产已改对称 +12/-12，这里固定旧值测加减分叠加逻辑
+    import config
+    monkeypatch.setattr(config, "SCORE_HUB_BONUS_CAP", 15, raising=False)
+    monkeypatch.setattr(config, "SCORE_HUB_PENALTY_FLOOR", -10, raising=False)
+
+
 def k(v=100.0, buy=50.0, q=1000.0):
     # [t,o,h,l,c,v,T,q,n,V,Q,ignore]
     return [0, "1", "2", "0.5", "1.5", str(v), 0, str(q), 1, str(buy), "0", "0"]
@@ -24,6 +32,8 @@ def tk(c=95.0, h=100.0, l=0.0, chg=1.0):
     ("LONG", 60, 10), ("LONG", 40, -5), ("LONG", 50, 0), ("LONG", 55, 0), ("LONG", 45, 0),
     ("SHORT", 40, 10), ("SHORT", 60, -5), ("SHORT", 50, 0),
 ])
+
+
 def test_taker(direction, buy, exp):
     b, r = sc._calc_taker_bonus(direction, [k(100, buy)] * 6)
     assert b == exp and r == pytest.approx(buy / 100)
@@ -138,6 +148,12 @@ def test_hub_helpers_respect_flag_and_hub(monkeypatch):
     assert len(sc._bonus_hub_klines("BTCUSDT", "1h", 6)) == 6 and sc._bonus_hub_ticker("BTCUSDT")["lastPrice"]
     monkeypatch.setattr(H, "get_klines", lambda s, i, n: None)
     assert sc._bonus_hub_klines("BTCUSDT", "1h", 6) is None                  # 不回落 REST
+
+
+def test_hub_cap_floor_defaults_symmetric():
+    import importlib, config as _c
+    src = open(_c.__file__, encoding="utf-8").read()
+    assert "SCORE_HUB_BONUS_CAP            = 12" in src and "SCORE_HUB_PENALTY_FLOOR        = -12" in src
 
 
 def test_config_switches_default_on():

@@ -980,7 +980,11 @@ def _judge_breakout_impl(k1h, k4h, k15, ind, chg24, funding):
     rsi_limit    = BREAKOUT_RSI_MAX_LONG_HIGH if tier == "high" else BREAKOUT_RSI_MAX_LONG
     rsi_limit_s  = BREAKOUT_RSI_MIN_SHORT_HIGH if tier == "high" else BREAKOUT_RSI_MIN_SHORT
     margin_mult  = 0.2 if tier == "high" else 0.15
-    oi_req_pct   = 5.0 if tier == "high" else 3.0
+    try:
+        from config import BREAKOUT_OI_GAIN_MIN as _OIG, BREAKOUT_OI_GAIN_MIN_HIGH as _OIG_H
+    except Exception:
+        _OIG, _OIG_H = 1.0, 3.0
+    oi_req_pct   = _OIG_H if tier == "high" else _OIG   # 只影响加分（oi_confirm），不拒绝
 
     out = {
         "mode":               "breakout",
@@ -3885,10 +3889,16 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
 
     # ── 4. RSI 健康区间检查（v3.64：SHORT 方向适配）────────────────────────
     # SHORT 上限放宽到 70（不追顶，但允许偏高区间回踩阻力）
-    _rsi1h_max_eff = 70 if _ema_direction == "short" else _RSI1H_MAX
-    if not (_RSI1H_MIN <= rsi_1h <= _rsi1h_max_eff):
+    try:
+        from config import (EMA_TREND_RSI1H_SHORT_MIN as _R1S_MIN, EMA_TREND_RSI1H_SHORT_MAX as _R1S_MAX,
+                            EMA_TREND_RSI_GOLDEN_SHORT_MIN as _RG_S_MIN, EMA_TREND_RSI_GOLDEN_SHORT_MAX as _RG_S_MAX)
+    except Exception:
+        _R1S_MIN, _R1S_MAX, _RG_S_MIN, _RG_S_MAX = 32, 52, 38, 48
+    _rsi1h_min_eff = _R1S_MIN if _ema_direction == "short" else _RSI1H_MIN
+    _rsi1h_max_eff = _R1S_MAX if _ema_direction == "short" else _RSI1H_MAX
+    if not (_rsi1h_min_eff <= rsi_1h <= _rsi1h_max_eff):
         out["reject_reason"] = (
-            f"1H RSI={rsi_1h:.1f} 不在健康区间 [{_RSI1H_MIN}, {_rsi1h_max_eff}]"
+            f"1H RSI={rsi_1h:.1f} 不在健康区间 [{_rsi1h_min_eff}, {_rsi1h_max_eff}]"
         )
         return False, out
 
@@ -3970,7 +3980,7 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
 
     # ── 8. 强度评级 ───────────────────────────────────────────────────────
     # strong：MA99 三线排列 + RSI 在 52~62 黄金区间 + 量比 > 0.8
-    rsi_golden = 52 <= rsi_1h <= 62
+    rsi_golden = (_RG_S_MIN <= rsi_1h <= _RG_S_MAX) if _ema_direction == "short" else (52 <= rsi_1h <= 62)
     vol_strong = vol_ratio >= 0.8
     strong_count = sum([ma99_ok, rsi_golden, vol_strong])
 

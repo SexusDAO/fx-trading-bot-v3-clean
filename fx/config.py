@@ -74,7 +74,7 @@ UNIVERSE_LOSS_TOP       = 30          # 跌幅榜前 N（v3.3.5: 25→30）
 UNIVERSE_FUNDING_TOP    = 25          # 资金费率极端榜前 N（v3.3.5: 20→25）
 UNIVERSE_FUNDING_MIN_ABS = 0.001      # 资金费率绝对值门槛，0.1%
 
-UNIVERSE_MIN_VOLUME_24H = 3_000_000   # 24H 最低成交额（v3.3.5: 500万→300万，捕捉活跃山寨）
+UNIVERSE_MIN_VOLUME_24H = 5_000_000   # 24H 最低成交额（300万 → 500万，过滤易被拉盘的薄流动性山寨）
 UNIVERSE_BLACKLIST      = [
     "USDCUSDT", "BUSDUSDT", "TUSDUSDT", "USDTUSDT", "FDUSDUSDT",
 ]
@@ -167,8 +167,8 @@ SCORE_BASE_WEAK                = 30    # weak 信号已在 judge 层过滤，不
 SCORE_TAKER_BONUS              = True   # 近6根1h主动买入占比：顺向 +10 / 逆向 -5
 SCORE_RANGE_BONUS              = True   # 24h区间位置：顺向 +8 / 逆向 -5
 SCORE_VOLPRICE_BONUS           = True   # 放量(近4h/前20h>=1.6)且24h涨跌幅方向上有限：+8
-SCORE_HUB_BONUS_CAP            = 15     # hub 三项加分（taker/range/volprice）合计上限
-SCORE_HUB_PENALTY_FLOOR        = -10    # hub 三项加分负向下限
+SCORE_HUB_BONUS_CAP            = 12     # hub 三项加分（taker/range/volprice）合计上限
+SCORE_HUB_PENALTY_FLOOR        = -12    # hub 三项加分负向下限
 
 # CLASSIFY_BREAKOUT_VOL_RATIO = 1.5  # 已废弃：分类层不再校验量比，移至 judge_breakout
 
@@ -290,6 +290,8 @@ DEFAULT_LEVERAGE = 10
 
 # 挂单超时
 ORDER_EXPIRE_BREAKOUT_MIN = 30    # 动量突破挂单超时，分钟
+BREAKOUT_OI_GAIN_MIN      = 1.0   # breakout OI 15m 涨幅加分门槛（低/中波动，%）
+BREAKOUT_OI_GAIN_MIN_HIGH = 3.0   # breakout OI 15m 涨幅加分门槛（高波动，%）
 BREAKOUT_MAX_CHASE_ATR = 2.0      # 突破后最多追入2ATR，超过不开仓
 ORDER_EXPIRE_PULLBACK_MIN = 240   # 回踩/反转挂单超时，分钟
 
@@ -608,7 +610,7 @@ AI_ADVISOR_PARAM_KEYS = [
 # ═══════════════════════════════════════════════════════════════════════════════
 LLM_JUDGE_ENABLED          = True   # 总开关：False 时所有 LLM 调用全部跳过
 LLM_JUDGE_EXPLOSIVE_COIN   = False  # 场景1：妖币识别（3日涨>100% 但 24H 横盘）  # [v3.87 STEP2-4] 按评审关闭：该分支会把已通过的信号强制改成 range_bounce LONG（SHORT→LONG 翻转），无历史胜率支撑且依赖外部大模型实时调用；有数据后再评估是否重新开启
-LLM_JUDGE_BORDERLINE       = True   # 场景2：规则边界信号（final_score 45~55）
+LLM_JUDGE_BORDERLINE       = False   # 场景2：规则边界信号（final_score 45~55）
 LLM_JUDGE_NEWS             = True   # 场景3：新闻 caution 语义深度解读
 LLM_JUDGE_MIN_CONFIDENCE   = 0.65   # LLM 最低置信度门槛，低于此视为不确定→跳过
 
@@ -781,6 +783,10 @@ OI_DIV_ORDER_EXPIRE_MIN      = 60      # oi_divergence 挂单有效期（分钟�
 EMA_TREND_EMA_GAP_MIN_PCT     = 0.005  # EMA20 > EMA50 至少差距 0.5%（防止刚刚交叉的假多头）
 EMA_TREND_RSI1H_MIN           = 48     # 1H RSI 下限（太低说明已经超卖，走 reversal 更合适）
 EMA_TREND_RSI1H_MAX           = 68     # 1H RSI 上限（太高说明已超买，不是好的回踩入场点）
+EMA_TREND_RSI1H_SHORT_MIN     = 32     # 做空 RSI1H 下限（原沿用做多 48）
+EMA_TREND_RSI1H_SHORT_MAX     = 52     # 做空 RSI1H 上限（原写死 70）
+EMA_TREND_RSI_GOLDEN_SHORT_MIN = 38    # 做空 rsi_golden 下限（做多为 52）
+EMA_TREND_RSI_GOLDEN_SHORT_MAX = 48    # 做空 rsi_golden 上限（做多为 62）
 EMA_TREND_RSI4H_MIN           = 45     # 4H RSI 下限（趋势结构支撑）
 EMA_TREND_RSI4H_MAX           = 72     # 4H RSI 上限（超买区域放弃）
 
