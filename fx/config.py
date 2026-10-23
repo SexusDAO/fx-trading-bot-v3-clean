@@ -27,7 +27,7 @@ if not BINANCE_API_KEY or not BINANCE_API_SECRET:
     )
 
 # [fix #39] 必填环境变量：启动时（main.py）缺失直接报错退出；导入 config 本身不报错，便于测试/回测。
-REQUIRED_ENV_VARS = ("BINANCE_API_KEY", "BINANCE_API_SECRET", "BINANCE_PROXY", "OPENAI_API_KEY", "OPENAI_BASE_URL")
+REQUIRED_ENV_VARS = ("BINANCE_API_KEY", "BINANCE_API_SECRET", "OPENAI_API_KEY", "OPENAI_BASE_URL")   # 代理改为可选，默认直连
 
 
 def require_env() -> None:
@@ -38,8 +38,8 @@ def require_env() -> None:
 
 
 # ── SOCKS5 代理 ────────────────────────────────────────────────────────────────
-PROXY_URL = os.environ.get("PROXY_URL", "")  # socks5://user:pass@host:port
-PROXIES   = {"http": PROXY_URL, "https": PROXY_URL}
+PROXY_URL = (os.environ.get("PROXY_URL") or "").strip()  # 可选；未设置 → 直连。格式 socks5://user:pass@host:port
+PROXIES   = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else {}
 BINANCE_BASE_URL   = "https://fapi.binance.com"
 BINANCE_WS_URL     = "wss://fstream.binance.com"
 

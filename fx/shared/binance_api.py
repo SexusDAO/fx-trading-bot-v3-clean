@@ -59,7 +59,7 @@ BASE_URL   = "https://fapi.binance.com"
 # ── 代理配置 ─────────────────────────────────────────────────────────────────
 # 签名请求（账户/下单）必须走代理（API key IP 白名单绑定代理出口 IP）
 # 公开行情接口（mark_price / klines / funding rate 等）直连即可，节省代理配额
-PROXY_URL  = os.environ.get("BINANCE_PROXY", "")
+PROXY_URL  = (os.environ.get("BINANCE_PROXY") or os.environ.get("PROXY_URL") or "").strip()   # 未设置 → 直连
 PROXIES    = ({"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else {})
 # 直连 Session（行情接口用）
 PROXIES_DIRECT = {}

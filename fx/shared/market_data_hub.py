@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import statistics
 import threading
 import time
@@ -26,10 +27,8 @@ import config
 
 logger = logging.getLogger("market_data_hub")
 
-try:
-    _PROXY = config.PROXY_URL if getattr(config, "PROXY_URL", "") else None
-except Exception:
-    _PROXY = None
+# 代理只由环境变量驱动；未设置或为空 → None（直连）
+_PROXY = (os.environ.get("PROXY_URL") or os.environ.get("BINANCE_PROXY") or "").strip() or None
 
 RECONNECT_BASE = getattr(config, "WS_RECONNECT_BASE", 3)
 RECONNECT_MAX = getattr(config, "WS_RECONNECT_MAX", 60)
