@@ -303,7 +303,8 @@ KLINE_CACHE_INTERVALS   = ["1h", "4h", "15m"]  # 缓存哪些周期
 KLINE_REQUEST_TIMEOUT   = (3, 5)  # (connect_s, read_s)：K 线单次 HTTP 请求超时
 KLINE_REQUEST_MAX_RETRY = 1       # K 线请求最多重试次数（总尝试 = 1 + 此值）
 MARKET_DATA_HUB_ENABLED = True   # 公共市场数据 WS 中心（阶段一：全市场标记价/资金费率）；False 时行为与未引入 hub 前完全一致；hub 未就绪/过旧时 scanner 自动回落 REST
-KLINE_HUB_SYMBOLS_MAX = 120   # hub 订阅 K 线的标的数上限（每标的 15m/1h/4h 共 3 个 stream；每条 /market/stream 连接最多 KLINE_STREAM_PER_CONN=180 个 → 60 标的/条，120 标的 = 2 条连接）
+HUB_WS_PROXY = ""  # hub WebSocket 代理，空字符串=直连，"__env__"=跟随环境变量 PROXY_URL
+KLINE_HUB_SYMBOLS_MAX = 220  # 120 → 220，覆盖全部候选池+动态注入余量
 KLINE_REQUEST_TOTAL_SEC = 8.0     # 单次 get_klines 调用总时限（秒，含重试、重试间隔、直连失败后改走代理）
 API_REQUEST_TIMEOUT     = (3, 5)    # 全局 REST 接口超时 (connect_s, read_s)：公开行情 _get 与签名查询/撤单/杠杆等
 API_REQUEST_MAX_RETRY   = 1         # 全局 REST 接口最多重试次数（_retry 总尝试 = 1 + 此值）

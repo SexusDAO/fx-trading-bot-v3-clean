@@ -1,3 +1,4 @@
+import pytest
 """hub K 线分片：多条 /market/stream 连接，每条最多 KLINE_STREAM_PER_CONN 个 stream（全 mock，不联网）。"""
 import asyncio
 import json
@@ -43,8 +44,14 @@ async def setup(h):
     return wss
 
 
+@pytest.fixture(autouse=True)
+def _pin_symbols_max_120(monkeypatch):
+    # 生产值已改为 220；分片机制用例按 120 标的 / 2 条连接编写，这里固定为 120
+    monkeypatch.setattr(config, "KLINE_HUB_SYMBOLS_MAX", 120, raising=False)
+
+
 def test_config_and_shard_count():
-    assert config.KLINE_HUB_SYMBOLS_MAX == 120 and H.KLINE_STREAM_PER_CONN == 180
+    assert config.KLINE_HUB_SYMBOLS_MAX == 120 and H.KLINE_STREAM_PER_CONN == 180   # 由下方 fixture 固定为 120（分片机制按 2 条连接测）
     h = make_hub()
     assert h._nshards == 2 and h._syms_per_conn == 60
 

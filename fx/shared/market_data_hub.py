@@ -29,6 +29,11 @@ logger = logging.getLogger("market_data_hub")
 
 # 代理只由环境变量驱动；未设置或为空 → None（直连）
 _PROXY = (os.environ.get("PROXY_URL") or os.environ.get("BINANCE_PROXY") or "").strip() or None
+try:
+    from config import HUB_WS_PROXY as _HUB_WS_PROXY
+    _PROXY = (str(_HUB_WS_PROXY).strip() or None) if _HUB_WS_PROXY != "__env__" else _PROXY   # 空字符串 → None（直连）
+except ImportError:
+    pass
 
 RECONNECT_BASE = getattr(config, "WS_RECONNECT_BASE", 3)
 RECONNECT_MAX = getattr(config, "WS_RECONNECT_MAX", 60)
@@ -555,7 +560,7 @@ class MarketDataHub:
             first = False
             try:
                 async with websockets.connect(
-                    self._url, ping_interval=30, ping_timeout=60, proxy=_PROXY, max_queue=64,
+                    self._url, ping_interval=20, ping_timeout=120, proxy=_PROXY, max_queue=64,
                 ) as ws:
                     self._connected = True
                     delay = RECONNECT_BASE
@@ -592,7 +597,7 @@ class MarketDataHub:
             first = False
             try:
                 async with websockets.connect(
-                    self._market_url, ping_interval=30, ping_timeout=60, proxy=_PROXY, max_queue=32,
+                    self._market_url, ping_interval=20, ping_timeout=120, proxy=_PROXY, max_queue=32,
                 ) as ws:
                     self._shards[idx].connected = True
                     delay = RECONNECT_BASE
