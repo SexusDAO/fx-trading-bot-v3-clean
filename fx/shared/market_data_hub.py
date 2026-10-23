@@ -62,6 +62,17 @@ except Exception:
     _HUB_LOAD_MAX_WORKERS = 2
 _LOAD_POOL = ThreadPoolExecutor(max_workers=int(_HUB_LOAD_MAX_WORKERS), thread_name_prefix="hub-load")
 KLINE_FETCH_CONCURRENCY = 6                    # 历史 K 线 REST 拉取并发上限
+try:
+    from config import KLINE_LOAD_BATCH_SIZE as _KLINE_LOAD_BATCH_SIZE
+except Exception:
+    _KLINE_LOAD_BATCH_SIZE = 30
+KLINE_LOAD_BATCH_SIZE = max(1, int(_KLINE_LOAD_BATCH_SIZE))   # 每次对账最多新建的加载任务数
+try:
+    from config import KLINE_GAP_RELOAD_COOLDOWN_SEC as _KLINE_GAP_COOLDOWN
+except Exception:
+    _KLINE_GAP_COOLDOWN = 60
+KLINE_GAP_RELOAD_COOLDOWN_SEC = float(_KLINE_GAP_COOLDOWN)    # 同一 series 缺口重拉冷却（秒）
+_GAP_RELOAD_TS: dict = {}                                     # series key → 上次缺口重拉时间（monotonic，进程内）
 KLINE_RETRY_SEC = 30.0                         # 历史拉取失败后的重试间隔
 KLINE_STREAM_PER_CONN = 180                    # 单条 /market/stream 连接上的 K 线 stream 上限（币安单连接 200，留出 ticker 等余量）
 SUB_BATCH = 100                                # 每条 SUBSCRIBE/UNSUBSCRIBE 的 stream 数
@@ -411,6 +422,11 @@ class MarketDataHub:
                     del st.pending[0:len(st.pending) - 60]
                 return
             if not _upsert(st.rows, row, iv_ms):
+                _now_m = time.monotonic()
+                _last = _GAP_RELOAD_TS.get(key)
+                if _last is not None and _now_m - _last < KLINE_GAP_RELOAD_COOLDOWN_SEC:
+                    return                           # 冷却中：本次缺口不触发重拉
+                _GAP_RELOAD_TS[key] = _now_m
                 logger.warning(f"[hub] K线缺口 {key[0]} {key[1]}，作废并重拉历史")
                 st.rows, st.pending, gap = None, [row], True
                 st.retry_at = 0.0
@@ -681,6 +697,8 @@ class MarketDataHub:
         todo = []
         with self._kl_lock:
             for key, st in self._series.items():
+                if len(todo) >= KLINE_LOAD_BATCH_SIZE:
+                    break                            # 本轮已满，其余留到下一次对账
                 if (st.shard == sh.idx and st.rows is None and not st.loading and now >= st.retry_at
                         and f"{key[0].lower()}@kline_{key[1]}" in sh.subscribed):
                     st.loading = True

@@ -45,6 +45,13 @@ async def setup(h):
 
 
 @pytest.fixture(autouse=True)
+def _pin_unbatched_load(monkeypatch):
+    """本文件用例按「一次对账建齐全部加载任务」编写；分批上限另由专门用例覆盖，这里固定为不限。"""
+    monkeypatch.setattr(H, "KLINE_LOAD_BATCH_SIZE", 10 ** 6)
+    H._GAP_RELOAD_TS.clear()
+
+
+@pytest.fixture(autouse=True)
 def _pin_symbols_max_120(monkeypatch):
     # 生产值已改为 220；分片机制用例按 120 标的 / 2 条连接编写，这里固定为 120
     monkeypatch.setattr(config, "KLINE_HUB_SYMBOLS_MAX", 120, raising=False)
