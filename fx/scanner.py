@@ -1856,6 +1856,7 @@ _POOL_SCORE_VOL = 40
 _POOL_SCORE_MOVER = 20            # 涨幅 Top / 跌幅 Top
 _POOL_SCORE_FUNDING = 20          # 资金费率绝对值 > POOL_FUNDING_EXTREME_MIN
 _POOL_SCORE_LIQ = 20              # CG 清算量 Top
+# v3.xx: 候选池 OI 过滤已停用，以下两个常量仅供 _pool_filter_by_oi 恢复时使用
 _POOL_OI_WORKERS = 6
 _POOL_OI_TOTAL_TIMEOUT_SEC = 90.0
 
@@ -1878,6 +1879,7 @@ def _pool_scores(qualified: list, vol_top: set, mover_syms: set, liq_syms: set) 
     return out
 
 
+# v3.xx: 候选池 OI 过滤已停用，成交量双重过滤足够兜底，保留函数供需要时恢复
 def _pool_filter_by_oi(candidates: list, min_oi_u: float):
     """对候选逐一查 OI（张数×价格≈U），OI < min_oi_u 的剔除；查询失败/超时视为通过。
     并发 _POOL_OI_WORKERS，同一次调用内每个标的只查一次。返回 (通过列表, {'excluded':n,'failed':n})。"""
@@ -1976,8 +1978,9 @@ def refresh_pool() -> list:
             t["_px"] = _mark_px.get(sym) or _price_now
             coarse.append(t)
 
-        # OI 门槛：逐一查询（并发 6，本次调用内每个标的只查一次），查询失败视为通过
-        usdt, _oi_stat = _pool_filter_by_oi(coarse, SCAN_POOL_MIN_OI_U)
+        # v3.xx: 候选池 OI 过滤已停用（成交量双重过滤足够兜底），粗筛结果直接进入评分
+        # usdt, _oi_stat = _pool_filter_by_oi(coarse, SCAN_POOL_MIN_OI_U)
+        usdt = coarse
 
         # ── 第二步：评分（各项独立加分，可叠加，满分 100）────────────────────
         _vol_top = {s_ for s_, _ in sorted(_all_vol, key=lambda x: x[1], reverse=True)[:_POOL_SCORE_VOL_TOP]}
@@ -2018,8 +2021,7 @@ def refresh_pool() -> list:
         # ── 第三步：按评分降序（同分按成交额降序），截断到 SCAN_POOL_MAX ───────
         _ranked = sorted(usdt, key=lambda t: (-_scores[t["symbol"]], -float(t.get("quoteVolume", 0))))
         pool = [t["symbol"] for t in _ranked[:int(SCAN_POOL_MAX)]]
-        logger.info(f"[scanner] 候选池评分: 粗筛通过 {len(coarse)}，OI 剔除 {_oi_stat['excluded']}，"
-                    f"OI 查询失败(放行) {_oi_stat['failed']}，合格 {len(usdt)}，入池 {len(pool)}，"
+        logger.info(f"[scanner] 候选池评分: 粗筛通过 {len(coarse)}，合格 {len(usdt)}，入池 {len(pool)}，"
                     f"其中评分>0 {sum(1 for t in _ranked[:int(SCAN_POOL_MAX)] if _scores[t['symbol']] > 0)} 个")
 
         POOL_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)

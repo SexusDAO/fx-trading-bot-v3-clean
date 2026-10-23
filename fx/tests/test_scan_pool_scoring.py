@@ -81,17 +81,18 @@ def test_usdc_allowed_when_flag_true(env, monkeypatch):
 
 # ── OI ────────────────────────────────────────────────────────────────────
 def test_oi_threshold_in_usd_failure_passes_and_each_symbol_queried_once(env):
-    set_market(env, [tk("RICHUSDT"), tk("POORUSDT"), tk("ERRUSDT"), tk("EMPTYUSDT"), tk("EXACTUSDT")])
+    # 候选池 OI 过滤已停用；函数本体保留，单独验证其行为
+    cands = [{"symbol": s, "_px": 101.0} for s in ("RICHUSDT", "POORUSDT", "ERRUSDT", "EMPTYUSDT", "EXACTUSDT")]
     env.oi.update({"POORUSDT": 9_000, "ERRUSDT": RuntimeError("boom"), "EMPTYUSDT": None, "EXACTUSDT": 1_000_000 / 101.0})
-    pool = set(sc.refresh_pool())
-    assert pool == {"RICHUSDT", "ERRUSDT", "EMPTYUSDT", "EXACTUSDT"}      # POOR(9000张×101≈91万U)被剔除；失败/空返回放行
+    kept, _ = sc._pool_filter_by_oi(cands, 1_000_000)
+    assert {t["symbol"] for t in kept} == {"RICHUSDT", "ERRUSDT", "EMPTYUSDT", "EXACTUSDT"}
     assert sorted(env.oi_calls) == sorted(set(env.oi_calls)) and len(env.oi_calls) == 5
 
 
-def test_oi_only_queried_for_coarse_passers(env):
+def test_refresh_pool_no_longer_queries_oi(env):
     set_market(env, [tk("OKUSDT"), tk("LOWVOLUSDT", vol=1_000_000), tk("XUSDC")])
     sc.refresh_pool()
-    assert env.oi_calls == ["OKUSDT"]
+    assert env.oi_calls == []                     # 候选池刷新不再逐标的查 OI
 
 
 def test_oi_concurrency_capped_at_6(env, monkeypatch):
@@ -105,8 +106,7 @@ def test_oi_concurrency_capped_at_6(env, monkeypatch):
             active[0] -= 1
         return {"openInterest": "100000"}
     monkeypatch.setattr(sc.api, "get_open_interest", slow)
-    set_market(env, [tk(f"S{i}USDT") for i in range(30)])
-    sc.refresh_pool()
+    sc._pool_filter_by_oi([{"symbol": f"S{i}USDT", "_px": 101.0} for i in range(30)], 1_000_000)
     assert 1 < peak[0] <= 6
 
 

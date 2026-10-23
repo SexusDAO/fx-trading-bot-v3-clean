@@ -955,6 +955,9 @@ TRIGGER_OI_DIV_PRICE_DIST        = 0.035
 TRIGGER_OI_DIV_PRICE_DIST_MAX    = 0.05
 TRIGGER_OI_DIV_ATR_MULT          = 1.5     # 暂不使用
 TRIGGER_OI_DIV_ATR_MIN           = 0.005
+TRIGGER_OI_DIV_CHG24_MIN         = 5.0     # |chg24| 达到此值才做OI背离检查
+TRIGGER_OI_DIV_RSI_HIGH          = 70.0    # RSI 超买门槛
+TRIGGER_OI_DIV_RSI_LOW           = 30.0    # RSI 超卖门槛
 TRIGGER_EMA_TREND_EMA_THRESH     = 0.995   # 多头 EMA20 >= EMA50×0.995；空头 EMA20 <= EMA50×(2-0.995)
 TRIGGER_EMA_TREND_PRICE_PCT      = 0.04    # 暂不使用
 TRIGGER_EMA_TREND_ATR_MULT       = 1.2     # 暂不使用
