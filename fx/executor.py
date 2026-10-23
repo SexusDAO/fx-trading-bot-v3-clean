@@ -858,7 +858,7 @@ async def _wait_fill_ws(symbol: str, order_id: int,
 
     # 超时：撤单，处理部分成交
     try:
-        api.cancel_order(symbol, order_id)
+        await asyncio.to_thread(api.cancel_order, symbol, order_id)
         logger.info(f"[executor] {symbol} orderId={order_id} 超时撤单")
     except Exception as e:
         logger.warning(f"[executor] 撤单失败: {e}")
@@ -1558,7 +1558,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     # ── 步骤3：Coinglass 清算图 ───────────────────────────────────────────────
     # [hotfix] 清算区拉取失败不得中断开仓：降级为空清算区（calc_sl_tp 自动走 ATR 止损止盈）
     try:
-        liq_zones = _fetch_liq(symbol, mark_price=mark_price)
+        liq_zones = await asyncio.to_thread(_fetch_liq, symbol, mark_price=mark_price)
     except Exception as e:
         logger.warning(f"[executor] {symbol} _fetch_liq 失败，降级为空清算区: {e}")
         liq_zones = {"long": [], "short": []}
@@ -1627,7 +1627,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     # 用 assets[USDT].walletBalance 而非 totalWalletBalance：
     #   - walletBalance = 已实现的真实余额（平仓止盈/止损后立即更新）
     #   - totalWalletBalance 含浮盈，会在行情好时虚高，导致新仓位偏大
-    acc        = api.get_account()
+    acc        = await asyncio.to_thread(api.get_account)
     usdt_wallet = 0.0
     for _asset in acc.get("assets", []):
         if _asset.get("asset") == "USDT":
@@ -1816,7 +1816,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     leverage = _setup_symbol(symbol)
 
     # 根据实际杠杆重新验证保证金（重新拉取余额，避免用步骤5的旧快照）
-    _acc_fresh = api.get_account()
+    _acc_fresh = await asyncio.to_thread(api.get_account)
     margin_needed = notional / leverage * 1.1
     available_bal = float(_acc_fresh.get("availableBalance", 0))
     if available_bal < margin_needed:
@@ -1956,7 +1956,8 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
         close_side = "SELL" if direction == "LONG" else "BUY"
         close_price = 0.0
         try:
-            close_resp = api.place_order(
+            close_resp = await asyncio.to_thread(
+                api.place_order,
                 symbol=symbol, side=close_side,
                 order_type="MARKET",
                 quantity=fill_qty,
