@@ -68,16 +68,10 @@ UNIVERSE_MAX_CHANGE_24H = 0.60        # 24H 涨跌幅绝对值上限，60%
 UNIVERSE_BLACKLIST      = [
     "USDCUSDT", "BUSDUSDT", "TUSDUSDT", "USDTUSDT", "FDUSDUSDT",
 ]
-UNIVERSE_REFRESH_INTERVAL = 1800      # 候选池刷新间隔，秒，30 分钟  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 第三组：扫描参数
 # ═══════════════════════════════════════════════════════════════════════════════
-SCANNER_INTERVAL       = 300    # 扫描间隔，秒  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-KLINE_LIMIT_15M        = 100    # 15M K 线根数  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-KLINE_LIMIT_1H         = 100    # 1H K 线根数  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-KLINE_LIMIT_4H         = 100    # 4H K 线根数  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-SCANNER_MAX_WORKERS    = 16     # 并发分析线程数  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 资金费率结算窗口
 FUNDING_SETTLE_HOURS           = {0, 8, 16}   # UTC 结算时点（整点）
@@ -85,78 +79,42 @@ FUNDING_WINDOW_NORMAL_BEFORE   = 900    # 普通费率结算前，秒
 FUNDING_WINDOW_NORMAL_AFTER    = 300    # 普通费率结算后，秒
 FUNDING_WINDOW_EXTREME_BEFORE  = 1200   # 极端费率结算前，秒
 FUNDING_WINDOW_EXTREME_AFTER   = 600    # 极端费率结算后，秒
-FUNDING_EXTREME_THRESHOLD      = 0.005  # 资金费率极端阈值，0.5%  # [v3.85 DOC-2] 代码未引用此常量，修改无效
+FUNDING_EXTREME_THRESHOLD      = 0.005  # 资金费率极端阈值，0.5%
 
 # BTC 异常波动拦截
-BTC_SHOCK_THRESHOLD = 0.03   # BTC 15 分钟涨跌超过 3% 暂停扫描  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-BTC_SHOCK_WINDOW    = 900    # 检查窗口，秒  # [v3.85 DOC-2] 代码未引用此常量，修改无效
+BTC_SHOCK_THRESHOLD = 0.03   # BTC 15 分钟涨跌超过 3% 暂停扫描
 
 # OI 背离拦截
-OI_DIVERGENCE_PRICE_PCT = 0.98   # 价格达到 24H 高点 98% 触发检查  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-OI_DIVERGENCE_DROP_PCT  = 0.20   # OI 同期下降超过 20% 触发拦截  # [v3.85 DOC-2] 代码未引用此常量，修改无效
+OI_DIVERGENCE_PRICE_PCT = 0.98   # 价格达到 24H 高点 98% 触发检查
+OI_DIVERGENCE_DROP_PCT  = 0.20   # OI 同期下降超过 20% 触发拦截
 
 # pending confirm
 PENDING_CONFIRM_FILE    = "logs/pending_confirm_state.json"
-PENDING_CONFIRM_TIMEOUT = 3600   # 等待确认超时，秒  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 第四组：标的分层阈值
 # ═══════════════════════════════════════════════════════════════════════════════
 # ATR 比率分层
-ATR_TIER_LOW_MAX = 0.03   # < 3% 低波动层  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-ATR_TIER_MID_MAX = 0.08   # 3%~8% 中波动层（> 8% 高波动层）  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 结构回踩
-PULLBACK_UPPER_BUFFER      = 0.3   # 高于 EMA20 超过 ATR×0.3 视为未回踩  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 PULLBACK_LOWER_LIMIT_LOW   = 1.2   # 低波动层回踩区间（v3.4.3 放宽，与 judges.py 同步）
 PULLBACK_LOWER_LIMIT_MID   = 2.0   # 中波动层回踩区间（v3.4.3 放宽）
-PULLBACK_LIQ_ZONE_MIN      = 0.5   # 清算区距离下限，ATR 倍数  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-PULLBACK_LIQ_ZONE_MAX      = 2.0   # 清算区距离上限  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-PULLBACK_LIQ_ZONE_MAX_HIGH = 3.0   # 高波动层清算区距离上限  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 动量突破
-BREAKOUT_REF_BARS           = 10    # 突破基准 K 线根数  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-BREAKOUT_MIN_MARGIN         = 0.15  # 最小突破幅度，ATR 倍数（低中波动层）  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-BREAKOUT_MIN_MARGIN_HIGH    = 0.20  # 高波动层  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-BREAKOUT_VOLUME_RATIO_LOW   = 2.0   # 成交量要求，低中波动层  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-BREAKOUT_VOLUME_RATIO_HIGH  = 2.5   # 高波动层  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-BREAKOUT_OI_RISE_LOW        = 0.03  # OI 上升要求，低中（3%）  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-BREAKOUT_OI_RISE_HIGH       = 0.05  # 高波动层（5%）  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 BREAKOUT_RSI_MAX_LONG       = 75    # 做多 RSI 上限，低中  # [fix D] 65→75：避免系统性过滤强势突破
 BREAKOUT_RSI_MAX_LONG_HIGH  = 75    # 高波动层  # [fix D] 65→75：与低中档一致
 BREAKOUT_RSI_MIN_SHORT      = 35    # 做空 RSI 下限，低中  # [v3.85 FIX-1] 25→35：同步为代码中实际生效值，行为不变
 BREAKOUT_RSI_MIN_SHORT_HIGH = 35    # 高波动层  # [v3.85 FIX-1] 同步为实际生效值
-BREAKOUT_CONFIRM_VOLUME_MIN = 0.8   # 确认 K 线最低量比  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 极端反转
-REVERSAL_DROP_24H_LONG        = 0.15    # 做多：24H 跌幅门槛  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_DROP_4H_LONG         = 0.10    # 做多：4H 跌幅门槛  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_RISE_24H_SHORT       = 0.25    # 做空：24H 涨幅门槛  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_RISE_4H_SHORT        = 0.15    # 做空：4H 涨幅门槛  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_FUNDING_MIN_LONG     = 0.0010  # 做多资金费率门槛：允许小正费率（中性到轻度多头），超过门槛说明多头拥挤拖想拤  # [v3.85 DOC-2] 代码未引用此常量，修改无效
                                     # 不加任何限制（弹性评分），负费率则触发强信号
-REVERSAL_FUNDING_STRONG_LONG  = -0.003  # 做多强信号费率  # [v3.85 DOC-2] 代码未引用此常量，修改无效
                                     # 负费率 < -0.3% 为强信号，中性费率为普通信号
-REVERSAL_FUNDING_MIN_SHORT    = 0.0025  # 做空资金费率门槛  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_FUNDING_STRONG_SHORT = 0.004   # 做空强信号费率  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 # 以下 REVERSAL_RSI4H_* 为历史遗留占位值，judge_reversal 实际用 chg24<=-8%+rsi4h<55 逻辑
 # 代码实际值与此不同，调参请直接修改 _judge_reversal_impl 内的门槛
-REVERSAL_RSI4H_MAX_LONG       = 55      # 实际用值（原25已废弃，代码用55）  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_RSI4H_STRONG_LONG    = 20  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_RSI4H_MIN_SHORT      = 55      # 实际用值（原78已废弃，代码用55）  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_RSI4H_STRONG_SHORT   = 85  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_CRASH_ACCEL_BARS     = 3       # 连续崩盘检测：连续阴线根数  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_CRASH_DROP_PER_BAR   = 0.03    # 每根跌幅门槛  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_CRASH_OI_DROP        = 0.30    # OI 下降门槛  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_LIQ_NORMAL_MIN       = 1_000_000   # 普通入场清算区最低量  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_LIQ_PENDING_MIN      = 3_000_000   # 挂单守候清算区最低量  # [v3.85 DOC-2] 代码未引用此常量，修改无效
+REVERSAL_RSI4H_MAX_LONG       = 55      # 实际用值（原25已废弃，代码用55）
+REVERSAL_RSI4H_MIN_SHORT      = 55      # 实际用值（原78已废弃，代码用55）
 
 # 高波动层专属
-HIGH_VOL_EXTREME_CANDLE        = 0.20   # 单根 K 线涨跌超过 20% 触发极端标记  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HIGH_VOL_REVERSAL_RSI4H_LONG   = 20  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HIGH_VOL_REVERSAL_RSI4H_SHORT  = 82  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HIGH_VOL_REVERSAL_FUNDING_LONG  = -0.002  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HIGH_VOL_REVERSAL_FUNDING_SHORT =  0.0035  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 候选池分类（向后兼容旧 scanner 代码）
 CLASSIFY_REVERSAL_CHG24_MIN    = 15.0
@@ -258,7 +216,6 @@ RISK_PER_TRADE     = 0.01    # 每笔最大风险比例（止损定仓核心参�
 # [fix B] 恢复日内亏损熔断：改为按账户权益比例触发（默认 8%）。
 CIRCUIT_BREAKER_DAILY_LOSS_PCT = 0.08   # 当日净亏损超过权益的 8% 触发熔断
 CIRCUIT_BREAKER_DAILY_LOSS = 100.0      # 兜底绝对值：取不到账户权益时使用（≈1250U 权益 × 8%）
-CIRCUIT_BREAKER_RESET_HOUR = 0     # UTC 重置时间  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 止损距离上限（动态，按波动层级）
 # low tier(ATR<3%): 12%  mid tier(ATR 3-8%): 15%  high tier(ATR>8%): 20%
@@ -277,7 +234,7 @@ SL_MULT_HIGH = 2.0
 # 盈亏比要求（复盘优化：益亏比 0.61→2.0+）
 RR_MIN_TP1      = 2.0   # TP1 盈亏比要求（low/mid tier）
 RR_MIN_TP1_HIGH = 1.5   # TP1 盈亏比要求（high tier，SL 较宽故放宽 RR）
-RR_MIN_TP2      = 3.0   # TP2 盈亏比要求（原2.5）  # [v3.85 DOC-2] 代码未引用此常量，修改无效
+RR_MIN_TP2      = 3.0   # TP2 盈亏比要求（原2.5）
 
 # TP 比例
 TP1_CLOSE_RATIO = 0.60   # TP1 平仓 60%
@@ -314,7 +271,6 @@ MARGIN_SAFETY_SCALE_TIGHT = 0.5   # 偏紧时仓位缩减系数
 
 # 执行参数（向后兼容）
 DEFAULT_LEVERAGE = 10
-MARGIN_TYPE      = "CROSSED"  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 挂单超时
 ORDER_EXPIRE_BREAKOUT_MIN = 30    # 动量突破挂单超时，分钟
@@ -336,8 +292,6 @@ KLINE_REQUEST_TOTAL_SEC = 8.0     # 单次 get_klines 调用总时限（秒，�
 API_REQUEST_TIMEOUT     = (3, 5)    # 全局 REST 接口超时 (connect_s, read_s)：公开行情 _get 与签名查询/撤单/杠杆等
 API_REQUEST_MAX_RETRY   = 1         # 全局 REST 接口最多重试次数（_retry 总尝试 = 1 + 此值）
 ORDER_REQUEST_TIMEOUT   = (5, 10)   # 下单类接口（order / batchOrders / algoOrder）超时，比查询宽松
-ORDER_TIMEOUT_BREAKOUT    = 1800  # 秒  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-ORDER_TIMEOUT_NORMAL      = 14400 # 秒  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 第六组：持仓管理参数
@@ -377,17 +331,6 @@ HEALTH_FORCE_CLOSE_SCORE    = 50   # 双条件门槛：评分<50 且 浮亏>阈�
 HEALTH_FORCE_CLOSE_LOSS_PCT = -5.0 # 双条件之二：浮亏超过-5%才触发强制平仓（评分<50仅告警时用）
 HEALTH_ALERT_SCORE          = 65   # 低于此分发告警（不平仓）
 HEALTH_MIN_HOLDING_MINUTES  = 60
-HEALTH_EMA_WEIGHT           = 40  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HEALTH_RSI_WEIGHT           = 30  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HEALTH_FUNDING_WEIGHT       = 30  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HEALTH_FUNDING_WARN_LONG    =  0.001  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HEALTH_FUNDING_DANGER_LONG  =  0.002  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HEALTH_FUNDING_WARN_SHORT   = -0.001  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HEALTH_FUNDING_DANGER_SHORT = -0.002  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HEALTH_RSI_WARN_LONG        = 70  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HEALTH_RSI_DANGER_LONG      = 80  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HEALTH_RSI_WARN_SHORT       = 30  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-HEALTH_RSI_DANGER_SHORT     = 20  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 动态 TP/SL 调整
 TP_SL_ADJUST_INTERVAL_MIN   = 30    # 每隔多少分钟重算一次 TP/SL（静默，写日志）
@@ -400,7 +343,7 @@ TP_SL_ADJUST_LOG            = _FX_ROOT / "logs" / "tp_sl_adjust_log.jsonl"
 TIME_STOP_HOURS            = 8    # breakout/pullback 时间止损
 TIME_STOP_REVERSAL_HOURS   = 12   # reversal 类型允许更长持仓时间
 TIME_STOP_HARD_HOURS       = 16   # 硬上限（所有类型）
-TIME_STOP_PROFIT_THRESHOLD = 2.5   # 浮盈超过 ATR×2.5 不触发时间止损  # [v3.85 DOC-2] 代码未引用此常量，修改无效
+TIME_STOP_PROFIT_THRESHOLD = 2.5   # 浮盈超过 ATR×2.5 不触发时间止损
 
 # 挂单有效期（向后兼容别名）
 PM_MAX_HOLD_HOURS        = TIME_STOP_HOURS
@@ -434,10 +377,6 @@ MAX_PENDING_SHORT = 3   # 空单挂单上限
 MAX_PENDING_TOTAL = 5   # 总挂单上限
 
 # 评分维度
-PENDING_SCORE_STRENGTH_MAX = 40   # 信号强度维度满分  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-PENDING_SCORE_TYPE_MAX     = 20   # 策略类型维度满分  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-PENDING_SCORE_TIME_MAX     = 20   # 时效性维度满分（随时间衰减）  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-PENDING_SCORE_LIQ_MAX      = 20   # 清算图质量维度满分  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 策略类型分值映射
 PENDING_SCORE_TYPE_MAP = {
@@ -463,28 +402,17 @@ PM_COOLDOWN_CRASH_HOURS     = 4
 PM_COOLDOWN_OPEN_DIR_HOURS  = 4  # v3.44: 同标的同方向成功开仓后冷却时长（与止损冷却独立）
 
 # 止损冷却
-STOP_LOSS_COOLDOWN    = 21600   # 秒，6 小时  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_COOLDOWN_STOP  = 21600  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-REVERSAL_COOLDOWN_CRASH = 14400  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 防抖
-TRAILING_DEBOUNCE  = 1.0  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 PRICE_DEBOUNCE_SEC = 1.0
-PATROL_INTERVAL    = 300  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-PATROL_OFFSET      = 30  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 第七组：文件路径
 # ═══════════════════════════════════════════════════════════════════════════════
 POS_STATE_FILE        = _FX_ROOT / "logs" / "pos_state.json"
-CIRCUIT_BREAKER_FILE  = _FX_ROOT / "logs" / "circuit_breaker.json"  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-COOLDOWN_STATE_FILE   = _FX_ROOT / "logs" / "cooldown_state.json"  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 PENDING_CONFIRM_FILE  = _FX_ROOT / "logs" / "pending_confirm_state.json"
-OI_CACHE_FILE         = _FX_ROOT / "logs" / "oi_cache.json"  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-LEVERAGE_CACHE_FILE   = _FX_ROOT / "logs" / "leverage_cache.json"  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 TRADE_LOG_FILE        = _FX_ROOT / "logs" / "trade_log.jsonl"
 SCANNER_LOG_FILE      = _FX_ROOT / "logs" / "scanner.log"
-SYSTEM_LOG_FILE       = _FX_ROOT / "logs" / "system.log"  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 日报时间（UTC 小时）
 DAILY_REPORT_UTC_HOUR = TELEGRAM_DAILY_REPORT_HOUR  # 2
@@ -558,7 +486,6 @@ FUNDING_ARB_SIZE_STRONG          = 0.5   # strong 信号仓位系数
 FUNDING_ARB_SIZE_MEDIUM          = 0.3   # medium 信号仓位系数
 FUNDING_ARB_COOLDOWN_AFTER_SL    = 4     # 止损后冷却小时数
 FUNDING_ARB_CONSEC_SL_LIMIT      = 2     # 连续止损次数触发熔断（暂停24H）
-FUNDING_ARB_SCAN_INTERVAL_MIN    = 30    # 独立扫描间隔（分钟）  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 FUNDING_ARB_CANDIDATE_TOP_N      = 10    # 候选池大小
 
 # 做空（正费率极端）门槛
@@ -576,8 +503,6 @@ FUNDING_ARB_RATE_DECAY_THRESH    = 0.80   # 费率衰减超过80%触发退出
 FUNDING_ARB_ENTRY_WINDOW_MIN_H   = 0.083  # 距结算最少时间（5分钟），改用限价单后可以临近结算才挂
 # FUNDING_ARB_ENTRY_WINDOW_MAX_H 已废弃，动态上限 = 结算周期×90%（judge_funding_arb 内部计算）
 FUNDING_ARB_ENTRY_WINDOW_MAX_H   = 99     # 占位，实际不用此值  # [v3.87 DOC] 占位值，不接入任何业务逻辑，修改无效（刻意保留，勿当作可调参数）
-FUNDING_ARB_CANCEL_BEFORE_MIN    = 5      # 结算前多少分钟撤销未成交的限价单  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-FUNDING_ARB_COOLDOWN_SETTLE_MIN  = 30     # 结算后冷却多少分钟不重新挂单  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 FUNDING_ARB_RSI4H_SHORT_MIN      = 50     # 做空 RSI4H 下限
 FUNDING_ARB_RSI4H_SHORT_MAX      = 80     # 做空 RSI4H 上限
 FUNDING_ARB_RSI4H_LONG_MIN       = 20     # 做多 RSI4H 下限
@@ -631,7 +556,6 @@ PULLBACK_SHORT_VOL_RATIO_MIN = 0.8  # SHORT pullback 量比最低门槛（量比
 # ═══════════════════════════════════════════════════════════════════════════════
 # 第十一组：挂单健康检查（pending health）
 # ═══════════════════════════════════════════════════════════════════════════════
-PENDING_HEALTH_CHECK_INTERVAL_MIN  = 30    # 多少分钟检查一次  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 PENDING_HEALTH_MIN_HOLD_MIN        = 10    # 挂单多久后才开始检查
 PENDING_HEALTH_ENTRY_ADJUST_ATR    = 0.2   # 入场价变化超过几个ATR才重挂
 PENDING_HEALTH_MAX_ADJUST_COUNT    = 3     # 最多调整几次（超出直接撤单）
@@ -642,7 +566,6 @@ PENDING_HEALTH_LOG  = _FX_ROOT / "logs" / "pending_adjust_log.jsonl"
 # ═══════════════════════════════════════════════════════════════════════════════
 AI_ADVISOR_ENABLED          = True
 AI_ADVISOR_LOOKBACK_DAYS    = 7        # 读取最近 N 天的 archive 数据
-AI_ADVISOR_MIN_TRADES       = 10       # 每个策略最少需要多少笔才给建议  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 AI_ADVISOR_LOG              = _FX_ROOT / "logs" / "advisor_log.jsonl"
 
 # Telegram 推送配置（复用主配置里的 bot/chat）
@@ -679,7 +602,6 @@ LLM_BORDERLINE_SCORE_MAX   = 55     # 边界信号分数上界（>55 规则系�
 
 # NovaAPI 配置（OpenAI 兼容中转站，路径A优先使用）
 # key 通过环境变量注入，不硬编码；env 优先，config 兜底
-LLM_API_BASE_URL           = "https://novaapi.ai"   # OpenAI 兼容端点  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # 模型选择说明（v3.41.3，基于 NovaAPI 实测 2026-10-18）：
 #   测试了 GPT-4o / GPT-4o-mini / GPT-4.1 / GPT-4.1-mini /
@@ -712,16 +634,13 @@ BTC_BEAR_SHORT_MIN_FUNDING = -0.0015   # 熊市顺势空单最低费率门槛（
 # 完全数据驱动，无需维护标的列表，ATR ratio 实时决定当前所在档位
 ATR_TIER_HIGH_MIN            = 2.5    # 高波动档下限（meme / 山寨大涨期）
 ATR_TIER_MID_MIN             = 1.0    # 中波动档下限（主流 / 新兴币）
-ATR_TIER_LOW_CUTOFF          = 1.0    # 低于此值直接拒绝  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 ATR_TIER_MID_SCORE_ADJ       = -5     # 中波动档评分惩罚（不确定性更高）
 
 # reversal chg24 触发门槛（各档）
-ATR_TIER_HIGH_REVERSAL_CHG24 = 15.0   # 高波动档：现有逻辑不变  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 ATR_TIER_MID_REVERSAL_CHG24  =  5.0   # 中波动档：SOL 跌 5% 就是大跌
 
 # pullback SHORT 最低涨幅要求（各档）
-ATR_TIER_HIGH_PULLBACK_CHG24 =  5.0   # 高波动档：现有逻辑不变  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 ATR_TIER_MID_PULLBACK_CHG24  =  2.0   # 中波动档：主流币涨 2% 就有意义
 
 # 周末各档 ATR 门槛
@@ -757,18 +676,14 @@ STOP_HUNT_RECOVER_STRONG     = 2       # strong 要求收回根数 ≤ N
 STOP_HUNT_SL_BUFFER          = 0.003   # SL = 刺穿极端点 ± 0.3% 缓冲
 
 # 入场参数（挂限价单）
-STOP_HUNT_ENTRY_BUFFER_PCT   = 0.005   # 入场价触发区间 ±0.5%  # [v3.85 DOC-2] 代码未引用此常量，修改无效
-STOP_HUNT_EXPIRE_MIN         = 30      # 工作日信号有效期（分钟）  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 STOP_HUNT_EXPIRE_MIN_WKND    = 20      # 周末信号有效期（分钟，假突破多）
 
 # 评分参数
 STOP_HUNT_BASE_STRONG        = 70      # strong 信号 base score（与 reversal 对齐）
 STOP_HUNT_BASE_MEDIUM        = 60      # medium 信号 base score
-STOP_HUNT_MIN_SCORE_WEEKDAY  = 50      # 工作日最低评分门槛  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 STOP_HUNT_MIN_SCORE_WEEKEND  = 65      # 周末最低评分门槛  # [v3.87 DOC] 仅回测脚本 backtest_btw.py 使用；实盘代码不读此常量（撤销此前 DOC-2 误标）
 
 # 信号优先级（加入 SIGNAL_PRIORITY 时用）
-STOP_HUNT_PRIORITY           = 0       # 与 reversal 同优先级（都是逆势）  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # chg24 上限：超过此值应走 reversal，不走 stop_hunt
 STOP_HUNT_CHG24_MAX          = 15.0
@@ -826,7 +741,6 @@ OI_DIV_BASE_STRONG           = 68     # strong 信号 base score（OI 背离 + R
 OI_DIV_BASE_MEDIUM           = 58     # medium 信号 base score（OI 背离 + taker 回暖，RSI 未极端）v3.65: 55→58，配合cg_bonus clip收窄后确保中等质量信号能过50分门槛
 
 # ── OI 历史比较窗口 ───────────────────────────────────────────────────────────
-OI_DIV_OI_HIST_HOURS         = 4      # OI 对比基准：取过去 N 小时的均值（而非单点）  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 
 # ── 清算图方向性验证（v3.65）────────────────────────────────────────────────
 # 逻辑：信号方向的清算量必须占优，否则说明市场更可能朝反方向扫（如 SKUU 案例）
@@ -873,7 +787,6 @@ EMA_TREND_MAX_HOLD_HOURS     = 16     # ema_trend 时间止损软上限（小时
 # ── Signal Analytics（信号分析系统）─────────────────────────────────────────
 SIGNAL_ANALYTICS_FILE         = "logs/signal_analytics.jsonl"   # 相对 fx/ 目录
 SIGNAL_ANALYTICS_TRACK_AFTER_H = 4    # 信号产生后 4H 才做事后追踪
-SIGNAL_ANALYTICS_MAX_DAYS     = 30    # 保留最近 30 天数据  # [v3.85 DOC-2] 代码未引用此常量，修改无效
 SIGNAL_ANALYTICS_MAX_SIZE_MB  = 10    # 超过 10MB 触发轮转
 SIGNAL_ANALYTICS_MIN_SAMPLE   = 30    # Kelly 调整需要的最小样本数
 
@@ -1056,3 +969,27 @@ TRIGGER_DISPATCH_ENABLED = False  # 需同时 TRIGGER_DETECTOR_ENABLED=True；Tr
 SCAN_INTERVAL_PASSIVE    = 1800   # 两个开关都为 True 时的兜底扫描间隔（秒）；否则保持 300s / 周末 900s
 TRIGGER_DISPATCH_TIMEOUT = 30     # 单个分析任务超时（预取 + analyze_one + 第四步）
 TRIGGER_DISPATCH_WORKERS = 2      # 分析协程数
+
+# [fix #48] 已删除的失效常量（代码从未引用，保留名单便于追溯）：
+#   UNIVERSE_REFRESH_INTERVAL, SCANNER_INTERVAL, KLINE_LIMIT_15M, KLINE_LIMIT_1H
+#   KLINE_LIMIT_4H, SCANNER_MAX_WORKERS, BTC_SHOCK_WINDOW, PENDING_CONFIRM_TIMEOUT
+#   ATR_TIER_LOW_MAX, ATR_TIER_MID_MAX, PULLBACK_UPPER_BUFFER, PULLBACK_LIQ_ZONE_MIN
+#   PULLBACK_LIQ_ZONE_MAX, PULLBACK_LIQ_ZONE_MAX_HIGH, BREAKOUT_REF_BARS, BREAKOUT_MIN_MARGIN
+#   BREAKOUT_MIN_MARGIN_HIGH, BREAKOUT_VOLUME_RATIO_LOW, BREAKOUT_VOLUME_RATIO_HIGH, BREAKOUT_OI_RISE_LOW
+#   BREAKOUT_OI_RISE_HIGH, BREAKOUT_CONFIRM_VOLUME_MIN, REVERSAL_DROP_24H_LONG, REVERSAL_DROP_4H_LONG
+#   REVERSAL_RISE_24H_SHORT, REVERSAL_RISE_4H_SHORT, REVERSAL_FUNDING_MIN_LONG, REVERSAL_FUNDING_STRONG_LONG
+#   REVERSAL_FUNDING_MIN_SHORT, REVERSAL_FUNDING_STRONG_SHORT, REVERSAL_RSI4H_STRONG_LONG, REVERSAL_RSI4H_STRONG_SHORT
+#   REVERSAL_CRASH_ACCEL_BARS, REVERSAL_CRASH_DROP_PER_BAR, REVERSAL_CRASH_OI_DROP, REVERSAL_LIQ_NORMAL_MIN
+#   REVERSAL_LIQ_PENDING_MIN, HIGH_VOL_EXTREME_CANDLE, HIGH_VOL_REVERSAL_RSI4H_LONG, HIGH_VOL_REVERSAL_RSI4H_SHORT
+#   HIGH_VOL_REVERSAL_FUNDING_LONG, HIGH_VOL_REVERSAL_FUNDING_SHORT, CIRCUIT_BREAKER_RESET_HOUR, MARGIN_TYPE
+#   ORDER_TIMEOUT_BREAKOUT, ORDER_TIMEOUT_NORMAL, HEALTH_EMA_WEIGHT, HEALTH_RSI_WEIGHT
+#   HEALTH_FUNDING_WEIGHT, HEALTH_FUNDING_WARN_LONG, HEALTH_FUNDING_DANGER_LONG, HEALTH_FUNDING_WARN_SHORT
+#   HEALTH_FUNDING_DANGER_SHORT, HEALTH_RSI_WARN_LONG, HEALTH_RSI_DANGER_LONG, HEALTH_RSI_WARN_SHORT
+#   HEALTH_RSI_DANGER_SHORT, PENDING_SCORE_STRENGTH_MAX, PENDING_SCORE_TYPE_MAX, PENDING_SCORE_TIME_MAX
+#   PENDING_SCORE_LIQ_MAX, STOP_LOSS_COOLDOWN, REVERSAL_COOLDOWN_STOP, REVERSAL_COOLDOWN_CRASH
+#   TRAILING_DEBOUNCE, PATROL_INTERVAL, PATROL_OFFSET, CIRCUIT_BREAKER_FILE
+#   COOLDOWN_STATE_FILE, OI_CACHE_FILE, LEVERAGE_CACHE_FILE, SYSTEM_LOG_FILE
+#   FUNDING_ARB_SCAN_INTERVAL_MIN, FUNDING_ARB_CANCEL_BEFORE_MIN, FUNDING_ARB_COOLDOWN_SETTLE_MIN, PENDING_HEALTH_CHECK_INTERVAL_MIN
+#   AI_ADVISOR_MIN_TRADES, LLM_API_BASE_URL, ATR_TIER_LOW_CUTOFF, ATR_TIER_HIGH_REVERSAL_CHG24
+#   ATR_TIER_HIGH_PULLBACK_CHG24, STOP_HUNT_ENTRY_BUFFER_PCT, STOP_HUNT_EXPIRE_MIN, STOP_HUNT_MIN_SCORE_WEEKDAY
+#   STOP_HUNT_PRIORITY, OI_DIV_OI_HIST_HOURS, SIGNAL_ANALYTICS_MAX_DAYS

@@ -438,8 +438,12 @@ async def _loop_reset_circuit() -> None:
         )
         await asyncio.sleep(seconds_until_midnight)
         try:
-            from shared.risk_manager import reset_circuit
+            from shared.risk_manager import reset_circuit, backup_daily_logs
             reset_circuit()
+            try:
+                backup_daily_logs()   # [fix #48] 备份与熔断重置分离
+            except Exception as _be:
+                logger.warning(f"[main] 日志备份失败: {_be}")
             logger.info("[main] 熔断器日重置完成")
         except Exception as e:
             logger.error(f"[main] task_reset_circuit 异常: {e}", exc_info=True)

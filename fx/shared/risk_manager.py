@@ -340,18 +340,30 @@ def check_account_margin(nominal_value: float, leverage: int) -> bool:
 # reset_circuit
 # ═══════════════════════════════════════════════════════════════════════════════
 def reset_circuit() -> None:
-    """UTC 00:00 定时任务调用。重置熔断 + 备份日志。"""
+    """UTC 00:00 定时任务调用。[fix #48] 只负责重置熔断；日志备份拆到 backup_daily_logs()。"""
     from shared.state import reset_circuit as _state_reset, get_daily_loss
     from shared.notifier import notify
-    import shutil
-    from pathlib import Path
-    from config import TRADE_LOG_FILE, POS_STATE_FILE
 
     yesterday_loss = get_daily_loss()
     _state_reset()
     logger.info(f"[risk] 熔断器重置，昨日亏损={yesterday_loss:.1f}U")
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        notify(
+            f"📅 日重置完成 {date_str}\n"
+            f"昨日累计亏损：{yesterday_loss:.1f}U\n"
+            f"今日熔断器：正常"
+        )
+    except Exception:
+        pass
 
-    # 备份
+
+def backup_daily_logs() -> None:
+    """[fix #48] 每日日志备份（原 reset_circuit 内的第二职责）。"""
+    import shutil
+    from pathlib import Path
+    from config import TRADE_LOG_FILE, POS_STATE_FILE
+
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     archive  = Path(__file__).parent.parent / "logs" / "archive"  # fx/logs/archive
     archive.mkdir(parents=True, exist_ok=True)
@@ -366,15 +378,6 @@ def reset_circuit() -> None:
                 _clean_old_backups(archive, src.stem, 30)
             except Exception as e:
                 logger.warning(f"[risk] 备份 {src_path} 失败: {e}")
-
-    try:
-        notify(
-            f"📅 日重置完成 {date_str}\n"
-            f"昨日累计亏损：{yesterday_loss:.1f}U\n"
-            f"今日熔断器：正常"
-        )
-    except Exception:
-        pass
 
 
 def _clean_old_backups(archive: "Path", stem: str, keep_days: int) -> None:
