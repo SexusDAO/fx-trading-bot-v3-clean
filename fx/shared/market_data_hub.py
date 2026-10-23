@@ -70,7 +70,7 @@ TICKER_MIN_COVERAGE = 0.9                      # 新鲜条目数 / 已见过的�
 
 class _Series:
     """一个 (标的, 周期) 的 K 线序列。rows=None 表示尚未就绪（历史未拉到/断线/出现缺口）。"""
-    __slots__ = ("rows", "pending", "loading", "retry_at", "shard", "stale")
+    __slots__ = ("rows", "pending", "loading", "retry_at", "shard")
 
     def __init__(self, shard: int = 0):
         self.shard = shard      # 该序列所在的组合流连接编号
@@ -78,7 +78,6 @@ class _Series:
         self.pending = []      # 历史拉取期间收到的 WS 行，拉完后合并
         self.loading = False
         self.retry_at = 0.0
-        self.stale = False     # 断线时标记为过时，不清空 rows
 
 
 class _Shard:
@@ -469,8 +468,7 @@ class MarketDataHub:
             sh.gen += 1
             for st in self._series.values():
                 if st.shard == idx:
-                    st.stale = True          # 断线时只标记过时，不清空 rows
-                    # st.rows 保留，让 scanner 仍能读到上一次的 kline
+                    st.rows, st.pending, st.loading, st.retry_at = None, [], False, 0.0
         sh.ws = None
         sh.subscribed = set()
 
@@ -712,9 +710,8 @@ class MarketDataHub:
         _empty = False
         with self._kl_lock:
             st = self._series.get(key)
-            if st is None:
-                return                               # 标的已被移除，丢弃
-            # gen 不匹配说明期间断线过，但数据仍然有效，继续写入
+            if st is None or gen != self._shards[min(st.shard, self._nshards - 1)].gen:
+                return                               # 标的已被移除，或期间发生过断线：结果作废
             st.loading = False
             if not isinstance(rows, list) or not rows:
                 st.retry_at = self._wall() + KLINE_RETRY_SEC
@@ -725,7 +722,6 @@ class MarketDataHub:
                 for pr in st.pending:                # 合并拉取期间收到的推送
                     _upsert(new, pr, iv_ms)
                 st.rows, st.pending = new, []
-                st.stale = False                     # 加载成功，清除 stale 标记
         _loop = asyncio.get_running_loop()
         if _empty:
             _loop.run_in_executor(None, logger.warning, f"[hub] 历史K线拉取返回空 {sym} {iv}，30s后重试")
