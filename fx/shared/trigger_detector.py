@@ -311,7 +311,7 @@ class TriggerDetector:
 
     # ── 主循环 ───────────────────────────────────────────────────────────
     async def run(self):
-        self.load_state()
+        await asyncio.to_thread(self.load_state)   # 读状态文件移出事件循环
         post = asyncio.create_task(self._post_loop(), name="trigger_post_price")
         self.start_dispatch_workers()
         last_save = self._clock()
@@ -393,7 +393,8 @@ class TriggerDetector:
         if arb_due:
             self._last_arb = now
         out += self._drain(now)
-        self.reconcile(now)
+        _scan_rows = await asyncio.to_thread(self._read_new_scan)   # 读 scan_signals.jsonl 移出事件循环
+        self.reconcile(now, _scan_rows)
         return out
 
     # ── K 线 / 就绪 / 指标缓存 ───────────────────────────────────────────
@@ -954,10 +955,10 @@ class TriggerDetector:
             pass
         return rows
 
-    def reconcile(self, now):
+    def reconcile(self, now, rows=None):
         win = lambda s: max(cooldown(s) if s in _COOL else 300, 300)
         batches = {}
-        for r in self._read_new_scan():
+        for r in (self._read_new_scan() if rows is None else rows):
             batches.setdefault(r.get("ts", 0), [])
             if "symbol" in r:
                 batches[r.get("ts", 0)].append(r)
