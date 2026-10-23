@@ -1203,7 +1203,20 @@ def calc_sl_tp(
     # SHORT：vah（价值区上沿）在入场价上方时，SL 取 vah + 0.3ATR（但不超过 ATR 止损）
     if sl_degraded and _vp_valid and mode not in ("stop_hunt", "funding_arb"):
         _max_sl_pct = {"low": 0.12, "mid": 0.15, "high": 0.20}.get(tier, 0.15)
-        if direction == "LONG" and 0 < _vp_val < entry:
+        _vp_sym = signal.get("symbol", "")
+        if direction == "LONG" and 0 < _vp_val < entry and _vp_val < entry * 0.5:
+            logger.warning(
+                f"[calc_sl_tp] {_vp_sym} VP val={_vp_val:.4g} "
+                f"< entry*0.5={entry*0.5:.4g}，"
+                f"疑似含暴涨前旧区间，跳过VP止损增强"
+            )
+        elif direction == "SHORT" and _vp_vah > entry > 0 and _vp_vah > entry * 1.5:
+            logger.warning(
+                f"[calc_sl_tp] {_vp_sym} VP vah={_vp_vah:.4g} "
+                f"> entry*1.5={entry*1.5:.4g}，"
+                f"疑似含暴跌前旧区间，跳过VP止损增强"
+            )
+        elif direction == "LONG" and 0 < _vp_val < entry:
             _vp_sl = _vp_val - atr * 0.3
             _vp_sl_pct = abs(entry - _vp_sl) / (entry + 1e-9)
             if _vp_sl_pct <= _max_sl_pct and _vp_sl > entry * 0.5:
@@ -1379,7 +1392,19 @@ def calc_sl_tp(
         # [v3.87 STEP4-3] 原门槛写死 1.2，低于全局 TP1 最小 RR（RR_MIN_TP1=2.0，高波动层 RR_MIN_TP1_HIGH=1.5），
         #   VP 路径会放过本该被拒绝的低 RR 单。改为与全局一致。
         _vp_rr_min = _CFG_RR_MIN_TP1_HIGH if tier == "high" else _TP1_MIN_RR
-        if direction == "LONG" and _vp_vah > entry:
+        if direction == "LONG" and _vp_vah > entry and _vp_vah > entry * 1.5:
+            logger.warning(
+                f"[calc_sl_tp] {symbol_hint} VP vah={_vp_vah:.4g} "
+                f"> entry*1.5={entry*1.5:.4g}，"
+                f"疑似含暴跌前旧区间，跳过VP TP1增强"
+            )
+        elif direction == "SHORT" and 0 < _vp_val < entry and _vp_val < entry * 0.5:
+            logger.warning(
+                f"[calc_sl_tp] {symbol_hint} VP val={_vp_val:.4g} "
+                f"< entry*0.5={entry*0.5:.4g}，"
+                f"疑似含暴涨前旧区间，跳过VP TP1增强"
+            )
+        elif direction == "LONG" and _vp_vah > entry:
             _vp_rr = (_vp_vah - entry) / (_sl_dist + 1e-9)
             if _vp_rr >= _vp_rr_min:
                 logger.info(
