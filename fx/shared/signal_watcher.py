@@ -1241,13 +1241,13 @@ class SignalWatcher:
                 async with _tl:
                     await entry.on_trigger(entry.signal)
         except _PreOrderError as _pe:
-            # [v3.89 #102] 下单前失败：交易所确认没有订单，复位触发标记保留条目，等下一次价格触发重试
-            _keep_entry = True
-            async with self._lock:
-                if self._watched.get(symbol) is entry:
-                    entry.triggered = False
-                    entry.trigger_state = "none"
-            logger.warning(f"[signal_watcher] {symbol} 下单前失败，已保留信号等待下次触发重试: {_pe}")
+            # [fix #47] 下单前失败（设杠杆/拉行情/前置校验失败）：交易所确认没有订单。
+            #   不重试，直接移除条目（_keep_entry 保持 False，finally 中按身份 pop）。
+            #   原因：原逻辑复位触发标记等下次价格触发重试，但同方向 5 分钟冷却仍生效，
+            #   重试与冷却互相冲突，且前置失败多为持续性原因，重试大概率重复失败。
+            #   5 分钟方向冷却保留不变，由下一轮扫描重新产生信号。
+            _keep_entry = False
+            logger.warning(f"[signal_watcher] {symbol} 下单前失败，不重试，移除信号条目（方向冷却保留）: {_pe}")
         except Exception as e_:
             # [v3.89 #102] 其他异常可能发生在已下单之后（结果未知）：标记待对账，不自动清理
             _keep_entry = True

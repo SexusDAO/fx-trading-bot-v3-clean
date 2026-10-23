@@ -1322,7 +1322,15 @@ def analyze_one(symbol: str, ticker: dict,
             _q = _calc_route_quality(
                 _route, _reason if isinstance(_reason, dict) else {}, ind, _dir
             )
-            _passed_signals.append({"route": _route, "reason": _reason, "dir": _dir, "quality": _q})
+            # [fix #49] route_quality 仅保留用于日志 schema，不再参与决策；
+            #   择优改用 final_score 的同源基础分（signal_strength → SCORE_BASE_*），
+            #   完整 final_score 在后续评分层统一计算。
+            _rd49 = _reason if isinstance(_reason, dict) else {}
+            from config import SCORE_BASE_STRONG, SCORE_BASE_MEDIUM, SCORE_BASE_WEAK
+            _fs_base = {"strong": SCORE_BASE_STRONG, "medium": SCORE_BASE_MEDIUM,
+                        "weak": SCORE_BASE_WEAK}.get(_rd49.get("signal_strength", "medium"), SCORE_BASE_MEDIUM)
+            _passed_signals.append({"route": _route, "reason": _reason, "dir": _dir, "quality": _q,
+                                    "score": _fs_base})
 
             # 提前终止优化：已有 2 条 strong，或高质量特殊场景（>=75）直接定案
             _strong_count = sum(
@@ -1331,23 +1339,22 @@ def analyze_one(symbol: str, ticker: dict,
             )
             if _strong_count >= 2:
                 break
-            if _route in ("stop_hunt", "oi_divergence") and _q >= 75:
-                break
+            # [fix #49] 原 route_quality>=75 提前定案已删除（不再以质量分做决策）
 
         # 所有路径均失败
         if not _passed_signals:
             return None
 
         # 择出质量最高的路径
-        _best = max(_passed_signals, key=lambda x: x["quality"])
+        _best = max(_passed_signals, key=lambda x: x["score"])   # [fix #49] 统一按 final_score 口径择优（同分保持路径顺序）
         ok, reason, sig_type, direction = True, _best["reason"], _best["route"], _best["dir"]
 
         # 多路通过时记录择优决策日志
         if len(_passed_signals) > 1:
-            _competing = [(s["route"], s["quality"]) for s in _passed_signals if s is not _best]
+            _competing = [(s["route"], s["score"]) for s in _passed_signals if s is not _best]
             logger.info(
                 f"[scanner] {symbol} 多路候选 {len(_passed_signals)} 条，"
-                f"择优选择 {sig_type}(质量={_best['quality']}) "
+                f"择优选择 {sig_type}(分={_best['score']}) "
                 f"vs {_competing}"
             )
 
