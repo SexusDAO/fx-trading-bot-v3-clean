@@ -2687,7 +2687,7 @@ def _filter_and_register_signals(
         new_score, _bonus_info = _apply_score_bonuses(sig["symbol"], direction, _sig_type, new_score)
         if new_score != base_score:
             logger.info(f"[scanner] {sig['symbol']} score {base_score}→{new_score} "
-                        f"(btc={btc_adj:+d} cg={cg_bonus:+d} strat={strategy_adj:+d} shock={post_shock_adj:+d} tier={atr_tier_adj:+d} pulse={_pulse_penalty:+d} taker={taker_adj:+d})")
+                        f"(btc={btc_adj:+d} cg={cg_bonus:+d} strat={strategy_adj:+d} shock={post_shock_adj:+d} tier={atr_tier_adj:+d} pulse={_pulse_penalty:+d} hub_bonus={_bonus_info.get('hub_bonus', 0):+d})")
         ind["final_score"]    = new_score
         ind["btc_trend"]      = _btc_trend
         ind["btc_adj"]        = btc_adj
@@ -3768,7 +3768,7 @@ def _calc_volprice_bonus(direction: str, rows, tk):
 def _apply_score_bonuses(symbol: str, direction: str, sig_type: str, score: int):
     """在现有 score 之上叠加三个加分项，总分截断到 [0,100]。返回 (new_score, info)；info 各项为 None 表示跳过。"""
     info = {"taker": None, "taker_ratio": None, "range": None, "range_pos": None,
-            "volprice": None, "vol_ratio": None}
+            "volprice": None, "vol_ratio": None, "hub_bonus": 0}
     if sig_type == "funding_arb" or direction not in ("LONG", "SHORT"):
         return score, info
     try:
@@ -3797,7 +3797,9 @@ def _apply_score_bonuses(symbol: str, direction: str, sig_type: str, score: int)
             logger.debug(f"[score] {symbol} volprice 加分失败（跳过）: {e}")
     adds = [info[k] for k in ("taker", "range", "volprice") if info[k] is not None]
     _cap = getattr(_c, "SCORE_HUB_BONUS_CAP", 15)
-    total_bonus = min(sum(adds), _cap)   # 只限制正向叠加的上限，负值照常扣
+    _floor = getattr(_c, "SCORE_HUB_PENALTY_FLOOR", -10)
+    total_bonus = max(min(sum(adds), _cap), _floor)   # 双向 cap：正向上限 + 负向下限
+    info["hub_bonus"] = total_bonus
     new_score = min(100, max(0, score + total_bonus))
     if any(v is not None for v in (info["taker"], info["range"], info["volprice"])):
         def f(v):

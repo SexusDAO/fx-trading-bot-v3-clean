@@ -108,7 +108,7 @@ def test_switches_independent(hub, monkeypatch):
     assert info["taker"] is None and s == 75                                          # 8+8=16 → 上限 15
     monkeypatch.setattr(config, "SCORE_RANGE_BONUS", False, raising=False)
     monkeypatch.setattr(config, "SCORE_VOLPRICE_BONUS", False, raising=False)
-    assert sc._apply_score_bonuses("X", "LONG", "pullback", 60) == (60, {**info, "range": None, "range_pos": None, "volprice": None, "vol_ratio": None})
+    assert sc._apply_score_bonuses("X", "LONG", "pullback", 60) == (60, {**info, "range": None, "range_pos": None, "volprice": None, "vol_ratio": None, "hub_bonus": 0})
 
 
 def test_one_failure_does_not_affect_others(hub, monkeypatch):
@@ -148,3 +148,12 @@ def test_hub_bonus_cap_only_limits_positive(hub, monkeypatch):
     monkeypatch.setattr(config, "SCORE_HUB_BONUS_CAP", 15, raising=False)
     hub["k6"] = [k(100, 40)] * 6; hub["tk"] = tk(c=5, chg=0); hub["k24"] = vrows(1000)
     assert sc._apply_score_bonuses("X", "LONG", "pullback", 60)[0] == 50     # -5 -5：负值照常扣，不受上限影响
+
+
+def test_hub_penalty_floor(hub, monkeypatch):
+    monkeypatch.setattr(config, "SCORE_HUB_PENALTY_FLOOR", -10, raising=False)
+    monkeypatch.setattr(sc, "_calc_taker_bonus", lambda d, r: (-5, 0.4))
+    monkeypatch.setattr(sc, "_calc_range_bonus", lambda d, t: (-5, 0.1))
+    monkeypatch.setattr(sc, "_calc_volprice_bonus", lambda d, r, t: (-5, 1.0))
+    s, info = sc._apply_score_bonuses("X", "LONG", "pullback", 60)
+    assert info["hub_bonus"] == -10 and s == 50          # -15 → 下限 -10
