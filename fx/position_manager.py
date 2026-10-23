@@ -3562,16 +3562,20 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
     #   防止以后放开外扩（TP_SL_ADJUST_SL_WIDEN_ATR）或 calc_sl_tp 异常时突破初始风险。
     if sl_changed:
         try:
-            from config import RISK_PER_TRADE as _RPT
             _ref_entry = float(entry_price or pos.get("entry_price") or 0)
-            _max_dist = float(_RPT) * _ref_entry
-            _new_dist = abs(_ref_entry - float(new_sl))
-            _old_dist = abs(_ref_entry - float(old_sl))
-            if _ref_entry > 0 and _new_dist > _max_dist and _new_dist > _old_dist:
-                sl_changed = False
-                sl_reason = (f"blocked: 新止损距离 {_new_dist:.6g} 超过初始风险上限 "
-                             f"{_max_dist:.6g}(RISK_PER_TRADE×入场价)")
-                logger.warning(f"[adjust_sltp] {symbol} 拒绝调整 SL: {sl_reason}")
+            _new_sl_f = float(new_sl)
+            # 已越过入场价（进入盈利区）→ 锁利上移，豁免风险上限
+            _in_profit = (_new_sl_f > _ref_entry) if direction == "LONG" else (_new_sl_f < _ref_entry)
+            if _ref_entry > 0 and not _in_profit:
+                _new_dist = abs(_ref_entry - _new_sl_f)
+                _old_dist = abs(_ref_entry - float(old_sl))
+                # 基准 = 开仓时的止损距离；pos 未记录 initial_sl_distance 时退回当前止损距离
+                _init_raw = pos.get("initial_sl_distance")
+                _max_dist = float(_init_raw) if _init_raw else _old_dist
+                if _new_dist > _max_dist and _new_dist > _old_dist:
+                    sl_changed = False
+                    sl_reason = (f"blocked: 新止损距离 {_new_dist:.6g} 超过开仓止损距离 {_max_dist:.6g}")
+                    logger.warning(f"[adjust_sltp] {symbol} 拒绝调整 SL: {sl_reason}")
         except Exception as _rle:
             sl_changed = False
             logger.error(f"[adjust_sltp] {symbol} 止损上限检查异常，保守不调整 SL: {_rle}")
@@ -3648,28 +3652,17 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
     # 加系统撤单锁,防止 _check_manual_close 在此期间误判为手动平仓
     mark_system_order_update(symbol)
 
-    async def _replace_sl():
-        nonlocal sl_id
+    # 实际生效价格（挂单成功后由交易所回报确认）；未改动的一侧沿用旧单价格
+    eff_sl, eff_tp1 = old_sl, old_tp1
+    sl_placed = tp1_placed = tp2_placed = False
+
+    async def _replace_sl() -> bool:
+        """先挂新 SL → 成功后只撤本仓位旧 SL(sl_order_id)；新单失败保留旧单不裸仓，返回 False。"""
+        nonlocal sl_id, eff_sl, sl_placed
         new_sl_r = _round_price(new_sl, tick)
+        old_sl_id = sl_id
 
-        # 第一步:撤清所有该标的的 Algo SL(防止多次调用叠加旧单)
-        try:
-            all_algo = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: api.get_algo_open_orders(symbol)
-            )
-            for ao in (all_algo or []):
-                aid = int(ao.get("algoId", 0))
-                if aid:
-                    try:
-                        await asyncio.get_running_loop().run_in_executor(
-                            None, lambda _aid=aid: api.cancel_algo_order(symbol, _aid)
-                        )
-                    except Exception:
-                        pass
-        except Exception as e:
-            logger.warning(f"[adjust_sltp] {symbol} 撤旧Algo单失败(继续挂新单): {e}")
-
-        # 第二步:挂新 SL
+        # 第一步:挂新 SL
         try:
             resp = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: api.place_sl(
@@ -3683,15 +3676,32 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
             if not new_id:
                 raise RuntimeError(f"id=0, resp={resp}")
         except Exception as e:
-            logger.warning(f"[adjust_sltp] {symbol} 新SL挂单失败: {e}")
-            return
+            logger.warning(f"[adjust_sltp] ⚠️ {symbol} 新SL挂单失败，保留旧止损单 {old_sl_id} @ {old_sl:.6g}，本次不再继续: {e}")
+            return False
 
-        (await asyncio.to_thread(update_position, pid, {"sl_price": new_sl, "sl_order_id": new_id}))
+        try:
+            _eff = float(resp.get("triggerPrice") or resp.get("stopPrice") or 0) or float(new_sl_r)
+        except (TypeError, ValueError):
+            _eff = float(new_sl_r)
+
+        # 第二步:新单已生效 → 只撤本仓位自己的旧 SL
+        if old_sl_id and int(old_sl_id) != new_id:
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: api.cancel_algo_order(symbol, int(old_sl_id))
+                )
+            except Exception as e:
+                logger.warning(f"[adjust_sltp] {symbol} 撤旧SL {old_sl_id} 失败(新SL {new_id} 已生效，请人工确认是否残留): {e}")
+
+        (await asyncio.to_thread(update_position, pid, {"sl_price": _eff, "sl_order_id": new_id}))
         sl_id = new_id
-        logger.info(f"[adjust_sltp] {symbol} SL {old_sl:.6g}→{new_sl:.6g} ({sl_reason})")
+        eff_sl = _eff
+        sl_placed = True
+        logger.info(f"[adjust_sltp] {symbol} SL {old_sl:.6g}→{_eff:.6g} ({sl_reason})")
+        return True
 
     async def _replace_tp1():
-        nonlocal tp1_id
+        nonlocal tp1_id, eff_tp1, tp1_placed
         new_tp1_r = _round_price(new_tp1, tick)
         # ── 先撤旧单,再挂新单(避免 ReduceOnly 冲突)────────────────────
         if tp1_id:
@@ -3729,12 +3739,18 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
                 ))
             return
         # ── 挂单成功:更新状态,重置失败计数 ──
-        (await asyncio.to_thread(update_position, pid, {"tp1_price": new_tp1, "tp1_order_id": new_id, "tp1_fail_count": 0}))
+        try:
+            _eff_tp = float(resp.get("price") or 0) or float(new_tp1_r)
+        except (TypeError, ValueError):
+            _eff_tp = float(new_tp1_r)
+        (await asyncio.to_thread(update_position, pid, {"tp1_price": _eff_tp, "tp1_order_id": new_id, "tp1_fail_count": 0}))
         tp1_id = new_id
+        eff_tp1 = _eff_tp
+        tp1_placed = True
         logger.info(f"[adjust_sltp] {symbol} TP1 {old_tp1:.6g}→{new_tp1:.6g} ({tp1_reason})")
 
     async def _replace_tp2():
-        nonlocal tp2_id
+        nonlocal tp2_id, tp2_placed
         if not new_tp2: return
         new_tp2_r = _round_price(new_tp2, tick)
         # ── 先撤旧单,再挂新单(避免 ReduceOnly 冲突)────────────────────
@@ -3764,15 +3780,33 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
             return
         (await asyncio.to_thread(update_position, pid, {"tp2_price": new_tp2, "tp2_order_id": new_id}))
         tp2_id = new_id
+        tp2_placed = True
         logger.info(f"[adjust_sltp] {symbol} TP2 {old_tp2:.6g}→{new_tp2:.6g}")
 
-    if sl_changed:  actions.append(_replace_sl())
-    if tp1_changed: actions.append(_replace_tp1())
-    if tp2_changed: actions.append(_replace_tp2())
+    # 串行执行(避免并发在同一标的上挂单冲突)；新 SL 挂失败 → 保留旧单，不再继续后续逻辑
+    if sl_changed:
+        if not await _replace_sl():
+            _write_adjust_log(pid, symbol, direction, "sl_place_failed",
+                              old_sl, new_sl, old_tp1, new_tp1,
+                              old_tp2, new_tp2, atr,
+                              new_params.get("consistency_score"),
+                              new_params.get("momentum_coeff"),
+                              sl_reason, tp1_reason)
+            return {"sl_changed": False, "sl_reason": "place_failed_kept_old",
+                    "tp1_changed": False, "tp1_reason": tp1_reason, "tp2_changed": False}
+    if tp1_changed: await _replace_tp1()
+    if tp2_changed: await _replace_tp2()
+    sl_changed, tp1_changed, tp2_changed = sl_placed, tp1_placed, tp2_placed
 
-    # 串行执行(避免并发在同一标的上挂单冲突)
-    for coro in actions:
-        await coro
+    # 本次没有任何单实际改成功 → 跳过 RR 检查
+    if not (sl_placed or tp1_placed or tp2_placed):
+        _write_adjust_log(pid, symbol, direction, "no_change",
+                          old_sl, new_sl, old_tp1, new_tp1,
+                          old_tp2, new_tp2, atr,
+                          new_params.get("consistency_score"),
+                          new_params.get("momentum_coeff"),
+                          sl_reason, tp1_reason)
+        return None
 
     # ── v3.68 改动二:TP 收紧后 RR < 1.0 主动平仓 ──────────────────────────────
     # 如果 TP1 调整后 RR < 1.0,持仓期望收益为负,主动平仓
@@ -3781,8 +3815,8 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
         None, lambda: float(api.get_mark_price(symbol).get('markPrice', 0))
     )
     if current_mark > 0:
-        sl_dist = abs(current_mark - new_sl)
-        tp1_dist = abs(new_tp1 - current_mark)
+        sl_dist = abs(current_mark - eff_sl)     # 实际生效的止损价
+        tp1_dist = abs(eff_tp1 - current_mark)   # 实际生效的 TP1 价
         if sl_dist > 0:
             rr_now = tp1_dist / sl_dist
             if rr_now < TP_MIN_RR_LIVE:
