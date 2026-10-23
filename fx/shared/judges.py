@@ -1268,7 +1268,7 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
     elif rsi_1h < 28 and chg24 <= -5 and rsi_4h < 55:
         direction = "LONG"    # RSI1H 极端超卖通道
         _rsi1h_channel = True
-    elif rsi_1h > 72 and chg24 >= 4.0 and rsi_4h > 55:
+    elif rsi_1h > 72 and chg24 >= REVERSAL_CHG24_SHORT_MIN and rsi_4h > 55:   # [fix C2] 4%→10%，与主通道一致
         # v3.64: SHORT RSI1H 补充通道: chg24>=+4%（原5%，略放宽），RSI1H>72 保持
         direction = "SHORT"
         _rsi1h_channel = True
