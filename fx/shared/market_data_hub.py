@@ -470,6 +470,7 @@ class MarketDataHub:
             for st in self._series.values():
                 if st.shard == idx:
                     st.stale = True          # 断线时只标记过时，不清空 rows
+                    st.loading = False       # 重置加载状态，重连后才能触发新的加载
                     # st.rows 保留，让 scanner 仍能读到上一次的 kline
         sh.ws = None
         sh.subscribed = set()
