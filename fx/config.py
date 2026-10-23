@@ -926,7 +926,7 @@ OPT_DIVERGENCE_GATE_WEIGHT_CAP = 2.0
 OPT_OID_REJECT_ALL_BULL = True
 
 # ── 阶段3：影子触发器（只观测，不下单、不发 REST）──────────────────────────────
-TRIGGER_DETECTOR_ENABLED = False  # True：每秒轮询 hub 内存，写 logs/trigger_log.jsonl 并与 logs/scan_signals.jsonl 对账
+TRIGGER_DETECTOR_ENABLED = True  # True：每秒轮询 hub 内存，写 logs/trigger_log.jsonl 并与 logs/scan_signals.jsonl 对账
 TRIGGER_CONFIG_VERSION   = "phase3.1"   # 写入 trigger_log 的 config_version 前缀（后接 config.py sha1 前 8 位）
 
 # 触发阈值（比例均为小数；chg24 0.10 = 10%）
@@ -976,8 +976,8 @@ TRIGGER_TOKEN_TTL              = 300
 TRIGGER_TOKEN_STRATEGY_MAX_PCT = 0.40
 
 # ── 阶段5：触发器驱动真实分析（会真实下单）──────────────────────────────────────
-TRIGGER_DISPATCH_ENABLED = False  # 需同时 TRIGGER_DETECTOR_ENABLED=True；True 时触发 → 预取 → analyze_one → 第四步 → 注册下单
-SCAN_INTERVAL_PASSIVE    = 1800   # 两个开关都为 True 时的兜底扫描间隔（秒）；否则保持 300s / 周末 900s
+TRIGGER_DISPATCH_ENABLED = True  # 需同时 TRIGGER_DETECTOR_ENABLED=True；True 时触发 → 预取 → analyze_one → 第四步 → 注册下单
+SCAN_INTERVAL_PASSIVE    = 900   # 两个开关都为 True 时的兜底扫描间隔（秒）；否则保持 300s / 周末 900s
 TRIGGER_DISPATCH_TIMEOUT = 30     # 单个分析任务超时（预取 + analyze_one + 第四步）
 TRIGGER_DISPATCH_WORKERS = 2      # 分析协程数
 
