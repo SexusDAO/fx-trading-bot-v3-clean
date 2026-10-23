@@ -514,7 +514,7 @@ class WsOrderListener:
 
         symbol     = data.get("s", "")
         mark_price = float(data.get("p", 0))
-        ts         = int(data.get("T", 0))
+        ts         = int(data.get("E", 0))  # 使用事件时间 E，而不是下次资金费时间 T
 
         if not symbol or mark_price <= 0:
             return
