@@ -7,7 +7,7 @@ daemon_start.py — fx trading daemon 管理器 (v2.0 精确PID版)
      - 精确 kill，不用 pkill 模糊匹配
   2. 启动前强制清场：检查两个 PID 文件，任意活着的进程都先杀掉
   3. 竞态保护：等待旧进程完全退出（最多 15s）再启动新进程
-  4. log rotate：system.log 超过 MAX_LOG_MB 自动归档，防无限膨胀
+  4. （[fix #50] 日志轮转已移交 main.py RotatingFileHandler）
   5. _daemon_loop 在 Popen 后立即写 main.pid，stop 时精确杀
   6. cmd_stop 先按 main.pid 杀 main.py，再按 daemon.pid 杀 daemon，
      最后兜底 pkill（防止 PID 文件丢失）
@@ -229,21 +229,7 @@ def _kill_pid(pid: int, label: str = "", wait_sec: int = STOP_WAIT_SEC, expect: 
         return False
     return not _is_alive(pid, expect)
 
-def _rotate_log():
-    """system.log 超过 MAX_LOG_MB 时归档，防止无限膨胀。"""
-    try:
-        if not SYSTEM_LOG.exists():
-            return
-        size_mb = SYSTEM_LOG.stat().st_size / (1024 * 1024)
-        if size_mb < MAX_LOG_MB:
-            return
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        archive = SYSTEM_LOG.parent / "archive" / f"system_{stamp}.log"
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        SYSTEM_LOG.rename(archive)
-        log(f"[rotate] system.log ({size_mb:.1f}MB) 已归档为 {archive.name}")
-    except Exception as e:
-        log(f"[rotate] log rotate 失败: {e}")
+# [fix #50] 日志轮转统一由 main.py 的 RotatingFileHandler 负责，删除重复的 _rotate_log。
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -322,9 +308,6 @@ def _daemon_loop():
 
     restarts = 0
     while restarts < MAX_RESTARTS:
-        # log rotate：每次启动前检查
-        _rotate_log()
-
         start = time.time()
         log(f"启动 main.py (第{restarts+1}次)")
 
@@ -332,7 +315,7 @@ def _daemon_loop():
         # v3.43: 注入 LLM API Key（NovaAPI 兼容 OpenAI 格式），供 llm_judge 路径A使用
         _child_env = os.environ.copy()
         _child_env.setdefault("OPENAI_API_KEY",  os.environ.get("OPENAI_API_KEY", ""))
-        _child_env.setdefault("OPENAI_BASE_URL", "https://novaapi.ai")
+        # [fix #50] LLM 中转站地址从 .env 读取（OPENAI_BASE_URL），不再写在脚本里
         # Binance API Key + 代理 — 从父进程环境变量继承，不在代码里硬编码
         # 启动前请确保已 export BINANCE_API_KEY / BINANCE_API_SECRET / BINANCE_PROXY
         for _k in ("BINANCE_API_KEY", "BINANCE_API_SECRET", "BINANCE_PROXY", "PROXY_URL"):
@@ -500,7 +483,7 @@ def cmd_status():
 
     if SYSTEM_LOG.exists():
         size_mb = SYSTEM_LOG.stat().st_size / (1024 * 1024)
-        print(f"system.log: {size_mb:.1f}MB (rotate 阈值 {MAX_LOG_MB}MB)")
+        print(f"system.log: {size_mb:.1f}MB（轮转由 main.py RotatingFileHandler 负责）")
 
     if not daemon_alive and not main_alive:
         print("ℹ️  系统未运行，执行 start 启动")

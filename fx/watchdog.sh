@@ -83,8 +83,9 @@ while [ $restarts -lt $MAX_RESTARTS ]; do
     # v3.41.2: NovaAPI 直连（OpenAI 兼容中转站，速度 <1s，绕过 openclaw agent 慢路径）
     # 模型对比结果：gpt-4o-mini 有妖币识别+新闻语义两处误判，换 gpt-4o（速度持平，判断准确率 3/3）
     export OPENAI_API_KEY="${OPENAI_API_KEY:?请在运行环境中设置 OPENAI_API_KEY}"
-    export OPENAI_BASE_URL="https://novaapi.ai"
-    export OPENAI_MODEL="claude-opus-4-8-medium"  # 默认（妖币+边界），新闻语义见 LLM_API_MODEL_FAST
+    # [fix #50] LLM 中转站地址与模型从 .env 读取，不写在脚本里
+    export OPENAI_BASE_URL="${OPENAI_BASE_URL:?请在 .env 中设置 OPENAI_BASE_URL}"
+    export OPENAI_MODEL="${OPENAI_MODEL:-claude-opus-4-8-medium}"
 
     # Binance API Key + 代理 — 必须在环境变量中提前设置，不在脚本里硬编码
     # export BINANCE_API_KEY="your_key"
