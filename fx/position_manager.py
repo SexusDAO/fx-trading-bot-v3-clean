@@ -1026,7 +1026,7 @@ class PositionManager:
             _open_ms = int(pos.get("open_time", 0))
             # 仅查开仓时间之后的成交,防止拓占旧记录
             _start_ts = max(_open_ms, int(time.time() * 1000) - 3600_000)  # 最多查 1 小时内
-            _trades  = _get_user_trades(symbol, start_time=_start_ts, limit=20)
+            _trades  = (await asyncio.to_thread(_get_user_trades, symbol, start_time=_start_ts, limit=20))
             # 取平仓方向的成交:SHORT 对应 BUY,LONG 对应 SELL
             _close_side = "BUY" if _dir == "SHORT" else "SELL"
             _close_trades = [
@@ -1040,7 +1040,7 @@ class PositionManager:
                 _real_pnl   = sum(float(t.get("realizedPnl", 0)) for t in _close_trades)
             else:
                 # 拿不到成交记录,用当前 mark price 估算
-                _mp = api.get_mark_price(symbol)
+                _mp = (await asyncio.to_thread(api.get_mark_price, symbol))
                 _exit_price = float(_mp.get("markPrice", _entry))
                 _real_pnl   = (_entry - _exit_price) * _qty if _dir == "SHORT" else (_exit_price - _entry) * _qty
                 logger.warning(f"[pm] {symbol} 手动平仓未找到成交记录,用 mark price 估算 pnl")
@@ -1114,7 +1114,7 @@ class PositionManager:
         price = _last_price.get(symbol)
         if price is None:
             try:
-                md = _pm_mark_price(symbol)
+                md = (await asyncio.to_thread(_pm_mark_price, symbol))
                 price = float(md.get("markPrice", entry))
             except Exception:
                 price = entry
@@ -1657,7 +1657,7 @@ class PositionManager:
             ema50_4h = _calc_ema(closes_4h, 50)
 
             # 资金费率
-            md      = _pm_mark_price(symbol)
+            md      = (await asyncio.to_thread(_pm_mark_price, symbol))
             funding = float(md.get("lastFundingRate", 0))
             price   = float(md.get("markPrice", pos["entry_price"]))
 
@@ -1833,12 +1833,12 @@ async def _check_pending_expire_static(pos: dict, now_ms: int):
     # ── 实时核验:检查订单是否已在交易所消失(取消/过期)─────────────────────
     if order_id:
         try:
-            live_orders = api.get_open_orders(symbol)
+            live_orders = (await asyncio.to_thread(api.get_open_orders, symbol))
             live_ids = {o["orderId"] for o in (live_orders or [])}
             if int(order_id) not in live_ids:
                 # 订单不在交易所 → 用已封装的 api.get_order 查询订单状态(不重复造轮)
                 try:
-                    od = api.get_order(symbol, int(order_id))
+                    od = (await asyncio.to_thread(api.get_order, symbol, int(order_id)))
                 except Exception as _oe:
                     od = None
                     logger.warning(f"[pm] {symbol} 查询订单 {order_id} 失败: {_oe}")
@@ -1884,10 +1884,10 @@ async def _check_pending_expire_static(pos: dict, now_ms: int):
 
     for attempt in range(2):
         try:
-            api.cancel_order(symbol, int(order_id))
+            (await asyncio.to_thread(api.cancel_order, symbol, int(order_id)))
             # [fix #14] 撤单后复查成交量：撤单前可能已部分成交，不能直接删记录
             try:
-                _od_after = api.get_order(symbol, int(order_id))
+                _od_after = (await asyncio.to_thread(api.get_order, symbol, int(order_id)))
             except Exception as _qe:
                 _od_after = None
                 logger.warning(f"[pm] {symbol} 撤单后查询订单失败: {_qe}")
@@ -1899,7 +1899,7 @@ async def _check_pending_expire_static(pos: dict, now_ms: int):
             # GTD 单可能已被交易所自动撤销(订单不存在),静默处理即可
             if any(kw in err_str for kw in ("unknown order", "order does not exist", "-2011", "-2013")):
                 try:
-                    _od_gone = api.get_order(symbol, int(order_id))
+                    _od_gone = (await asyncio.to_thread(api.get_order, symbol, int(order_id)))
                 except Exception:
                     _od_gone = None
                 if _od_gone and await _recover_partial_fill(pos, _od_gone, pid, symbol):   # [fix #14]
@@ -2032,20 +2032,18 @@ async def _force_close_static_inner(pos: dict, close_reason: str):
     close_side = "SELL" if direction == "LONG" else "BUY"
     fill_price = float(pos["entry_price"])  # fallback
     try:
-        resp = api.place_order(
-            symbol=symbol, side=close_side,
+        resp = (await asyncio.to_thread(api.place_order, symbol=symbol, side=close_side,
             order_type="MARKET",
             quantity=qty,
             # [fix #26] 对冲模式平仓单必须显式带 positionSide（原先已带，这里加校验）
-            position_side=("SHORT" if direction.upper() == "SHORT" else "LONG"),
-        )
+            position_side=("SHORT" if direction.upper() == "SHORT" else "LONG"),))
         order_id = resp.get("orderId") or resp.get("algoId")
         # 尝试从订单历史得到实际成交均价
         fill_ok = False
         if order_id:
             try:
                 await asyncio.sleep(1.0)  # 等实际成交
-                order_info = api.get_order(symbol, order_id)
+                order_info = (await asyncio.to_thread(api.get_order, symbol, order_id))
                 avg_price  = float(order_info.get("avgPrice") or 0)
                 if avg_price > 0:
                     fill_price = avg_price
@@ -2055,7 +2053,7 @@ async def _force_close_static_inner(pos: dict, close_reason: str):
         # fallback: 愉试从 mark_price 获得近似出场价
         if not fill_ok:
             try:
-                mp = api.get_mark_price(symbol)
+                mp = (await asyncio.to_thread(api.get_mark_price, symbol))
                 mp_price = float(mp.get("markPrice") or 0)
                 if mp_price > 0:
                     fill_price = mp_price
@@ -2794,7 +2792,7 @@ async def _maybe_record_funding_costs() -> None:
             return
         positions = get_all_positions()
         try:
-            acc_data = api.get_account()
+            acc_data = (await asyncio.to_thread(api.get_account))
             equity   = float(acc_data.get("totalMarginBalance", 0) or 0)
         except Exception:
             equity = 0.0
@@ -2907,7 +2905,7 @@ async def _generate_daily_report():
                 by_pos_list.append(f"{sym_label}: +{fc:.2f}U")
         net_cost = round(total_paid + total_received, 2)
         try:
-            _acc_eq = api.get_account()
+            _acc_eq = (await asyncio.to_thread(api.get_account))
             _eq_v   = float(_acc_eq.get("totalMarginBalance", 0) or 0)
         except Exception:
             _eq_v = 1.0
@@ -3163,7 +3161,7 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
         # ── 如果 pos_state 里没有 sl/tp 价格,重新用 ATR 降级计算 ─────────────
         if not sl_price or not tp1_price:
             try:
-                klines = _api.get_klines(symbol, "1h", 22)
+                klines = (await asyncio.to_thread(_api.get_klines, symbol, "1h", 22))
                 now_ms = __import__("time").time() * 1000
                 closed = [k for k in klines if float(k[6]) < now_ms]
                 trs = [max(float(closed[i][2])-float(closed[i][3]),
@@ -3890,7 +3888,7 @@ async def _adjust_sl_tp_loop_static():
                     try:
                         from shared.binance_api import get_mark_price as _gmp
                         from shared.liq_cache import get_liq_zones_cached as _lzc
-                        _mp  = float(_gmp(sym).get("markPrice", 0))
+                        _mp  = float((await asyncio.to_thread(_gmp, sym)).get("markPrice", 0))
                         _sig_type = pos.get("sig_type", pos.get("mode", "pullback"))
                         _rng = "24h" if _sig_type in ("reversal","funding_arb") else "3d"
                         _liq_l = _lzc(sym, "LONG",  _mp, range_=_rng)
@@ -4167,11 +4165,11 @@ async def _patrol_funding_arb(pos: dict) -> None:
                 try:
                     from shared import binance_api as _bapi
                     all_mp = await asyncio.get_running_loop().run_in_executor(None, _bapi.get_all_mark_prices)
-                    oi_now_v = float(_bapi.get_open_interest(symbol).get("openInterest", 0))
-                    oi_hist  = _bapi.get_open_interest_hist(symbol, "1h", 2)
+                    oi_now_v = float((await asyncio.to_thread(_bapi.get_open_interest, symbol)).get("openInterest", 0))
+                    oi_hist  = (await asyncio.to_thread(_bapi.get_open_interest_hist, symbol, "1h", 2))
                     oi_1h    = float(oi_hist[0].get("sumOpenInterest", 0)) if oi_hist else oi_now_v
                     oi_drop  = (oi_1h - oi_now_v) / (oi_1h + 1e-9) if oi_1h > 0 else 0
-                    k4h_data = _bapi.get_klines(symbol, "4h", 20)
+                    k4h_data = (await asyncio.to_thread(_bapi.get_klines, symbol, "4h", 20))
                     c4h = [float(k[4]) for k in k4h_data[:-1]] if k4h_data else []
                     rsi_4h_now = 50.0
                     if len(c4h) >= 15:
@@ -4203,11 +4201,11 @@ async def _patrol_funding_arb(pos: dict) -> None:
             if hold_cnt < 1:
                 try:
                     from shared import binance_api as _bapi
-                    oi_now_v = float(_bapi.get_open_interest(symbol).get("openInterest", 0))
-                    oi_hist  = _bapi.get_open_interest_hist(symbol, "1h", 2)
+                    oi_now_v = float((await asyncio.to_thread(_bapi.get_open_interest, symbol)).get("openInterest", 0))
+                    oi_hist  = (await asyncio.to_thread(_bapi.get_open_interest_hist, symbol, "1h", 2))
                     oi_1h    = float(oi_hist[0].get("sumOpenInterest", 0)) if oi_hist else oi_now_v
                     oi_drop  = (oi_1h - oi_now_v) / (oi_1h + 1e-9) if oi_1h > 0 else 0
-                    k4h_data = _bapi.get_klines(symbol, "4h", 20)
+                    k4h_data = (await asyncio.to_thread(_bapi.get_klines, symbol, "4h", 20))
                     c4h = [float(k[4]) for k in k4h_data[:-1]] if k4h_data else []
                     rsi_4h_now = 50.0
                     if len(c4h) >= 15:
@@ -4334,7 +4332,7 @@ async def _check_pending_health_static(pos: dict) -> None:
     try:
         k1h_raw  = _pm_klines(symbol, "1h", 60)   # EMA50 需至少 50 根,60 有余量
         k15_raw  = _pm_klines(symbol, "15m", 20)
-        mp_data  = _pm_mark_price(symbol)
+        mp_data  = (await asyncio.to_thread(_pm_mark_price, symbol))
         now_ms_v = _t.time() * 1000
         k1h = [k for k in k1h_raw if float(k[6]) < now_ms_v]
         k15 = [k for k in k15_raw if float(k[6]) < now_ms_v]
@@ -4477,7 +4475,7 @@ async def _check_pending_health_static(pos: dict) -> None:
     old_order_id = pos.get("open_order_id")
     if old_order_id:
         try:
-            _api.cancel_order(symbol, old_order_id)
+            (await asyncio.to_thread(_api.cancel_order, symbol, old_order_id))
         except Exception as _ce:
             logger.warning(f"[pending_health] {symbol} 撤旧单失败: {_ce}")
 
@@ -4495,7 +4493,7 @@ async def _check_pending_health_static(pos: dict) -> None:
 
     # 精度处理
     try:
-        prec = _api.get_precision(symbol)
+        prec = (await asyncio.to_thread(_api.get_precision, symbol))
         tick = prec["tick"]; step = prec["step"]
     except Exception:
         tick = 0.0001; step = 0.001
@@ -4515,7 +4513,7 @@ async def _check_pending_health_static(pos: dict) -> None:
         )
         if tif == "GTD" and expire_ts:
             order_kwargs["goodTillDate"] = expire_ts
-        new_order = _api.place_order(**order_kwargs)
+        new_order = (await asyncio.to_thread(_api.place_order, **order_kwargs))
         new_oid   = new_order.get("orderId")
     except Exception as _oe:
         logger.warning(f"[pending_health] {symbol} 重新下单失败: {_oe}")
@@ -4546,7 +4544,7 @@ async def _pending_cancel(pos: dict, reason: str, pid: str, symbol: str,
     oid = pos.get("open_order_id")
     if oid:
         try:
-            _api.cancel_order(symbol, oid)
+            (await asyncio.to_thread(_api.cancel_order, symbol, oid))
         except Exception as _ce:
             logger.warning(f"[pending_health] {symbol} 撤单失败(忽略): {_ce}")
     # [v3.89 remove-pos 检查] 检查返回值；失败只记日志，不影响撤单后的流程

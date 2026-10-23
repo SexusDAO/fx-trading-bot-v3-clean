@@ -966,7 +966,7 @@ class SignalWatcher:
                                         #   NameError 被下面的 except 吞掉并 continue，导致「TP 可达性 / SL 踩空」紧急检查从不执行。
                                         #   修复：就地导入 binance_api（与本文件其他位置的写法一致）。
                                         from shared import binance_api as api
-                                        _md2  = api.get_mark_price(_sym2)
+                                        _md2  = (await asyncio.to_thread(api.get_mark_price, _sym2))
                                         _mp2  = float(_md2.get("markPrice", 0))
                                     except Exception:
                                         continue
