@@ -38,7 +38,10 @@ def run_loop(event):
 
     async def stop_sleep(_):
         s._running = False
-    ns["asyncio"] = type("A", (), {"sleep": staticmethod(stop_sleep), "CancelledError": asyncio.CancelledError})
+    async def fake_to_thread(fn, *a, **k):   # 被测代码已改为 asyncio.to_thread 包装同步调用
+        return fn(*a, **k)
+    ns["asyncio"] = type("A", (), {"sleep": staticmethod(stop_sleep), "to_thread": staticmethod(fake_to_thread),
+                                   "CancelledError": asyncio.CancelledError})
     asyncio.run(ns["_order_event_loop"](s))
     return calls, updates
 
