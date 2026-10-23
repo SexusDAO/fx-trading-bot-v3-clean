@@ -3153,6 +3153,23 @@ def _judge_stop_hunt_impl(k1h, k4h, k15, ind, chg24, funding):
 #   本策略：OI 背离本身就是入场信号 → 主动逆向布局
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_oi_div_degrade_count: dict = {}  # symbol -> (count, last_ts)：oi_divergence 降级计数（模块级，跨调用累计）
+
+
+def _oi_div_degrade(symbol: str, out: dict, tag: str) -> None:
+    """记录一次 oi_divergence 降级；1 小时内累计 >= 2 次 → position_size_cap 压到 0.2。超过 1 小时清零重计。"""
+    import time as _tw
+    now = _tw.time()
+    cnt, last_ts = _oi_div_degrade_count.get(symbol, (0, now))
+    if now - last_ts > 3600:
+        cnt = 0
+    cnt += 1
+    _oi_div_degrade_count[symbol] = (cnt, now)
+    if cnt >= 2:
+        logger.warning(f"[judge_oi_divergence] {symbol} 1小时内已降级 {cnt} 次（{tag}），pos_cap 降至 0.2")
+        out["position_size_cap"] = min(out.get("position_size_cap", 0.5), 0.2)
+
+
 def judge_oi_divergence(k1h: list, k4h: list, k15: list, ind: dict,
                         chg24: float, funding: float) -> tuple[bool, dict]:
     """
@@ -3190,8 +3207,8 @@ def _judge_oi_divergence_impl(k1h, k4h, k15, ind, chg24, funding):
         _OI_DROP     = 0.10
         _TAKER_REC   = 0.48
         _TAKER_WEAK  = 0.52
-        _RSI_LONG_MAX  = 45
-        _RSI_SHORT_MIN = 55
+        _RSI_LONG_MAX  = 38
+        _RSI_SHORT_MIN = 62
         _BASE_STRONG = 68
         _BASE_MEDIUM = 55
         _ATR_MID_MIN = 0.5
@@ -3386,25 +3403,7 @@ def _judge_oi_divergence_impl(k1h, k4h, k15, ind, chg24, funding):
         logger.debug(f"[judge_oi_divergence] 清算墙检查异常（不阻断）: {_liq_wall_err}")
         out["liq_wall_usd"] = None
         # v3.63b P1: 降级计数器——频繁异常时打 WARNING 并降低 pos_cap
-        _sym_for_warn = ind.get("symbol", "UNKNOWN")
-        _DEGRADE_KEY = f"_oid_degrade_{_sym_for_warn}"
-        try:
-            import time as _tw
-            _now = _tw.time()
-            _dc = out.get(_DEGRADE_KEY, {"count": 0, "window_start": _now})
-            if _now - _dc["window_start"] > 3600:
-                _dc = {"count": 0, "window_start": _now}
-            _dc["count"] += 1
-            out[_DEGRADE_KEY] = _dc
-            if _dc["count"] >= 2:
-                logger.warning(
-                    f"[judge_oi_divergence] {_sym_for_warn} 1小时内 "
-                    f"#6b 已降级 {_dc['count']} 次，"
-                    f"Coinglass 数据异常，pos_cap 降至 0.2"
-                )
-                out["position_size_cap"] = min(out.get("position_size_cap", 0.5), 0.2)
-        except Exception:
-            pass
+        _oi_div_degrade(ind.get("symbol", "UNKNOWN"), out, "#6b 清算墙检查")
 
     # ── 6b2. 清算图方向性验证（v3.65）──────────────────────────────────────────
     # 逻辑：做空信号要求下方多头清算量 >= 上方空头待清算量 * ratio_min
@@ -3624,24 +3623,7 @@ def _judge_oi_divergence_impl(k1h, k4h, k15, ind, chg24, funding):
         logger.debug(f"[judge_oi_divergence] 4H趋势检查异常（不阻断）: {_4h_err}")
         out["ema4h_slope_per_bar"] = None
         # v3.63b P1: 4H K线异常降级计数
-        _sym_4h = ind.get("symbol", "UNKNOWN")
-        try:
-            import time as _tw4
-            _now4 = _tw4.time()
-            _k4h_key = f"_oid_4h_degrade_{_sym_4h}"
-            _dc4 = out.get(_k4h_key, {"count": 0, "window_start": _now4})
-            if _now4 - _dc4["window_start"] > 3600:
-                _dc4 = {"count": 0, "window_start": _now4}
-            _dc4["count"] += 1
-            out[_k4h_key] = _dc4
-            if _dc4["count"] >= 2:
-                logger.warning(
-                    f"[judge_oi_divergence] {_sym_4h} 1小时内 "
-                    f"#6d 已降级 {_dc4['count']} 次，4H K线数据异常，pos_cap 降至 0.2"
-                )
-                out["position_size_cap"] = min(out.get("position_size_cap", 0.5), 0.2)
-        except Exception:
-            pass
+        _oi_div_degrade(ind.get("symbol", "UNKNOWN"), out, "#6d 4H趋势检查")
 
     # ── 6e. RSI 有效区间收窄（v3.63 P1）─────────────────────────────────────
     # 评审建议：RSI ≥55 的绝对值门槛太宽松，在 RSI 55~62 的普通上涨中也会触发。
@@ -3649,18 +3631,18 @@ def _judge_oi_divergence_impl(k1h, k4h, k15, ind, chg24, funding):
     #   SHORT：RSI 需 ≥62 才算"接近超买"，55~61 视为普通上涨区间，拒绝
     #   LONG ：RSI 需 ≤38 才算"接近超卖"，39~45 视为普通下跌区间，拒绝
     # 这比复杂的背离验证更稳定，不依赖 K 线 RSI 历史近似值。
-    _OI_DIV_RSI_SHORT_MIN_HARD = 62  # SHORT 有效门槛（原 55 → 62）
-    _OI_DIV_RSI_LONG_MAX_HARD  = 38  # LONG  有效门槛（原 45 → 38）
+    _OI_DIV_RSI_SHORT_MIN_HARD = _RSI_SHORT_MIN  # 读 config.OI_DIV_RSI1H_SHORT_MIN
+    _OI_DIV_RSI_LONG_MAX_HARD  = _RSI_LONG_MAX   # 读 config.OI_DIV_RSI1H_LONG_MAX
     if direction == "SHORT" and rsi_1h < _OI_DIV_RSI_SHORT_MIN_HARD:
         out["reject_reason"] = (
             f"RSI 区间过低: rsi_1h={rsi_1h:.1f} < {_OI_DIV_RSI_SHORT_MIN_HARD}，"
-            f"55~61 为普通上涨区间，非超买衰竭信号，等 RSI 升至 {_OI_DIV_RSI_SHORT_MIN_HARD}+ 再评估"
+            f"非超买衰竭信号，等 RSI 升至 {_OI_DIV_RSI_SHORT_MIN_HARD}+ 再评估"
         )
         return False, out
     elif direction == "LONG" and rsi_1h > _OI_DIV_RSI_LONG_MAX_HARD:
         out["reject_reason"] = (
             f"RSI 区间过高: rsi_1h={rsi_1h:.1f} > {_OI_DIV_RSI_LONG_MAX_HARD}，"
-            f"39~45 为普通下跌区间，非超卖修复信号，等 RSI 降至 {_OI_DIV_RSI_LONG_MAX_HARD}- 再评估"
+            f"非超卖修复信号，等 RSI 降至 {_OI_DIV_RSI_LONG_MAX_HARD}- 再评估"
         )
         return False, out
     out["rsi_zone_check"] = "passed"

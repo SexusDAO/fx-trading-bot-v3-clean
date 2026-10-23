@@ -472,7 +472,8 @@ def _entry_breakout(mark: float, atr: float,
 
 # reversal 最小入场距离：确保有足够的「冲高/杀跌确认」空间再成交
 _REVERSAL_MIN_DIST_ATR = 0.4   # entry 至少离 mark 0.4 ATR
-_REVERSAL_FALLBACK_ATR = 1.2   # 距离不足时降级到 mark ± 1.2 ATR
+_REVERSAL_FALLBACK_ATR = 1.2   # 无清算区/挂单簿时的兜底距离 mark ± 1.2 ATR
+_REVERSAL_MAX_DIST_ATR = 1.5   # entry 最多离 mark 1.5 ATR（immediate / pending_order 共用）
 
 
 def _entry_reversal(mark: float, atr: float,
@@ -502,9 +503,9 @@ def _entry_reversal(mark: float, atr: float,
                 logger.warning(
                     f"[entry_reversal] LONG 清算区过近 mark={mark:.6g} entry={entry:.6g} "
                     f"dist={(mark-entry):.4g} < {_REVERSAL_MIN_DIST_ATR}*ATR={atr*_REVERSAL_MIN_DIST_ATR:.4g}，"
-                    f"降级为 mark-{_REVERSAL_FALLBACK_ATR}*ATR"
+                    f"降级为 mark-{_REVERSAL_MIN_DIST_ATR}*ATR"
                 )
-                entry = mark - atr * _REVERSAL_FALLBACK_ATR
+                entry = mark - atr * _REVERSAL_MIN_DIST_ATR
                 z = None
             # ── v3.66 immediate 模式距离保护 ──────────────────────────────────────────
             # 修复：entry 距 mark 超过 1.5×ATR 时强制降级到 mark ± 0.5×ATR
@@ -521,17 +522,18 @@ def _entry_reversal(mark: float, atr: float,
             # 真的触达了原始清算区位置」，说明庄家大概率冲清算区，
             # 应考虑恢复 pending_order 模式或提高距离容忍阈值（如从 1.5→2.0）
             # 建议样本量 ≥ 30 笔再做结论
-            elif entry_mode != "pending_order" and (mark - entry) > atr * 1.5:
+            elif (mark - entry) > atr * _REVERSAL_MAX_DIST_ATR:
                 liq_entry_raw = entry
                 liq_entry_dist_atr = round((mark - entry) / (atr + 1e-9), 3)
                 logger.warning(
-                    f"[entry_reversal] LONG immediate 挂单价过远: "
+                    f"[entry_reversal] LONG {entry_mode} 挂单价过远: "
                     f"entry={entry:.6g} mark={mark:.6g} "
-                    f"dist={(mark-entry):.4g} = {liq_entry_dist_atr}×ATR > 1.5×ATR，"
-                    f"强制降级为 mark-0.5×ATR"
+                    f"dist={(mark-entry):.4g} = {liq_entry_dist_atr}×ATR > {_REVERSAL_MAX_DIST_ATR}×ATR，"
+                    f"降级为 mark-{_REVERSAL_MAX_DIST_ATR}×ATR"
                 )
-                entry = mark - atr * 0.5
-                z = None
+                entry = mark - atr * _REVERSAL_MAX_DIST_ATR
+                if entry_mode != "pending_order":
+                    z = None   # pending_order 只收紧距离，保留挂单模式（有效期等下游逻辑不变）
                 degrade_info = {
                     "liq_entry_raw": round(liq_entry_raw, 8),
                     "liq_entry_dist_atr": liq_entry_dist_atr,
@@ -552,26 +554,27 @@ def _entry_reversal(mark: float, atr: float,
                 logger.warning(
                     f"[entry_reversal] SHORT 清算区过近 mark={mark:.6g} entry={entry:.6g} "
                     f"dist={(entry-mark):.4g} < {_REVERSAL_MIN_DIST_ATR}*ATR={atr*_REVERSAL_MIN_DIST_ATR:.4g}，"
-                    f"降级为 mark+{_REVERSAL_FALLBACK_ATR}*ATR"
+                    f"降级为 mark+{_REVERSAL_MIN_DIST_ATR}*ATR"
                 )
-                entry = mark + atr * _REVERSAL_FALLBACK_ATR
+                entry = mark + atr * _REVERSAL_MIN_DIST_ATR
                 z = None
             # ── v3.66 immediate 模式距离保护（SHORT 方向）──────────────────────────────
             # 场景：pre_entry_price 由 scanner 在价格较高时预算，随后价格回落，
             # 执行时 mark 已大幅低于预算值，清算区仍在旧高位，
             # 导致 immediate 模式挂出距现价 3%+ 的 GTC 挂单，违背 immediate 设计意图。
             # 复盘字段同 LONG 方向，用于后续评估是否恢复 pending_order 模式。
-            elif entry_mode != "pending_order" and (entry - mark) > atr * 1.5:
+            elif (entry - mark) > atr * _REVERSAL_MAX_DIST_ATR:
                 liq_entry_raw = entry
                 liq_entry_dist_atr = round((entry - mark) / (atr + 1e-9), 3)
                 logger.warning(
-                    f"[entry_reversal] SHORT immediate 挂单价过远: "
+                    f"[entry_reversal] SHORT {entry_mode} 挂单价过远: "
                     f"entry={entry:.6g} mark={mark:.6g} "
-                    f"dist={(entry-mark):.4g} = {liq_entry_dist_atr}×ATR > 1.5×ATR，"
-                    f"强制降级为 mark+0.5×ATR"
+                    f"dist={(entry-mark):.4g} = {liq_entry_dist_atr}×ATR > {_REVERSAL_MAX_DIST_ATR}×ATR，"
+                    f"降级为 mark+{_REVERSAL_MAX_DIST_ATR}×ATR"
                 )
-                entry = mark + atr * 0.5
-                z = None
+                entry = mark + atr * _REVERSAL_MAX_DIST_ATR
+                if entry_mode != "pending_order":
+                    z = None   # pending_order 只收紧距离，保留挂单模式（有效期等下游逻辑不变）
                 degrade_info = {
                     "liq_entry_raw": round(liq_entry_raw, 8),
                     "liq_entry_dist_atr": liq_entry_dist_atr,

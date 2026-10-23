@@ -750,8 +750,8 @@ OI_DIV_TAKER_RECOVERY_MIN    = 0.48   # LONG：taker_buy_ratio_now >= 此值视�
 OI_DIV_TAKER_WEAK_MAX        = 0.52   # SHORT：taker_buy_ratio_now <= 此值视为买方转弱
 
 # ── RSI 过滤 ─────────────────────────────────────────────────────────────────
-OI_DIV_RSI1H_LONG_MAX        = 45     # LONG：RSI1H 不能太高（> 45 说明还没超卖）
-OI_DIV_RSI1H_SHORT_MIN       = 55     # SHORT：RSI1H 不能太低（< 55 说明还没超买）
+OI_DIV_RSI1H_LONG_MAX        = 38  # 45→38：与 judge 原写死的有效门槛一致（原 45 被代码 38 覆盖）     # LONG：RSI1H 不能太高（> 45 说明还没超卖）
+OI_DIV_RSI1H_SHORT_MIN       = 62  # 55→62：与 judge 原写死的有效门槛一致（原 55 被代码 62 覆盖）     # SHORT：RSI1H 不能太低（< 55 说明还没超买）
 
 # ── 波动率门槛（与 pullback 共用 ATR 分层，不单独设参数）─────────────────────
 
