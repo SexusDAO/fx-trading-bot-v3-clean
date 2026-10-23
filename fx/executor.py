@@ -554,8 +554,8 @@ def _fetch_liq(symbol: str, mark_price: float = 0.0) -> dict:
         liq_short = _normalize_liq_zones(liq_short, atr=0)
         return {"long": liq_long, "short": liq_short}
     except Exception as e:
-        logger.debug(f"[executor] {symbol} liq_cache 失败: {e}，止损止盈降级为ATR")
-        return {}
+        logger.warning(f"[executor] {symbol} liq_cache 失败: {e}，止损止盈降级为ATR")
+        return {"long": [], "short": []}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1563,7 +1563,14 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     k1h        = mkt["k1h"]
 
     # ── 步骤3：Coinglass 清算图 ───────────────────────────────────────────────
-    liq_zones = _fetch_liq(symbol, mark_price=mark_price)
+    # [hotfix] 清算区拉取失败不得中断开仓：降级为空清算区（calc_sl_tp 自动走 ATR 止损止盈）
+    try:
+        liq_zones = _fetch_liq(symbol, mark_price=mark_price)
+    except Exception as e:
+        logger.warning(f"[executor] {symbol} _fetch_liq 失败，降级为空清算区: {e}")
+        liq_zones = {"long": [], "short": []}
+    if not isinstance(liq_zones, dict):
+        liq_zones = {"long": [], "short": []}
 
     # ── 步骤4：计算入场参数 ───────────────────────────────────────────────────
     params = calc_sl_tp(
