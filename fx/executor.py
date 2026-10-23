@@ -1134,8 +1134,9 @@ async def _on_position_closed(pos_id: str, symbol: str,
         }
         _log_path = _pl.Path(__file__).parent / "logs" / "trade_log.jsonl"
         _log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(_log_path, "a") as _f:
-            _f.write(_json.dumps(_log_entry, ensure_ascii=False) + "\n")
+        # v3.93: 同步文件写移出事件循环（与 trade_log 其他读写共用一把锁）
+        from shared.trade_log_io import append_jsonl as _append_jsonl
+        await asyncio.to_thread(_append_jsonl, _log_path, _log_entry, None)
     except Exception as _le:
         logger.warning(f"[executor] WS平仓 trade_log 写入失败: {_le}")
 
@@ -1182,8 +1183,11 @@ async def _on_position_closed(pos_id: str, symbol: str,
             _cutoff = time.time() - 7 * 86400
             loss_cnt = 0
             try:
-                with open(_tlog, "r", encoding="utf-8") as _tf:
-                    for _line in _tf:
+                # v3.93: 整文件读取移到线程执行（统计口径不变）
+                from shared.trade_log_io import read_lines as _read_lines
+                _tl_lines = await asyncio.to_thread(_read_lines, _tlog)
+                if True:
+                    for _line in _tl_lines:
                         try:
                             _r = _j.loads(_line)
                             if (_r.get("symbol") == symbol

@@ -1080,8 +1080,8 @@ class PositionManager:
                 "pnl_net_usdt":      round(_real_pnl - _manual_fees, 4),
             }
             TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(TRADE_LOG_PATH, "a", encoding="utf-8") as _f:
-                _f.write(json.dumps(_record, ensure_ascii=False) + "\n")
+            from shared.trade_log_io import append_jsonl as _append_jsonl   # v3.93
+            await asyncio.to_thread(_append_jsonl, TRADE_LOG_PATH, _record)
             logger.info(
                 f"[pm] {symbol} {_inferred_close_reason} trade_log 已补写: "
                 f"exit={_exit_price:.6g} pnl={_real_pnl:+.4f}U close_reason={_inferred_close_reason}"
@@ -2315,8 +2315,8 @@ async def _close_position_post_static(
         elif close_reason in ("tp2", "tp2_hit") and _expected_tp2 > 0:
             _tp2_slip = (exit_price - _expected_tp2) / (_expected_tp2 + 1e-9) * 100
             record["tp_slippage_pct"] = round(_tp2_slip, 4)
-        with open(TRADE_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        from shared.trade_log_io import append_jsonl as _append_jsonl   # v3.93
+        await asyncio.to_thread(_append_jsonl, TRADE_LOG_PATH, record)
     except Exception as e:
         logger.error(f"[pm] trade_log 写入失败: {e}")
 
@@ -2340,21 +2340,9 @@ async def _close_position_post_static(
                     _min_l = min((float(k[3]) for k in _klines), default=sl_px)
                     _sl_q  = "noise" if _min_l <= entry_px else "valid"
                 # 回写到 trade_log
-                from pathlib import Path as _Path
-                _lp = _Path(log_path)
-                if not _lp.exists(): return
-                _lines = _lp.read_text().splitlines()
-                _new = []
-                for _line in _lines:
-                    try:
-                        _rec = _j.loads(_line)
-                        if _rec.get("trade_id") == trade_id:
-                            _rec["sl_quality"] = _sl_q
-                            _line = _j.dumps(_rec, ensure_ascii=False)
-                    except Exception:
-                        pass
-                    _new.append(_line)
-                _lp.write_text("\n".join(_new) + "\n")
+                # v3.93: 锁内读-改-写 + .tmp/os.replace 原子替换，防止覆盖并发追加的记录
+                from shared.trade_log_io import update_jsonl_field as _update_jsonl_field
+                _update_jsonl_field(log_path, "trade_id", trade_id, "sl_quality", _sl_q)
             except Exception:   # [v3.87 STEP7-5] 去掉未使用的异常变量 _e
                 pass  # 后台任务失败不影响主流程
         _thr.Thread(
@@ -2830,8 +2818,9 @@ async def _generate_daily_report():
     records = []
     try:
         if TRADE_LOG_PATH.exists():
-            with open(TRADE_LOG_PATH, encoding="utf-8") as f:
-                for line in f:
+            from shared.trade_log_io import read_lines as _read_lines   # v3.93: 移出事件循环
+            if True:
+                for line in await asyncio.to_thread(_read_lines, TRADE_LOG_PATH):
                     line = line.strip()
                     if not line: continue
                     r = json.loads(line)
@@ -4624,8 +4613,8 @@ async def _pending_cancel(pos: dict, reason: str, pid: str, symbol: str,
                 "sl_degraded":  pos.get("sl_degraded", False),
                 "signal_strength": pos.get("signal_strength", "medium"),
             }
-            with open(_log_path, "a") as _f:
-                _f.write(_json.dumps(_missed_entry, ensure_ascii=False) + "\n")
+            from shared.trade_log_io import append_jsonl as _append_jsonl   # v3.93
+            await asyncio.to_thread(_append_jsonl, _log_path, _missed_entry, None)
             logger.info(
                 f"[pending_health] {symbol} oi_div 幽灵限价单记录: "
                 f"entry={pos.get('entry_price')} reason={reason}"
