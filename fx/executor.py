@@ -1620,7 +1620,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
             _RR_NORM, _RR_HIGH = 2.0, 1.5
         _tier_rr = signal.get("volatility_tier", "mid")
         _rr_min  = _RR_HIGH if _tier_rr == "high" else _RR_NORM
-        if _rr_ratio < _rr_min:
+        if round(_rr_ratio, 4) < _rr_min:
             logger.warning(
                 f"[executor] {symbol} 盈亏比不足: TP1距离={_rr_tp1/entry_price*100:.1f}% "
                 f"SL距离={_rr_sl/entry_price*100:.1f}% RR={_rr_ratio:.2f}x < {_rr_min:.1f}(tier={_tier_rr})，拒绝开仓"
