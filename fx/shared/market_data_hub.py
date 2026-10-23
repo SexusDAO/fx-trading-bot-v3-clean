@@ -555,7 +555,7 @@ class MarketDataHub:
             first = False
             try:
                 async with websockets.connect(
-                    self._url, ping_interval=PING_INTERVAL, ping_timeout=10, proxy=_PROXY, max_queue=64,
+                    self._url, ping_interval=30, ping_timeout=60, proxy=_PROXY, max_queue=64,
                 ) as ws:
                     self._connected = True
                     delay = RECONNECT_BASE
@@ -592,7 +592,7 @@ class MarketDataHub:
             first = False
             try:
                 async with websockets.connect(
-                    self._market_url, ping_interval=PING_INTERVAL, ping_timeout=10, proxy=_PROXY, max_queue=256,
+                    self._market_url, ping_interval=30, ping_timeout=60, proxy=_PROXY, max_queue=256,
                 ) as ws:
                     self._shards[idx].connected = True
                     delay = RECONNECT_BASE
@@ -699,12 +699,14 @@ class MarketDataHub:
             st.loading = False
             if not isinstance(rows, list) or not rows:
                 st.retry_at = self._wall() + KLINE_RETRY_SEC
+                logger.warning(f"[hub] 历史K线拉取返回空 {sym} {iv}，30s后重试")
                 return
             new = [list(r) for r in rows]
             iv_ms = _INTERVAL_MS[iv]
             for pr in st.pending:                    # 合并拉取期间收到的推送
                 _upsert(new, pr, iv_ms)
             st.rows, st.pending = new, []
+        logger.info(f"[hub] 历史K线就绪 {sym} {iv} ({len(new)}根)")
 
 
 def _fmt(v) -> str:
