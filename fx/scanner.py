@@ -2667,8 +2667,10 @@ def _filter_and_register_signals(
             logger.info(f"[scanner] {sig['symbol']} post_shock_adj={post_shock_adj:+d}")
 
         # ── v3.46 中波动档评分惩罚 ──────────────────────────────────────────
-        from config import ATR_TIER_MID_SCORE_ADJ
-        _vol_tier = sig["ind"].get("_vol_tier", "high")
+        from config import ATR_TIER_MID_SCORE_ADJ, ATR_TIER_HIGH_MIN as _AHM_S, ATR_TIER_MID_MIN as _AMM_S
+        # 用 atr_ratio 自算波动档（与 judge 分档一致），不读 ind["_vol_tier"] 残留值
+        _atr_r_s = float(sig["ind"].get("atr_ratio", 0) or 0)
+        _vol_tier = "high" if _atr_r_s >= _AHM_S else ("mid_vol" if _atr_r_s >= _AMM_S else "low")
         atr_tier_adj = ATR_TIER_MID_SCORE_ADJ if _vol_tier == "mid_vol" else 0
         if atr_tier_adj:
             logger.info(f"[scanner] {sig['symbol']} atr_tier_adj={atr_tier_adj:+d} (mid_vol档)")

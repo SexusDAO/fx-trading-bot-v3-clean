@@ -1262,7 +1262,8 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
     #         真正瓶颈是chg24>=+8%出现频率极低，导致SHORT方向从未触发。
     # 修复：SHORT 主通道收紧 RSI 要求（>65），同时放宽 chg24 门槛（+5%）；
     #       RSI1H 补充通道也对称放宽（chg24>=4%，RSI1H>72仍保留）。
-    if chg24 <= _rev_chg24_long and rsi_4h < 40:   # [10-A] 55→40 对齐精筛（高波动档精筛仍要求 <30）
+    _rev_rsi4h_long_entry = 30 if tier == "high" else 40   # [#11] 与精筛 rsi_long_thresh 同一分档（_volatility_tier），high <30、其余 <40
+    if chg24 <= _rev_chg24_long and rsi_4h < _rev_rsi4h_long_entry:
         direction = "LONG"
         _rsi1h_channel = False
     elif chg24 >= _rev_chg24_short and rsi_4h > 65:   # [10-B] 读按档位的动态门槛
