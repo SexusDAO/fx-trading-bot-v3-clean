@@ -94,6 +94,8 @@ def advance(hub, sym, iv, close=None, high=None, low=None, vol=None):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
+    import config as _c
+    monkeypatch.setattr(_c, "TRIGGER_DISPATCH_ENABLED", False, raising=False)   # 影子触发逻辑单测：隔离派发开关（生产默认已开启）
     ind = {"rsi": 50.0}
     monkeypatch.setattr(td, "_rsi", lambda c: ind["rsi"])
     clk = Clock()
@@ -684,8 +686,8 @@ def test_reconcile_oi_counted_separately(env, caplog):
     assert any("OI来自缓存" in m for m in caplog.messages)
 
 
-def test_disabled_by_default():
+def test_disabled_by_default(monkeypatch):
     import config
-    assert config.TRIGGER_DETECTOR_ENABLED is False
+    monkeypatch.setattr(config, "TRIGGER_DETECTOR_ENABLED", False)   # 生产默认已改为 True，此处验证关闭时行为
     td._default = None
     assert td.create() is None
