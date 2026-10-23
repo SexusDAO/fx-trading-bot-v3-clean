@@ -705,12 +705,12 @@ class SignalWatcher:
                     # ── 清理 pos_state 残留（否则 get_pending_count 会虚高）──
                     try:
                         from shared.state import get_all_positions as _gap, remove_position as _rmp
-                        _old_recs = [p for p in _gap()
+                        _old_recs = [p for p in (await asyncio.to_thread(_gap))
                                      if p.get("symbol") == old_sym and p.get("status") == "pending"]
                         if _old_recs:
                             # [v3.89 remove-pos 检查] 检查返回值，失败只记日志
                             try:
-                                if _rmp(_old_recs[0]["pos_id"]) is False:
+                                if (await asyncio.to_thread(_rmp, _old_recs[0]["pos_id"])) is False:
                                     logger.warning("[signal_watcher] remove_position(%s) 返回 False，pos_state 未写入成功，请人工核查" % _old_sym)
                             except Exception as _re:
                                 logger.error("[signal_watcher] remove_position(%s) 抛异常，持仓文件可能损坏，请人工核查: %s" % (_old_sym, _re))
@@ -746,7 +746,7 @@ class SignalWatcher:
                 # [fix] 只进缓冲区（buffer_signal），不 flush：等 _trigger 里价格触发后再 flush 合并发出
                 #   未触发就过期/被淘汰 → discard_signal 静默丢弃，不会产生幽灵卡片
                 buffer_signal(_sig_id, _header)
-                card_append(_sig_id, _monitor_line)
+                (await asyncio.to_thread(card_append, _sig_id, _monitor_line))
             except Exception as _ne:
                 logger.debug(f"[signal_watcher] 信号卡片创建失败（非致命）: {_ne}")
 
@@ -916,11 +916,9 @@ class SignalWatcher:
                                         s for s, e in self._watched.items()
                                         if not e.triggered and not e.is_expired()
                                     ) or '无'
-                                    _btc_ntf(
-                                        f"⚡ BTC 5分钟急{_direction} {_move*100:.1f}%\n"
+                                    (await asyncio.to_thread(_btc_ntf, f"⚡ BTC 5分钟急{_direction} {_move*100:.1f}%\n"
                                         f"已撤销全部 {_cnt} 个待触发监控\n"
-                                        f"{_sym_list}"
-                                    )
+                                        f"{_sym_list}"))
                                 except Exception:
                                     pass
 
@@ -929,7 +927,7 @@ class SignalWatcher:
                                 from shared.state import get_all_positions as _gap_btc
                                 import position_manager as _pm_mod
                                 _open_pos = [
-                                    p for p in _gap_btc()
+                                    p for p in (await asyncio.to_thread(_gap_btc))
                                     if p.get("status") == "open"
                                     and p.get("sig_type") not in ("funding_arb",)
                                 ]
@@ -954,7 +952,7 @@ class SignalWatcher:
                             #             SL 可能已经高于当前价（本应触发但漏报）
                             try:
                                 from shared.state import get_all_positions as _gap2
-                                _open2 = [p for p in _gap2() if p.get("status") == "open"
+                                _open2 = [p for p in (await asyncio.to_thread(_gap2)) if p.get("status") == "open"
                                           and p.get("sig_type") not in ("funding_arb",)]
                                 for _p2 in _open2:
                                     _sym2 = _p2.get("symbol","")
@@ -1072,7 +1070,7 @@ class SignalWatcher:
             self._open_pos_ts = now
             try:
                 from shared.state import get_all_positions as _gap
-                self._open_pos_cache = [p_ for p_ in _gap() if p_.get("status") == "open"]
+                self._open_pos_cache = [p_ for p_ in (await asyncio.to_thread(_gap)) if p_.get("status") == "open"]
             except Exception:
                 pass
         for p_ in self._open_pos_cache:
@@ -1174,7 +1172,7 @@ class SignalWatcher:
             # 防止 WebSocket 延迟导致触发价与当前价偏离过大（高波动行情常见）
             _skip = False
             try:
-                _mp = _get_hub_or_rest(symbol, "mark")   # [v2-1] 每次取最新 markPrice
+                _mp = (await asyncio.to_thread(_get_hub_or_rest, symbol, "mark"))   # [v2-1] 每次取最新 markPrice
                 _mark_now = float(_mp.get("markPrice", 0))
                 # 用 WebSocket 实际触发时的 price（函数参数），而非预算入场价
                 _trigger_p = price   # _trigger(symbol, price, entry) 里的 price
@@ -1426,7 +1424,7 @@ class SignalWatcher:
             try:
                 # [fix #27] 与 executor 相同的取整逻辑；成功判断改为检查返回的 algoId 是否有效
                 from executor import _get_precision, _round_price, _round_qty
-                _prec = _get_precision(symbol)
+                _prec = (await asyncio.to_thread(_get_precision, symbol))
                 sl_r  = _round_price(sl, _prec["tick"])
                 qty_r = _round_qty(abs(amt), _prec["step"])
                 if sl_r <= 0 or qty_r <= 0:
@@ -1934,7 +1932,7 @@ class SignalWatcher:
             # 新闻豁免 / 否决（v3.8 + caution v3.10）
             if not exempt and _SW_NEWS_OK:
                 try:
-                    _nb = _sw_get_news_bias(sym.replace('USDT', ''))
+                    _nb = (await asyncio.to_thread(_sw_get_news_bias, sym.replace('USDT', '')))
                     if _nb == 'bullish':
                         exempt = True
                         exempt_reason = f'利好新闻豁免 BTC空头撤单 (news_bias=bullish)'
@@ -2343,7 +2341,7 @@ class SignalWatcher:
         # [v3.90 通知聚合] 每轮 GC 兜底 flush 超时未决的信号缓冲
         try:
             from shared.notifier import tick_signal_buffer
-            tick_signal_buffer()
+            (await asyncio.to_thread(tick_signal_buffer))
         except Exception as _tb_e:
             logger.debug(f"[signal_watcher] 信号缓冲兜底 flush 失败: {_tb_e}")
 
