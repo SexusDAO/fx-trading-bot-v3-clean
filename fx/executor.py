@@ -1334,6 +1334,7 @@ def _write_position(
         # ── 推送卡片 ID（供 position_manager 追加进展行用）───────────────────
         "_sig_id":              signal.get("_sig_id", ""),
     }
+    _pos_rec["initial_sl_distance"] = abs(float(_pos_rec["entry_price"]) - float(_pos_rec["sl_price"]))
     if not _persist_position_record(_pos_rec, "position"):
         return None   # [v3.89 #52] 未落盘：不写交易日志/冷却，不返回假 pos_id
     _append_trade_log(pos_id, signal, fill_price, fill_qty, params)

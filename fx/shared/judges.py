@@ -1121,8 +1121,9 @@ def _judge_breakout_impl(k1h, k4h, k15, ind, chg24, funding):
     oi_strong   = (out.get("oi_change_pct") or 0) >= (5 if tier != "high" else 8)
     rsi_healthy = (50 <= rsi_1h <= 65) if direction == "LONG" else (35 <= rsi_1h <= 50)
     # v3.6: 数据缺失时不计 liq_clear 分（原 None→0→True 默认乐观）
-    _liq_above = out.get("liq_pressure_above")
-    liq_clear  = (_liq_above is not None) and (_liq_above < 5_000_000)
+    # 做多看上方清算压力，做空看下方清算压力（按方向取对应字段）
+    _liq_press = out.get("liq_pressure_above") if direction == "LONG" else out.get("liq_pressure_below")
+    liq_clear  = (_liq_press is not None) and (_liq_press < 5_000_000)
 
     strong_count = sum([vol_strong, oi_strong, rsi_healthy, liq_clear])
     # v3.6: OI 缓存缺失时信号强度上限为 medium
@@ -3850,7 +3851,7 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
             _closes_4h = [float(k[4]) for k in k4h[:-1]]
             if len(_closes_4h) >= 99:
                 ema99_4h = _ema_calc(_closes_4h, 99)
-                ma99_ok  = ema50_4h > ema99_4h > 0
+                ma99_ok  = (ema50_4h > ema99_4h > 0) if _ema_direction == "long" else (0 < ema50_4h < ema99_4h)
         except Exception:
             pass
     out["ema99_4h"] = round(ema99_4h, 6)
@@ -3930,9 +3931,14 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
         out["trigger_bar"] = _trig
 
     # ── 7. 资金费率不能极端负（空头挤压环境不适合做多趋势跟随） ───────────
-    if funding < -0.0005:
+    if _ema_direction == "long" and funding > 0.0005:
         out["reject_reason"] = (
-            f"资金费率极端负: {funding*100:.4f}%，空头持续付费可能引发强制平仓雪崩"
+            f"资金费率过高: {funding*100:.4f}% > 0.05%，多头持仓成本过大"
+        )
+        return False, out
+    if _ema_direction == "short" and funding < -0.0005:
+        out["reject_reason"] = (
+            f"资金费率极端负: {funding*100:.4f}% < -0.05%，空头被挤压风险"
         )
         return False, out
 
