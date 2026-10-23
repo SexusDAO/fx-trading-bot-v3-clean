@@ -96,7 +96,12 @@ def test_time_stop_still_uses_rest_position_query():
     ("_close", "api.get_mark_price(symbol)"),                       # 平仓路径：不改
 ])
 def test_money_paths_untouched(fn, needle):
-    assert needle in func_body(fn), f"{fn} 应保持 {needle}"
+    body = func_body(fn)
+    # 允许改为 asyncio.to_thread(api.xxx, args) 形式（仍走 REST，只是不阻塞事件循环）
+    _name, _args = needle.split("(", 1)
+    _args = _args[:-1]
+    _thread_form = f"asyncio.to_thread({_name}, {_args})" if _args else f"asyncio.to_thread({_name})"
+    assert needle in body or _thread_form in body, f"{fn} 应保持 {needle}"
 
 
 def test_scanner_subscribes_positions_and_btc_too():
