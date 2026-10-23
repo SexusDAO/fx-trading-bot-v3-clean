@@ -2024,10 +2024,19 @@ def refresh_pool() -> list:
         _scores = _pool_scores(usdt, _vol_top, _gain_syms | _loss_syms, _liq_syms)
 
         # ── 第三步：按评分降序（同分按成交额降序），截断到 SCAN_POOL_MAX ───────
-        _ranked = sorted(usdt, key=lambda t: (-_scores[t["symbol"]], -float(t.get("quoteVolume", 0))))
-        pool = [t["symbol"] for t in _ranked[:int(SCAN_POOL_MAX)]]
+        # 评分>0 的标的优先全部入池（降序，同分按成交额），0 分标的只在有剩余槽位时按成交额补入
+        _vol_key = lambda t: -float(t.get("quoteVolume", 0))
+        pool_scored = sorted([t for t in usdt if _scores[t["symbol"]] > 0],
+                             key=lambda t: (-_scores[t["symbol"]], _vol_key(t)))
+        pool_zero   = sorted([t for t in usdt if _scores[t["symbol"]] <= 0], key=_vol_key)
+        _ranked = list(pool_scored)
+        if len(_ranked) < int(SCAN_POOL_MAX):
+            _ranked += pool_zero[:int(SCAN_POOL_MAX) - len(_ranked)]
+        _ranked = _ranked[:int(SCAN_POOL_MAX)]
+        pool = [t["symbol"] for t in _ranked]
         logger.info(f"[scanner] 候选池评分: 粗筛通过 {len(coarse)}，合格 {len(usdt)}，入池 {len(pool)}，"
-                    f"其中评分>0 {sum(1 for t in _ranked[:int(SCAN_POOL_MAX)] if _scores[t['symbol']] > 0)} 个")
+                    f"其中评分>0 {sum(1 for t in _ranked if _scores[t['symbol']] > 0)} 个"
+                    f"（评分>0 共 {len(pool_scored)}，0 分补入 {max(0, len(pool) - len(pool_scored))}）")
 
         POOL_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         POOL_CACHE_FILE.write_text(json.dumps({
