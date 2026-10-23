@@ -702,6 +702,8 @@ async def _verify_hedge_mode_or_exit() -> None:
 
 async def main() -> None:
     logger.info("[main] fx 交易系统 V3.0 启动")
+    import config as _cfg_req
+    _cfg_req.require_env()   # [fix #39] 必填项缺失直接报错退出
     await _verify_hedge_mode_or_exit()
 
     # ── 临时诊断（定位后删除）────────────────────────────────────────────────

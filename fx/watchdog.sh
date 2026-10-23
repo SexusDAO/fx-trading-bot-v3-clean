@@ -43,10 +43,11 @@ send_telegram() {
     token=$(echo "$cfg" | awk '{print $1}')
     chat_id=$(echo "$cfg" | awk '{print $2}')
     [ -z "$token" ] || [ -z "$chat_id" ] && return
-    python3 -c "
-import urllib.request, json
-token='$token'; chat_id='$chat_id'
-msg='$msg'
+    # [fix #39] 令牌与消息经环境变量传入，不拼进命令行（避免 ps 可见与引号注入）
+    TG_TOKEN="$token" TG_CHAT_ID="$chat_id" TG_MSG="$msg" python3 -c "
+import urllib.request, json, os
+token=os.environ['TG_TOKEN']; chat_id=os.environ['TG_CHAT_ID']
+msg=os.environ['TG_MSG']
 payload=json.dumps({'chat_id':chat_id,'text':msg}).encode()
 req=urllib.request.Request(
     f'https://api.telegram.org/bot{token}/sendMessage',

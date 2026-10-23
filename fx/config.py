@@ -26,6 +26,17 @@ if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         "任何需要签名的 API 调用都会失败。"
     )
 
+# [fix #39] 必填环境变量：启动时（main.py）缺失直接报错退出；导入 config 本身不报错，便于测试/回测。
+REQUIRED_ENV_VARS = ("BINANCE_API_KEY", "BINANCE_API_SECRET", "BINANCE_PROXY", "OPENAI_API_KEY", "OPENAI_BASE_URL")
+
+
+def require_env() -> None:
+    """缺失任一必填环境变量时抛 RuntimeError。"""
+    missing = [k for k in REQUIRED_ENV_VARS if not os.environ.get(k)]
+    if missing:
+        raise RuntimeError(f"缺少必填环境变量: {', '.join(missing)}（参见 fx/.env.example）")
+
+
 # ── SOCKS5 代理 ────────────────────────────────────────────────────────────────
 PROXY_URL = os.environ.get("PROXY_URL", "")  # socks5://user:pass@host:port
 PROXIES   = {"http": PROXY_URL, "https": PROXY_URL}
