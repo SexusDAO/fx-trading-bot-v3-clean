@@ -705,7 +705,9 @@ class MarketDataHub:
             async with self._fetch_sem:
                 rows = await asyncio.get_running_loop().run_in_executor(_LOAD_POOL, self._fetch, sym, iv, KLINE_HISTORY)
         except Exception as e:
-            logger.warning(f"[hub] 历史K线拉取失败 {sym} {iv}: {e}")
+            # 日志丢线程池：避免 RotatingFileHandler 文件 I/O 阻塞 hub 事件循环
+            asyncio.get_running_loop().run_in_executor(None, logger.warning, f"[hub] 历史K线拉取失败 {sym} {iv}: {e}")
+        _empty = False
         with self._kl_lock:
             st = self._series.get(key)
             if st is None or gen != self._shards[min(st.shard, self._nshards - 1)].gen:
@@ -713,14 +715,18 @@ class MarketDataHub:
             st.loading = False
             if not isinstance(rows, list) or not rows:
                 st.retry_at = self._wall() + KLINE_RETRY_SEC
-                logger.warning(f"[hub] 历史K线拉取返回空 {sym} {iv}，30s后重试")
-                return
-            new = [list(r) for r in rows]
-            iv_ms = _INTERVAL_MS[iv]
-            for pr in st.pending:                    # 合并拉取期间收到的推送
-                _upsert(new, pr, iv_ms)
-            st.rows, st.pending = new, []
-        logger.info(f"[hub] 历史K线就绪 {sym} {iv} ({len(new)}根)")
+                _empty = True                        # 锁内只记标志，日志在锁外丢线程池
+            else:
+                new = [list(r) for r in rows]
+                iv_ms = _INTERVAL_MS[iv]
+                for pr in st.pending:                # 合并拉取期间收到的推送
+                    _upsert(new, pr, iv_ms)
+                st.rows, st.pending = new, []
+        _loop = asyncio.get_running_loop()
+        if _empty:
+            _loop.run_in_executor(None, logger.warning, f"[hub] 历史K线拉取返回空 {sym} {iv}，30s后重试")
+            return
+        _loop.run_in_executor(None, logger.info, f"[hub] 历史K线就绪 {sym} {iv} ({len(new)}根)")
 
 
 def _fmt(v) -> str:
