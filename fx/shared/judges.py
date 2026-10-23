@@ -780,7 +780,8 @@ def _reversal_signal_15m(k15: list, direction: str) -> str | None:
             # 阳包阴
             if i > 0:
                 pc = float(recent[i-1][4]); po = float(recent[i-1][1])
-                if c > po and o < pc:
+                # 看涨吞没：前阴（pc<po）+ 本阳（c>o）+ 实体覆盖
+                if pc < po and c > o and c > po and o < pc:
                     return "engulfing"
             # two_candles 已移除：连续双阳出现频率过高，不具备有效止跌意义
         else:  # SHORT
@@ -790,7 +791,8 @@ def _reversal_signal_15m(k15: list, direction: str) -> str | None:
             # 阴包阳
             if i > 0:
                 pc = float(recent[i-1][4]); po = float(recent[i-1][1])
-                if c < po and o > pc:
+                # 看跌吞没：前阳（pc>po）+ 本阴（c<o）+ 实体覆盖
+                if pc > po and c < o and c < po and o > pc:
                     return "engulfing_bear"
             # two_bear_candles 已移除：连续双阴出现频率过高，不具备有效止涨意义
     return None
