@@ -167,6 +167,27 @@ class TestJudgePullback:
 # ═══════════════════════════════════════════════════════════════════════════════
 class TestJudgeBreakout:
 
+    @pytest.fixture(autouse=True)
+    def _relax_chase_cap(self, monkeypatch):
+        # 合成突破K线收在 ref_high 上方约 2.9ATR；原有用例测的是量能/RSI/确认逻辑，这里放宽追入上限
+        import config
+        monkeypatch.setattr(config, "BREAKOUT_MAX_CHASE_ATR", 10.0, raising=False)
+
+    def test_breakout_rejects_chase_too_far(self, monkeypatch):
+        """突破后追入距离超过 BREAKOUT_MAX_CHASE_ATR 时拒绝"""
+        import config
+        monkeypatch.setattr(config, "BREAKOUT_MAX_CHASE_ATR", 2.0, raising=False)
+        k1h = self._make_breakout_k1h()
+        k4h = _flat_k1h(49000)
+        k15 = self._make_confirm_k15(51000)
+        ind = _ind(price=51150, atr=630, rsi_1h=60, vol_ma20=1000, oi_now=120000)
+        with patch("shared.state._load_oi_cache", return_value={
+            "BTCUSDT": [{"ts": time.time()-900, "oi": 110000}]
+        }), patch("shared.coinglass_api.get_liq_zones", return_value=[]):
+            ok, out = judge_breakout(k1h, k4h, k15, ind, chg24=3.5, funding=0.0003)
+        assert ok is False
+        assert "追入距离" in (out.get("reject_reason") or "")
+
     def _make_breakout_k1h(self, base=49000, breakout_price=51000):
         """生成包含突破K线的序列（至少12根，满足 judge_breakout 要求）"""
         k = []

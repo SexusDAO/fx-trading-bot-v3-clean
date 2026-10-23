@@ -455,7 +455,7 @@ def _entry_breakout(mark: float, atr: float,
         try:
             from config import ORDER_ENTRY_RANDOMIZE, ORDER_ENTRY_RANDOM_ATR
             if ORDER_ENTRY_RANDOMIZE and atr > 0:
-                entry = entry + random.uniform(0, ORDER_ENTRY_RANDOM_ATR) * atr
+                entry = entry + random.uniform(-ORDER_ENTRY_RANDOM_ATR, ORDER_ENTRY_RANDOM_ATR) * atr   # 双向偏移
         except Exception:
             pass
     else:
@@ -464,7 +464,7 @@ def _entry_breakout(mark: float, atr: float,
         try:
             from config import ORDER_ENTRY_RANDOMIZE, ORDER_ENTRY_RANDOM_ATR
             if ORDER_ENTRY_RANDOMIZE and atr > 0:
-                entry = entry - random.uniform(0, ORDER_ENTRY_RANDOM_ATR) * atr
+                entry = entry - random.uniform(-ORDER_ENTRY_RANDOM_ATR, ORDER_ENTRY_RANDOM_ATR) * atr   # 双向偏移
         except Exception:
             pass
     return entry, "immediate"

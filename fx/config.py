@@ -290,6 +290,7 @@ DEFAULT_LEVERAGE = 10
 
 # 挂单超时
 ORDER_EXPIRE_BREAKOUT_MIN = 30    # 动量突破挂单超时，分钟
+BREAKOUT_MAX_CHASE_ATR = 2.0      # 突破后最多追入2ATR，超过不开仓
 ORDER_EXPIRE_PULLBACK_MIN = 240   # 回踩/反转挂单超时，分钟
 
 # 扫描超时保护

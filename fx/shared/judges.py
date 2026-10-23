@@ -1029,6 +1029,10 @@ def _judge_breakout_impl(k1h, k4h, k15, ind, chg24, funding):
         out["4h_trend_gap"] = round(_4h_gap_bo, 2)
 
     # 条件一:有效突破
+    try:
+        from config import BREAKOUT_MAX_CHASE_ATR as _MAX_CHASE
+    except Exception:
+        _MAX_CHASE = 2.0
     if direction == "LONG":
         margin = atr * margin_mult
         if breakout_close <= ref_high or breakout_close < ref_high + margin:
@@ -1036,6 +1040,10 @@ def _judge_breakout_impl(k1h, k4h, k15, ind, chg24, funding):
             return False, out
         out["breakout_margin_atr"] = round((breakout_close - ref_high) / (atr + 1e-9), 3)
         out["breakout_entry_price"] = ref_high
+        _chase = (price - ref_high) / (atr + 1e-9)
+        if _chase > _MAX_CHASE:
+            out["reject_reason"] = f"追入距离{_chase:.1f}ATR超过上限{_MAX_CHASE}ATR"
+            return False, out
     else:
         margin = atr * margin_mult
         if breakout_close >= ref_low or breakout_close > ref_low - margin:
@@ -1043,6 +1051,10 @@ def _judge_breakout_impl(k1h, k4h, k15, ind, chg24, funding):
             return False, out
         out["breakout_margin_atr"] = round((ref_low - breakout_close) / (atr + 1e-9), 3)
         out["breakout_entry_price"] = ref_low
+        _chase = (ref_low - price) / (atr + 1e-9)
+        if _chase > _MAX_CHASE:
+            out["reject_reason"] = f"追入距离{_chase:.1f}ATR超过上限{_MAX_CHASE}ATR"
+            return False, out
 
     # 条件二:成交量验证
     vol_ratio = breakout_vol / (pre20_vol_ma + 1e-9)
