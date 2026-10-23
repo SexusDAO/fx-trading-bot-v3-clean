@@ -109,7 +109,25 @@ _SYSTEM_PROMPT = (
 # 核心调用函数（双路径，速度优先）
 # ══════════════════════════════════════════════════════════════════════════════
 
+LLM_CALL_TOTAL_TIMEOUT = 60.0   # [fix #35b] 单次 LLM 调用总超时（秒）
+_LLM_POOL = None
+
+
 def _call_llm(prompt: str, max_tokens: int = 60, model: str = None) -> Optional[dict]:
+    """[fix #35b] 总超时 60s：超时返回 None，调用方按既有 fallback 使用默认分值，并记 WARNING。"""
+    global _LLM_POOL
+    import concurrent.futures as _cf
+    if _LLM_POOL is None:
+        _LLM_POOL = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="llm-call")
+    fut = _LLM_POOL.submit(_call_llm_inner, prompt, max_tokens, model)
+    try:
+        return fut.result(timeout=LLM_CALL_TOTAL_TIMEOUT)
+    except _cf.TimeoutError:
+        logger.warning(f"[llm_judge] LLM 调用超过 {LLM_CALL_TOTAL_TIMEOUT:.0f}s 未返回，跳过 LLM 评分，使用默认分值")
+        return None
+
+
+def _call_llm_inner(prompt: str, max_tokens: int = 60, model: str = None) -> Optional[dict]:
     """
     调用 LLM，返回解析后的 JSON dict。失败返回 None。
 
