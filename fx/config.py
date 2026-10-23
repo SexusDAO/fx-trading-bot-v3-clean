@@ -159,6 +159,20 @@ EXPIRE_BREAKOUT_MIN            = 30    # breakout 信号有效期（分钟）
 WEEKEND_AMP_PROXY_MIN          = 0.8   # 周末振幅代理最低门槛（%）
 WEEKEND_SCORE_CAP              = 85    # 周末评分上限（80→85，保留 hub 加分空间）
 MIN_SIGNAL_SCORE_WEEKEND       = 70    # 周末最低信号分（已有逻辑，此处参数化）
+# ── v3.92 周末模式实盘改造（scanner._filter_and_register_signals / run_funding_arb_scan 读取）──
+WEEKEND_MIN_SCORE_STRONG          = 60   # 周末 strong 信号门槛（维持原值）
+WEEKEND_MIN_SCORE_MEDIUM_DEFAULT  = 70   # 周末 medium 默认门槛（reversal/range_bounce/oi_divergence/breakout 等）
+WEEKEND_MIN_SCORE_MEDIUM_PULLBACK = 60   # 周末 pullback medium 门槛
+WEEKEND_MIN_SCORE_MEDIUM_EMA      = 60   # 周末 ema_trend medium 门槛
+WEEKEND_CUTOFF_SUNDAY_UTC_HOUR    = 17   # 周日 UTC 此时起不再注册新信号（主扫描 + funding_arb）
+WEEKEND_MAX_NEW_POSITIONS         = 3    # 整个周末累计注册信号上限（两条路径共用，按注册计，不持久化）
+WEEKEND_SIGNAL_EXPIRE_CUTOFF_HOUR = 17   # 周日 UTC 信号到期时间不得晚于此（breakout 除外）
+WEEKEND_POSITION_SCALE_STRONG     = 0.75 # 周末 strong 仓位上限系数（所有仓位调整之后最后乘）
+WEEKEND_POSITION_SCALE_MEDIUM     = 0.50 # 周末 medium 仓位上限系数
+WEEKEND_FUNDING_ARB_SCALE         = 0.50 # 周末 funding_arb 仓位上限系数
+WEEKEND_BREAKOUT_MEDIUM_VOL_MIN   = 3.0  # 周末 medium breakout 放开所需量比（reason.volume_ratio）
+WEEKEND_BREAKOUT_MEDIUM_OI_REQD   = True # True = OI 确认（reason.oi_confirm）也可放开
+WEEKEND_EXPIRE_LOW_VOL_H          = 4    # 周末低波动档（atr_ratio<EXPIRE_LOW_VOL_THRESH）有效期 8H→4H
 # signal_strength → base_score 映射
 SCORE_BASE_STRONG              = 70
 SCORE_BASE_MEDIUM              = 50

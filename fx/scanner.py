@@ -488,6 +488,47 @@ def _is_weekend_period(now: datetime) -> bool:
     return False
 
 
+# ── v3.92 周末新开仓计数器（主扫描 + funding_arb 共用；按注册计，进程内存，不持久化）──
+_WEEKEND_POS_COUNT = 0
+_WEEKEND_WINDOW_START = 0.0   # 当前周末窗口起点（UTC 周五 22:00）时间戳
+
+
+def _weekend_window_start_ts(now: datetime) -> float:
+    """返回 now 所在周末窗口的起点（UTC 周五 22:00）时间戳；调用方需保证 now 处于周末。"""
+    from datetime import timedelta as _td
+    _n = now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    _days_back = (_n.isoweekday() - 5) % 7
+    _fri = (_n - _td(days=_days_back)).replace(hour=22, minute=0, second=0, microsecond=0)
+    if _fri > _n:
+        _fri -= _td(days=7)
+    return _fri.timestamp()
+
+
+def _weekend_counter_sync(now: datetime) -> int:
+    """进入新周末窗口时归零计数器，返回当前计数。"""
+    global _WEEKEND_POS_COUNT, _WEEKEND_WINDOW_START
+    if not _is_weekend_period(now):
+        return _WEEKEND_POS_COUNT
+    _ws = _weekend_window_start_ts(now)
+    if _ws != _WEEKEND_WINDOW_START:
+        _WEEKEND_WINDOW_START = _ws
+        _WEEKEND_POS_COUNT = 0
+    return _WEEKEND_POS_COUNT
+
+
+def _weekend_counter_inc() -> int:
+    global _WEEKEND_POS_COUNT
+    _WEEKEND_POS_COUNT += 1
+    return _WEEKEND_POS_COUNT
+
+
+def _is_weekend_cutoff(now: datetime) -> bool:
+    """周日 UTC WEEKEND_CUTOFF_SUNDAY_UTC_HOUR 起为收尾时段，不再注册新信号。"""
+    from config import WEEKEND_CUTOFF_SUNDAY_UTC_HOUR
+    return (_is_weekend_period(now) and now.isoweekday() == 7
+            and now.hour >= WEEKEND_CUTOFF_SUNDAY_UTC_HOUR)
+
+
 def _vol_ratio_closed(k1hc: list) -> float:
     """最后一根已收盘 1H 量 ÷ 其前 20 根已收盘 1H 均量；数据不足返回 1.0。"""
     try:
@@ -2240,6 +2281,11 @@ def _filter_and_register_signals(
     _post_shock = _bi["_post_shock"]
     _mark_price_map_ts = _bi["_mark_price_map_ts"]
     now = _bi["now"]
+    # ── v3.92 周日收尾：周日 UTC WEEKEND_CUTOFF_SUNDAY_UTC_HOUR 起不再注册新信号 ──
+    if _is_weekend_cutoff(now):
+        logger.info("[scanner] 周日收尾时段，不注册新信号")
+        return 0, []
+    _weekend_counter_sync(now)
     _loss_blacklist = _bi["_loss_blacklist"]
     _LOSS_THRESHOLD = _bi["_LOSS_THRESHOLD"]
     _mark_price_map = _bi["_mark_price_map"]
@@ -2786,7 +2832,19 @@ def _filter_and_register_signals(
             sc = sig["ind"].get("final_score", 0)
             _detail = sig.get("judge_detail") or sig.get("reason") or {}
             _strength = _detail.get("signal_strength", "medium")
-            _min_sc = 60 if _strength == "strong" else 70
+            # v3.92: 门槛参数化，medium 按策略分别控制
+            from config import (WEEKEND_MIN_SCORE_STRONG, WEEKEND_MIN_SCORE_MEDIUM_DEFAULT,
+                                WEEKEND_MIN_SCORE_MEDIUM_PULLBACK, WEEKEND_MIN_SCORE_MEDIUM_EMA)
+            if _strength == "strong":
+                _min_sc = WEEKEND_MIN_SCORE_STRONG
+            else:
+                _sig_type_w = sig.get("sig_type", "")
+                if _sig_type_w == "pullback":
+                    _min_sc = WEEKEND_MIN_SCORE_MEDIUM_PULLBACK
+                elif _sig_type_w == "ema_trend":
+                    _min_sc = WEEKEND_MIN_SCORE_MEDIUM_EMA
+                else:
+                    _min_sc = WEEKEND_MIN_SCORE_MEDIUM_DEFAULT
             if sc < _min_sc:
                 result["rejected"].append({"symbol": sig["symbol"],
                     "reason": f"周末低分过滤: score={sc}<{_min_sc}({_strength})"})
@@ -2808,6 +2866,17 @@ def _filter_and_register_signals(
                 _detail2 = sig.get("judge_detail") or sig.get("reason") or {}
                 _strength2 = _detail2.get("signal_strength", "medium")
                 if _strength2 != "strong":
+                    # v3.92 [2-C] medium breakout 有条件放开（量比≥阈值 或 OI 确认）
+                    from config import WEEKEND_BREAKOUT_MEDIUM_VOL_MIN, WEEKEND_BREAKOUT_MEDIUM_OI_REQD
+                    _bo_vr = float(_detail2.get("volume_ratio", 0) or 0)
+                    _bo_oi = bool(_detail2.get("oi_confirm", False))
+                    _vol_ok = _bo_vr >= WEEKEND_BREAKOUT_MEDIUM_VOL_MIN
+                    _oi_ok  = bool(WEEKEND_BREAKOUT_MEDIUM_OI_REQD) and _bo_oi
+                    if _strength2 == "medium" and (_vol_ok or _oi_ok):
+                        logger.info(f"[scanner] {sig['symbol']} 周末 breakout medium 有条件放开: "
+                                    f"vol_ratio={_bo_vr:.2f} oi_confirm={_bo_oi}")
+                        _weekend_filtered2.append(sig)
+                        continue
                     result["rejected"].append({
                         "symbol": sig["symbol"],
                         "reason": f"周末 breakout 仅允许 strong 信号，当前={_strength2}"
@@ -2893,12 +2962,39 @@ def _filter_and_register_signals(
             _cur_cap = _sig.get("position_size_cap", 0.5)
             _sig["position_size_cap"] = round(_cur_cap * _global_short_scale, 3)
             logger.debug(f"[scanner] {_sig['symbol']} 市场情绪做空降仓 cap {_cur_cap}→{_sig['position_size_cap']}")
+        # ── v3.92 [2-A] 周末仓位最后一乘（必须是本循环最后一次乘系数；强度按当前信号自身取）──
+        if _is_weekend:
+            from config import WEEKEND_POSITION_SCALE_STRONG, WEEKEND_POSITION_SCALE_MEDIUM
+            _w_str = (_sig.get("judge_detail") or _sig.get("reason") or {}).get("signal_strength", "medium")
+            _wknd_scale = WEEKEND_POSITION_SCALE_STRONG if _w_str == "strong" else WEEKEND_POSITION_SCALE_MEDIUM
+            _old_cap = _sig.get("position_size_cap", 0.5)
+            _sig["position_size_cap"] = round(_old_cap * _wknd_scale, 3)
+            logger.debug(f"[scanner] {_sig.get('symbol','')} 周末仓位缩减 "
+                         f"{_old_cap:.3f}→{_sig['position_size_cap']:.3f} (scale={_wknd_scale}, strength={_w_str})")
+            if _sig["position_size_cap"] < 0.15:
+                logger.warning(f"[scanner] {_sig.get('symbol','')} 周末仓位上限缩减后为 "
+                               f"{_sig['position_size_cap']:.3f}，可能触发 executor MIN_NOTIONAL_GUARD 拉回")
 
     # ── 第五步：输出给 executor（通过 SignalWatcher 或直接调用）───────────────────
     if source == "trigger" and not dry_run:
         for _ts in avail_signals:
             logger.warning(f"[TRIGGER-DISPATCH] 触发器信号即将下单 symbol={_ts.get('symbol')} "
                            f"strategy={_ts.get('sig_type')} direction={_ts.get('direction')}")
+    # ── v3.92 周末新开仓上限（按注册计）+ 周末标记 ────────────────────────
+    if _is_weekend and avail_signals:
+        from config import WEEKEND_MAX_NEW_POSITIONS
+        _wk_left = max(0, int(WEEKEND_MAX_NEW_POSITIONS) - _WEEKEND_POS_COUNT)
+        _wk_keep = []
+        for sig in avail_signals:
+            if len(_wk_keep) >= _wk_left:
+                logger.warning(f"[scanner] 周末开仓已达上限 {WEEKEND_MAX_NEW_POSITIONS} 笔，跳过 {sig['symbol']}")
+                result["rejected"].append({"symbol": sig["symbol"],
+                    "reason": f"周末开仓上限 {WEEKEND_MAX_NEW_POSITIONS} 笔已满"})
+                continue
+            sig["weekend_mode"] = True
+            _wk_keep.append(sig)
+        avail_signals = _wk_keep
+
     if not dry_run and avail_signals:
         if signal_watcher is not None:
             # 新路径：注册到 SignalWatcher，由实时价格驱动触发
@@ -2938,11 +3034,20 @@ def _filter_and_register_signals(
                         _atr_r = sig.get("ind", {}).get("atr_ratio", 3.0)
                         if _atr_r < EXPIRE_LOW_VOL_THRESH:
                             expire_sec = EXPIRE_LOW_VOL_H * 3600
+                            if _is_weekend:   # v3.92 周末低波动档缩短
+                                from config import WEEKEND_EXPIRE_LOW_VOL_H
+                                expire_sec = WEEKEND_EXPIRE_LOW_VOL_H * 3600
                         elif _atr_r > EXPIRE_HIGH_VOL_THRESH:
                             expire_sec = EXPIRE_HIGH_VOL_H * 3600
                         else:
                             expire_sec = EXPIRE_NORMAL_H * 3600
                     expire_ts  = time.time() + expire_sec
+                    # v3.92 周日信号到期时间钳制（breakout 不参与）
+                    if mode != "breakout" and _is_weekend and now.isoweekday() == 7:
+                        from config import WEEKEND_SIGNAL_EXPIRE_CUTOFF_HOUR
+                        _cut = now.replace(hour=WEEKEND_SIGNAL_EXPIRE_CUTOFF_HOUR, minute=0,
+                                           second=0, microsecond=0).timestamp()
+                        expire_ts = min(expire_ts, _cut)
 
                     # 预算 entry_price（耗时 IO，在子线程做）
                     try:
@@ -3138,6 +3243,8 @@ def _filter_and_register_signals(
                         score_original_expire=exp,
                     )
                     result["placed"] += 1
+                    if sig.get("weekend_mode"):
+                        sig["weekend_pos_seq"] = _weekend_counter_inc()
                     if _ws_ref is not None:
                         _ws_ref.subscribe(sym)
 
@@ -3166,6 +3273,8 @@ def _filter_and_register_signals(
                     ok = executor.execute_signal_sync(sig, ws_listener=None)
                     if ok:
                         result["placed"] += 1
+                        if sig.get("weekend_mode"):
+                            sig["weekend_pos_seq"] = _weekend_counter_inc()
                 except Exception as e:
                     logger.warning(f"[scanner] {sig['symbol']} 开仓失败: {e}")
 
@@ -4006,6 +4115,14 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
     if not FUNDING_ARB_ENABLED:
         return result
 
+    # ── v3.92 周日收尾 + 周末计数器同步（与主扫描共用）──────────────────
+    _fa_now = datetime.now(timezone.utc)
+    if _is_weekend_cutoff(_fa_now):
+        logger.info("[arb_scan] 周日收尾时段，不注册新信号")
+        return result
+    _weekend_counter_sync(_fa_now)
+    _fa_weekend = _is_weekend_period(_fa_now)
+
     # ── 全局熔断 + funding_arb 专用熔断 ─────────────────────────────────────
     from shared.state import is_circuit_open, is_funding_arb_paused, get_funding_arb_count
     if is_circuit_open():
@@ -4252,6 +4369,21 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
         if dry_run:
             logger.info(f"[arb_scan] DRY RUN: 信号通过，跳过下单")
             continue
+        # v3.92 周末新开仓上限（与主扫描共用计数器）
+        if _fa_weekend:
+            from config import WEEKEND_MAX_NEW_POSITIONS
+            if _WEEKEND_POS_COUNT >= WEEKEND_MAX_NEW_POSITIONS:
+                logger.warning(f"[arb_scan] 周末开仓已达上限 {WEEKEND_MAX_NEW_POSITIONS} 笔，跳过 {sym_full}")
+                result["rejected"].append({"symbol": sym_full,
+                    "reason": f"周末开仓上限 {WEEKEND_MAX_NEW_POSITIONS} 笔已满"})
+                continue
+            signal["weekend_mode"] = True
+            # v3.92 [2-B] funding_arb 周末仓位缩减（只乘一次）
+            from config import WEEKEND_FUNDING_ARB_SCALE
+            _fa_old_cap = signal.get("position_size_cap", 0.3)
+            signal["position_size_cap"] = round(_fa_old_cap * WEEKEND_FUNDING_ARB_SCALE, 3)
+            logger.debug(f"[scanner][funding_arb] {sym_full} 周末仓位缩减 "
+                         f"{_fa_old_cap:.3f}→{signal['position_size_cap']:.3f}")
         # 挂限价单入场（主线程串行）
         try:
             import executor as _exec
@@ -4259,6 +4391,8 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
             ok_exec = _exec.execute_signal_sync(signal, _ws_listener)
             if ok_exec:
                 result["placed"] += 1
+                if _fa_weekend:
+                    signal["weekend_pos_seq"] = _weekend_counter_inc()
                 logger.info(f"[arb_scan] {sym_full} 限价单已挂，等待成交")
         except Exception as _ee:
             logger.error(f"[arb_scan] {sym_full} execute_signal 失败: {_ee}")
