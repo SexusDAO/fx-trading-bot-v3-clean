@@ -1317,6 +1317,14 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
         # v3.64: SHORT RSI1H 补充通道: chg24>=+4%（原5%，略放宽），RSI1H>72 保持
         direction = "SHORT"
         _rsi1h_channel = True
+    elif rsi_1h < 20 and chg24 <= -3 and rsi_4h < 40:
+        direction = "LONG"
+        _rsi1h_channel = True
+        # 通道3b：RSI1H极端超卖，放宽chg24门槛，半仓
+    elif rsi_1h > 80 and chg24 >= 3 and rsi_4h > 60:
+        direction = "SHORT"
+        _rsi1h_channel = True
+        # 通道3b（SHORT 对称）：RSI1H极端超买，放宽chg24门槛
     else:
         return False, {"reject_reason": f"方向不明确:chg24={chg24:.1f}% RSI4H={rsi_4h:.1f} RSI1H={rsi_1h:.1f},不符合 LONG/SHORT 任一条件"}
 
@@ -1348,6 +1356,10 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
         "reject_reason":         None,
         "pulse_short_penalty":   0,
     }
+    if direction == "LONG" and _rsi1h_channel and chg24 > -5 and rsi_4h >= 28:
+        # 通道3b触发（非通道3），半仓
+        out["position_size_cap"] = min(out.get("position_size_cap", 0.5), 0.5)
+        out["reversal_channel"] = "3b_extreme"
     _crash = _btc_crash_reject(ind, direction, "reversal", out)
     if _crash is not None:
         return _crash
@@ -2621,6 +2633,9 @@ def _judge_range_bounce_impl(k1h, k4h, k15, ind, chg24, funding):
 
     # ── 4. ATR 门槛（有足够波动空间，周末降低到 1.5%）─────────────────
     _atr_min_rb = 1.5 if ind.get("_weekend_mode") else 2.0
+    # 区间形态质量极好时放宽ATR门槛
+    if pre_gain >= 30 and c_range <= 10:
+        _atr_min_rb = max(1.2, _atr_min_rb - 0.5)
     if atr_r < _atr_min_rb:
         out["reject_reason"] = f"ATR%={atr_r:.2f}%<{_atr_min_rb}%，波动不足"
         return False, out
@@ -3330,15 +3345,18 @@ def _judge_oi_divergence_impl(k1h, k4h, k15, ind, chg24, funding):
     out["oi_change_pct"]  = round(oi_change * 100, 2)
 
     # ── 3. RSI 过滤（方向合理性） ─────────────────────────────────────────
-    if direction == "LONG" and rsi_1h > _RSI_LONG_MAX:
+    # OI变化极端时放宽RSI门槛4个点
+    _rsi_relax = 4 if abs(oi_change) >= 0.20 else 0
+    out["rsi_relax"] = _rsi_relax
+    if direction == "LONG" and rsi_1h > _RSI_LONG_MAX + _rsi_relax:
         out["reject_reason"] = (
-            f"LONG RSI 过滤: rsi_1h={rsi_1h:.1f} > {_RSI_LONG_MAX}，"
+            f"LONG RSI 过滤: rsi_1h={rsi_1h:.1f} > {_RSI_LONG_MAX + _rsi_relax}，"
             f"价格虽低但 RSI 未到超卖区间，OI 背离可信度不足"
         )
         return False, out
-    if direction == "SHORT" and rsi_1h < _RSI_SHORT_MIN:
+    if direction == "SHORT" and rsi_1h < _RSI_SHORT_MIN - _rsi_relax:
         out["reject_reason"] = (
-            f"SHORT RSI 过滤: rsi_1h={rsi_1h:.1f} < {_RSI_SHORT_MIN}，"
+            f"SHORT RSI 过滤: rsi_1h={rsi_1h:.1f} < {_RSI_SHORT_MIN - _rsi_relax}，"
             f"价格虽高但 RSI 未到超买区间，OI 背离可信度不足"
         )
         return False, out
@@ -3679,8 +3697,8 @@ def _judge_oi_divergence_impl(k1h, k4h, k15, ind, chg24, funding):
     #   SHORT：RSI 需 ≥62 才算"接近超买"，55~61 视为普通上涨区间，拒绝
     #   LONG ：RSI 需 ≤38 才算"接近超卖"，39~45 视为普通下跌区间，拒绝
     # 这比复杂的背离验证更稳定，不依赖 K 线 RSI 历史近似值。
-    _OI_DIV_RSI_SHORT_MIN_HARD = _RSI_SHORT_MIN  # 读 config.OI_DIV_RSI1H_SHORT_MIN
-    _OI_DIV_RSI_LONG_MAX_HARD  = _RSI_LONG_MAX   # 读 config.OI_DIV_RSI1H_LONG_MAX
+    _OI_DIV_RSI_SHORT_MIN_HARD = _RSI_SHORT_MIN - _rsi_relax  # 读 config.OI_DIV_RSI1H_SHORT_MIN（OI极端时同步放宽，与步骤3一致）
+    _OI_DIV_RSI_LONG_MAX_HARD  = _RSI_LONG_MAX + _rsi_relax   # 读 config.OI_DIV_RSI1H_LONG_MAX（同上）
     if direction == "SHORT" and rsi_1h < _OI_DIV_RSI_SHORT_MIN_HARD:
         out["reject_reason"] = (
             f"RSI 区间过低: rsi_1h={rsi_1h:.1f} < {_OI_DIV_RSI_SHORT_MIN_HARD}，"
