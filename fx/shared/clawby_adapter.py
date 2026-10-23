@@ -63,12 +63,13 @@ logger = logging.getLogger("fx.clawby")
 # ―― Clawby（次要/套利/宏观接口）
 CLAWBY_BASE_URL = "https://api.openclawby.com/api/relay"
 CLAWBY_API_KEY  = os.environ.get("CLAWBY_API_KEY", "pk_xBgG9wi3q1ZnIe6peyFrBHQP_6v2hG2C")
-CLAWBY_HEADERS  = {"X-API-Key": CLAWBY_API_KEY, "Content-Type": "application/json"}
+CLAWBY_HEADERS  = {"X-API-Key": CLAWBY_API_KEY, "Content-Type": "application/json",
+                   "Accept-Encoding": "identity"}  # 禁用压缩，避免urllib3 decompress持GIL阻塞事件循环
 
 # ―― CG 中转站（核心合约接口，30次/分钟）
 CG_BASE_URL  = os.environ.get("CG_BASE_URL",  "https://vip2.coinglass.site")
 CG_API_KEY   = os.environ.get("CG_API_KEY",   "cg_998dad4b22ea88573763952d7b9e0944de6addfe7e5ec216")
-CG_HEADERS   = {"X-API-Key": CG_API_KEY}
+CG_HEADERS   = {"X-API-Key": CG_API_KEY, "Accept-Encoding": "identity"}  # 禁用响应压缩
 # 30次/分钟 → 2s 间隔（留 0% 余量安全）
 CG_RATE_LIMIT_S  = 2.0
 CG_LSR_LIMIT_S   = 31.0   # LSR 专用：2次/分钟 → 31s（安全间隔）
@@ -721,7 +722,8 @@ def get_liq_coin_list(exchange: str = "Binance") -> list:
 FAPI_BASE = "https://fapi.binance.com"
 
 def _bn_get(path: str, params: dict = None, timeout: int = 8):
-    r = requests.get(f"{FAPI_BASE}{path}", params=params or {}, timeout=timeout, proxies=_PROXIES)
+    r = requests.get(f"{FAPI_BASE}{path}", params=params or {}, timeout=timeout, proxies=_PROXIES,
+                     headers={"Accept-Encoding": "identity"})  # 禁用响应压缩
     r.raise_for_status()
     return r.json()
 

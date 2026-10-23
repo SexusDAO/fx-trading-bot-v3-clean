@@ -76,6 +76,7 @@ def _make_session(use_proxy: bool = True) -> _requests.Session:
     s.mount("http://",  adapter)
     if use_proxy and PROXIES:
         s.proxies.update(PROXIES)
+    s.headers["Accept-Encoding"] = "identity"  # 禁用压缩，避免urllib3 decompress持GIL阻塞事件循环
     return s
 
 _SESSION        = _make_session(use_proxy=True)   # 签名接口（代理）
