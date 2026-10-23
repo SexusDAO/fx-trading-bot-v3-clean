@@ -211,6 +211,14 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 # ───────────────────────────────────────────────────────────────────────────────
 # v3.33 共享线程池：扫描线程不再每轮新建，避免卡住时线程多次累积
 import concurrent.futures as _cfu
+
+# 预导入 analysis_worker：其顶层 import（concurrent.futures.process / multiprocessing.connection）在启动时完成，
+# 避免 shutdown 路径在事件循环里懒加载、gVisor 下 _path_stat 阻塞 348s
+try:
+    from shared import analysis_worker as _aw_stop
+except Exception:
+    _aw_stop = None
+
 _SCAN_POOL = _cfu.ThreadPoolExecutor(max_workers=1, thread_name_prefix="scan-worker")
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -953,11 +961,11 @@ async def main() -> None:
             hub.stop()
         except Exception as e:
             logger.warning(f"[main] market_data_hub 停止异常: {e}")
-        try:
-            from shared import analysis_worker as _aw_stop
-            _aw_stop.shutdown()
-        except Exception:
-            pass
+        if _aw_stop is not None:
+            try:
+                _aw_stop.shutdown()
+            except Exception:
+                pass
     logger.info("[main] fx 系统已安全停止")
 
 
