@@ -102,7 +102,7 @@ def _http_edit(message_id: str, new_text: str) -> bool:
         resp = _req.post(_GW_URL, json={
             "tool": "message",
             "args": {
-                "action":    "send",
+                "action":    "edit",
                 "channel":   "jarvis",
                 "target":    _JARVIS_TARGET,
                 "messageId": message_id,
