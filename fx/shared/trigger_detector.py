@@ -94,11 +94,22 @@ def _atr(k):
 
 
 # ── 默认数据源（测试里全部可注入）────────────────────────────────────────────
-def _default_oi(symbol):
-    """oi_cache.json → (oi_now, oi_1h_ago, oi_4h_ago)；无效为 0。"""
+def _load_oi_snapshot() -> dict:
+    """一次性读取 oi_cache.json（同步磁盘 IO，由 apoll 每轮经 to_thread 调用一次）。"""
     try:
         from shared.state import _load_oi_cache
-        s = _load_oi_cache().get(symbol) or []
+        return _load_oi_cache() or {}
+    except Exception:
+        return {}
+
+
+def _default_oi(symbol, snapshot=None):
+    """oi_cache.json → (oi_now, oi_1h_ago, oi_4h_ago)；无效为 0。
+    snapshot 不为 None 时只读内存快照，不访问磁盘。"""
+    try:
+        if snapshot is None:
+            snapshot = _load_oi_snapshot()
+        s = snapshot.get(symbol) or []
         if len(s) < 2:
             return 0.0, 0.0, 0.0
         now_ms = int(time.time() * 1000)
@@ -191,6 +202,7 @@ class TriggerDetector:
         self._hub = hub
         self._clock = clock
         self._oi = oi_reader
+        self._oi_snapshot: dict = {}   # 每轮 apoll 开头刷新一次的 OI 内存快照
         self._pool = pool_reader
         self._exinfo = exinfo_reader
         self._positions = positions_reader
@@ -334,6 +346,8 @@ class TriggerDetector:
         hub = self.hub()
         if hub is None:
             return []
+        if self._oi is _default_oi:   # 默认数据源：每轮只读一次磁盘，之后各标的从内存取
+            self._oi_snapshot = await asyncio.to_thread(_load_oi_snapshot)
         now = self._clock()
         if now - self._exinfo_ts >= EXINFO_REFRESH_SEC:
             self._exinfo_ts = now
@@ -590,7 +604,8 @@ class TriggerDetector:
                   [("LONG", ok and fr < 0, r), ("SHORT", ok and fr > 0, r)], edge=False)
 
     def _oi_div(self, sym, now, ctx, atr_pct, out):
-        oi_now, oi_1h, oi_4h = (tuple(self._oi(sym)) + (0.0, 0.0, 0.0))[:3]
+        _oi_v = _default_oi(sym, self._oi_snapshot) if self._oi is _default_oi else self._oi(sym)
+        oi_now, oi_1h, oi_4h = (tuple(_oi_v) + (0.0, 0.0, 0.0))[:3]
         hub = self.hub()
         tk = hub.get_ticker(sym) if hub else None
         hi24 = float((tk or {}).get("highPrice") or 0)

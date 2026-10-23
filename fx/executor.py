@@ -270,13 +270,7 @@ def _precheck(signal: dict) -> tuple[bool, str]:
     except Exception:
         pass   # 拉取失败不拦截，留给步骤5精确检查
 
-    # 1-10: 流动性 Gate（v3.57）——检查 mark_price ±0.5% 挂单深度，过滤极薄标的
-    _liq_ok, _liq_reason = _check_liquidity_gate(
-        symbol, direction, notional=100.0,
-        oi_now=signal.get("ind", {}).get("oi_now", 0.0),
-    )
-    if not _liq_ok:
-        return False, _liq_reason
+    # 1-10: 流动性 Gate 已移到名义仓位确定之后（见 execute 主流程），按真实下单金额判断
 
     # 1-11: 多空净 Delta 监控（v3.57）
     # 防止同方向暴露过高：净 Delta = 多头名义 - 空头名义
@@ -350,8 +344,7 @@ def _check_liquidity_gate(
     - 拉 limit=20 深度，统计以 mark_price 为中心 ±0.5% 区间内的挂单金额
     - LONG 做多：看 ask 侧深度（需要有人卖给我们）
     - SHORT 做空：看 bid 侧深度（需要有人买我们卖出的仓）
-    - 阈值 = max(OI×0.1%, 3000U, notional×DEPTH_MULT)，对小币相对化
-      若 oi_now=0（未传入），退化为 max(MIN_LIQUIDITY_U, notional×DEPTH_MULT)
+    - 阈值 = max(LIQUIDITY_GATE_MIN_U, notional×DEPTH_MULT)，notional 为真实下单金额
     - 查询失败时降级放行（不因网络问题阻断开仓）
     """
     try:
@@ -386,15 +379,14 @@ def _check_liquidity_gate(
                 if float(b[0]) >= low
             )
 
-        # 阈值相对化：OI×0.1% 为动态底线
-        # fix: oi_now 是币安返回的合约张数（非 USDT），必须乘以 mark_price 换算后再取 0.1%
-        oi_usdt   = oi_now * mark_p if (oi_now > 0 and mark_p > 0) else 0.0
-        oi_based  = oi_usdt * 0.001 if oi_usdt > 0 else 0.0
-        threshold = max(LIQUIDITY_GATE_MIN_U, oi_based, notional * LIQUIDITY_GATE_DEPTH_MULT)
+        # 阈值只看真实下单金额：max(3000U 底线, 下单金额 × DEPTH_MULT)
+        # 已去掉 OI 名义价值 × 0.1% 那一项（动辄几十万 U，和实际下单金额不匹配，几乎拦掉所有信号）
+        # oi_now 参数保留仅为兼容旧调用方，不再参与计算
+        threshold = max(LIQUIDITY_GATE_MIN_U, notional * LIQUIDITY_GATE_DEPTH_MULT)
         if depth_u < threshold:
             return False, (
                 f"流动性不足: {direction} 侧±0.5%深度={depth_u:.0f}U "
-                f"< 阈值{threshold:.0f}U（mark={center:.6g} OI={oi_usdt:.0f}U notional={notional:.0f}U×{LIQUIDITY_GATE_DEPTH_MULT}）"
+                f"< 阈值{threshold:.0f}U（mark={center:.6g} notional={notional:.0f}U×{LIQUIDITY_GATE_DEPTH_MULT}）"
             )
         return True, ""
     except Exception as _lge:
@@ -1811,6 +1803,12 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     # ── 杠杆利用率预算（v3.90）：在终检通过之后、设置杠杆/下单之前，把名义仓位截断到该方向剩余预算 ──
     _lev_ok, notional, _lev_reason = _apply_leverage_budget(symbol, direction, notional, total_bal)
     if not _lev_ok:
+        return False
+
+    # ── 流动性 Gate：名义仓位确定后，按真实下单金额检查 ±0.5% 盘口深度 ────────
+    _liq_ok, _liq_reason = await asyncio.to_thread(_check_liquidity_gate, symbol, direction, notional)
+    if not _liq_ok:
+        logger.info(f"[executor] {symbol} 流动性检查拒绝: {_liq_reason}")
         return False
 
     # ── 步骤6：设置全仓 + 最大杠杆 ───────────────────────────────────────────

@@ -218,24 +218,13 @@ class ExecutorStaticTest(unittest.TestCase):
 
     # ---- Bug 3: 流动性门槛缺少 mark_price 据换算 ----
 
-    def test_liquidity_gate_uses_oi_usdt(self):
-        """
-        旧 bug：_check_liquidity_gate 直接用 oi_now * 0.001，
-        但 oi_now 是合约张数，必须先乘以 mark_price 换算成 USDT。
-        """
-        idx = self.src.find("阈值相对化：OI")
-        self.assertGreater(idx, 0, "找不到流动性阈値注释（含 '阈值相对化：OI' 关键词）")
-        window = self.src[idx: idx + 300]
-        self.assertIn(
-            "oi_now * mark_p",
-            window,
-            "流动性阈値应先用 oi_now * mark_p 换算成 USDT",
-        )
-        self.assertNotIn(
-            "oi_now * 0.001",
-            window,
-            "不应再直接用 oi_now * 0.001（张数，非 USDT）",
-        )
+    def test_liquidity_gate_no_oi_threshold(self):
+        """流动性阈值已去掉 OI 名义价值一项，只按真实下单金额与 3000U 底线判断。"""
+        idx = self.src.find("def _check_liquidity_gate")
+        self.assertGreater(idx, 0)
+        body = self.src[idx: idx + 3000]
+        self.assertIn("threshold = max(LIQUIDITY_GATE_MIN_U, notional * LIQUIDITY_GATE_DEPTH_MULT)", body)
+        self.assertNotIn("oi_based", body)
 
 
 if __name__ == "__main__":
