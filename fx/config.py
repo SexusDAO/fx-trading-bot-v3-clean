@@ -303,6 +303,8 @@ KLINE_CACHE_INTERVALS   = ["1h", "4h", "15m"]  # 缓存哪些周期
 KLINE_REQUEST_TIMEOUT   = (3, 5)  # (connect_s, read_s)：K 线单次 HTTP 请求超时
 KLINE_REQUEST_MAX_RETRY = 1       # K 线请求最多重试次数（总尝试 = 1 + 此值）
 MARKET_DATA_HUB_ENABLED = True   # 公共市场数据 WS 中心（阶段一：全市场标记价/资金费率）；False 时行为与未引入 hub 前完全一致；hub 未就绪/过旧时 scanner 自动回落 REST
+HUB_LOAD_MAX_WORKERS = 2  # hub历史K线加载并发上限
+HUB_NO_MSG_TIMEOUT = 120  # WebSocket 无消息超时（秒），过短会因GIL饿死误触发重连
 HUB_WS_PROXY = ""  # hub WebSocket 代理，空字符串=直连，"__env__"=跟随环境变量 PROXY_URL
 KLINE_HUB_SYMBOLS_MAX = 220  # 120 → 220，覆盖全部候选池+动态注入余量
 KLINE_REQUEST_TOTAL_SEC = 8.0     # 单次 get_klines 调用总时限（秒，含重试、重试间隔、直连失败后改走代理）
@@ -989,6 +991,7 @@ TRIGGER_DISPATCH_ENABLED = True  # 需同时 TRIGGER_DETECTOR_ENABLED=True；Tru
 SCAN_INTERVAL_PASSIVE    = 900   # 两个开关都为 True 时的兜底扫描间隔（秒）；否则保持 300s / 周末 900s
 TRIGGER_DISPATCH_TIMEOUT = 30     # 单个分析任务超时（预取 + analyze_one + 第四步）
 TRIGGER_DISPATCH_WORKERS = 2      # 分析协程数
+TRIGGER_DISPATCH_MAX_WORKERS = 2  # 触发器派发并发上限，过高会GIL争抢饿死事件循环
 
 # [fix #48] 已删除的失效常量（代码从未引用，保留名单便于追溯）：
 #   UNIVERSE_REFRESH_INTERVAL, SCANNER_INTERVAL, KLINE_LIMIT_15M, KLINE_LIMIT_1H

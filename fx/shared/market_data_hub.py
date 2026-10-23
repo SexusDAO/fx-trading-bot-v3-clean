@@ -38,7 +38,10 @@ except ImportError:
 RECONNECT_BASE = getattr(config, "WS_RECONNECT_BASE", 3)
 RECONNECT_MAX = getattr(config, "WS_RECONNECT_MAX", 60)
 PING_INTERVAL = 20          # 秒：每 20 秒发 ping
-NO_MSG_TIMEOUT = 60         # 秒：60 秒无任何消息 → 断开重连（冷启动历史拉取需时间）
+try:
+    from config import HUB_NO_MSG_TIMEOUT as NO_MSG_TIMEOUT   # 秒：无任何消息 → 断开重连
+except Exception:
+    NO_MSG_TIMEOUT = 120
 SINGLE_MAX_AGE_SEC = 5.0    # 单标的读取：超过则返回 None
 ALL_MAX_AGE_SEC = 10.0      # 全量快照：超过的条目被过滤
 STATS_LOG_INTERVAL = 300    # 秒：5 分钟一条 info
@@ -53,7 +56,11 @@ KLINE_HISTORY = 100                            # 每个 (标的, 周期) 保留/
 _KLINE_STALE_GRACE_MS = {"15m": 60_000, "1h": 300_000, "4h": 600_000}
 # 历史 K 线拉取专用线程池：不占用 asyncio 默认线程池，避免与扫描等线程竞争
 from concurrent.futures import ThreadPoolExecutor
-_LOAD_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hub-load")
+try:
+    from config import HUB_LOAD_MAX_WORKERS as _HUB_LOAD_MAX_WORKERS
+except Exception:
+    _HUB_LOAD_MAX_WORKERS = 2
+_LOAD_POOL = ThreadPoolExecutor(max_workers=int(_HUB_LOAD_MAX_WORKERS), thread_name_prefix="hub-load")
 KLINE_FETCH_CONCURRENCY = 6                    # 历史 K 线 REST 拉取并发上限
 KLINE_RETRY_SEC = 30.0                         # 历史拉取失败后的重试间隔
 KLINE_STREAM_PER_CONN = 180                    # 单条 /market/stream 连接上的 K 线 stream 上限（币安单连接 200，留出 ticker 等余量）

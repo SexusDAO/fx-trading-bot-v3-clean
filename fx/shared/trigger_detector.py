@@ -153,6 +153,19 @@ def _default_positions():
 
 
 # ── 后台写文件 ───────────────────────────────────────────────────────────────
+_DISPATCH_POOL = None
+
+
+def _dispatch_pool():
+    """派发分析专用线程池（懒创建），并发上限 config.TRIGGER_DISPATCH_MAX_WORKERS，避免 GIL 争抢饿死事件循环。"""
+    global _DISPATCH_POOL
+    if _DISPATCH_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _DISPATCH_POOL = ThreadPoolExecutor(max_workers=max(1, int(_cfg("TRIGGER_DISPATCH_MAX_WORKERS", 2))),
+                                            thread_name_prefix="trigger-dispatch")
+    return _DISPATCH_POOL
+
+
 class _Writer:
     def __init__(self):
         self.q = queue.Queue()
@@ -871,7 +884,8 @@ class TriggerDetector:
         sym = rec["symbol"]
         timeout = float(_cfg("TRIGGER_DISPATCH_TIMEOUT", 30))
         try:
-            r = await asyncio.wait_for(asyncio.to_thread(self._dispatch_analysis, sym, [rec["strategy"]]), timeout)
+            r = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
+                _dispatch_pool(), self._dispatch_analysis, sym, [rec["strategy"]]), timeout)
             self._dispatch_done(rec, r.get("analysis_result", "error"), r.get("signal_strategy"), r.get("error"))
         except asyncio.TimeoutError:
             self._dispatch_done(rec, "error", None, "timeout")
