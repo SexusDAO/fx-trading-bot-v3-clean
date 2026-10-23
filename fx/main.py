@@ -167,21 +167,42 @@ def _cleanup_main_pid():
 # v3.32: FileHandler → RotatingFileHandler，防止 system.log 无限增长
 # 10MB × 5 份 = 最多保留 50MB 历史日志，长期 24/7 运转安全
 from logging.handlers import RotatingFileHandler as _RotatingFileHandler
+import logging.handlers as _lh
+import queue as _queue
+# 异步日志：root 只挂 QueueHandler（非阻塞入队），RotatingFileHandler 由 QueueListener 后台线程串行写文件，
+# 事件循环线程不再持有文件 handler 锁、不做 shouldRollover 文件 I/O
+_file_handler = _RotatingFileHandler(
+    str(LOG_DIR / "system.log"),
+    maxBytes=10 * 1024 * 1024,  # 10MB
+    backupCount=5,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+_log_queue = _queue.SimpleQueue()
+_queue_listener = _lh.QueueListener(_log_queue, _file_handler, respect_handler_level=True)
+_queue_listener.start()
+_queue_handler = _lh.QueueHandler(_log_queue)
+# 入队时只保留原始消息（含异常堆栈），时间/级别/名称前缀由 _file_handler 统一加；
+# 不设的话 basicConfig 会给它套默认格式，导致前缀重复（"INFO x INFO:x:msg"）
+_queue_handler.setFormatter(logging.Formatter("%(message)s"))
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
     handlers=[
-        _RotatingFileHandler(
-            str(LOG_DIR / "system.log"),
-            maxBytes=10 * 1024 * 1024,  # 10MB
-            backupCount=5,
-            encoding="utf-8",
-        ),
+        _queue_handler,
         # v3.14: 去掉 StreamHandler，daemon 已将 stdout 重定向到 system.log，
         # 保留 StreamHandler 会导致每条日志重复写两次
     ],
     force=True,  # v3.14: 强制覆盖已有 handler，防止如果子模块提前初始化了 root logger
 )
+
+
+@atexit.register
+def _stop_queue_listener():
+    # 退出时停止 listener：先把队列里剩余日志写完再结束后台线程
+    try:
+        _queue_listener.stop()
+    except Exception:
+        pass
 logger = logging.getLogger("fx.main")
 logging.getLogger("websockets").setLevel(logging.WARNING)  # 屏蔽 ws 心跳 DEBUG 日志
 logging.getLogger("urllib3").setLevel(logging.WARNING)
