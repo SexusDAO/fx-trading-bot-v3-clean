@@ -327,6 +327,8 @@ HUB_NO_MSG_TIMEOUT = 180  # 120→180：给历史加载留余量，减少阻塞�
 KLINE_FETCH_CONCURRENCY = 6  # hub历史K线REST拉取并发上限
 LIQ_PREFETCH_MAX_WORKERS = 2   # 预热线程数，降低SSL并发防止阻塞事件循环
 LIQ_PREFETCH_SLEEP_SEC   = 2.0 # 每个标的预热后的节流间隔（秒）
+LIQ_PRESCAN_PREFETCH_ENABLED     = True   # 每轮扫描前先有界预热本轮候选池里过期的 liq_cache（False=回到分析时实时查询）
+LIQ_PRESCAN_PREFETCH_TIMEOUT_SEC = 30.0   # 扫描前预热的最长等待（秒），超时直接进入分析
 KLINE_LOAD_BATCH_SIZE = 200  # hub 每次对账最多新建的历史K线加载任务数（超出留到下一轮，每 2s 一轮）
 KLINE_GAP_RELOAD_COOLDOWN_SEC = 60  # 同一 series 因K线缺口触发重拉的冷却时间（秒）
 HUB_WS_PROXY = ""  # hub WebSocket 代理，空字符串=直连，"__env__"=跟随环境变量 PROXY_URL

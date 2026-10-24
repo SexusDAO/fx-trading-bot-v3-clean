@@ -284,28 +284,33 @@ def get_liq_zones_cached(symbol: str, direction: str,
     return (entry or {}).get(direction.upper(), [])
 
 
-def _prefetch_one(sym: str) -> bool:
+def _needs_refresh(sym: str, ranges=_PREFETCH_RANGES) -> bool:
+    """任一 range 的缓存年龄 >= TTL*0.8 即需要刷新（与 _prefetch_one 原判断一致）。"""
+    for r in ranges:
+        with _CACHE_LOCK:
+            entry = _CACHE.get(f"{sym}:{r}")
+            ts = entry.get("ts", 0) if entry else 0
+        if time.time() - ts >= _CACHE_TTL * 0.8:
+            return True
+    return False
+
+
+def _prefetch_one(sym: str, ranges=_PREFETCH_RANGES, price: float = 0.0) -> bool:
     """预热单个标的的清算区缓存；返回是否写入了至少一个 range。"""
     try:
         # [v3.89 #36] 先判断是否需要刷新，缓存仍新鲜的标的不再白白请求一次 mark price
-        needs_refresh = False
-        for r in _PREFETCH_RANGES:
-            with _CACHE_LOCK:
-                entry = _CACHE.get(f"{sym}:{r}")
-                ts = entry.get("ts", 0) if entry else 0
-            if time.time() - ts >= _CACHE_TTL * 0.8:
-                needs_refresh = True
-                break
-        if not needs_refresh:
+        if not _needs_refresh(sym, ranges):
             return False
 
-        from shared.binance_api import get_mark_price
-        price = float(get_mark_price(sym).get("markPrice", 0))
+        price = float(price or 0.0)   # 调用方已知标记价时省一次 mark price 请求
+        if price <= 0:
+            from shared.binance_api import get_mark_price
+            price = float(get_mark_price(sym).get("markPrice", 0))
         if price <= 0:
             return False
 
         wrote = 0
-        for r in _PREFETCH_RANGES:
+        for r in ranges:
             data = _fetch_dedup(sym, price, r, f"{sym}:{r}")   # [v3.89 #35]
             if data:
                 wrote += 1
@@ -340,6 +345,41 @@ def prefetch_liq_cache(symbols: list) -> None:
         results = list(pool.map(_prefetch_one, symbols))
     updated = sum(1 for x in results if x)
     logger.info(f"[liq_cache] 预热完成，共 {len(symbols)} 个标的，更新 {updated} 个")
+
+
+def prefetch_liq_cache_bounded(symbols: list, deadline_sec: float,
+                               ranges=("3d",), price_map: dict | None = None) -> dict:
+    """扫描前的有界预热：只处理缓存已过期/将过期的标的，线程数与节流沿用后台预热的配置；
+    超过 deadline_sec 就不再等（未开始的任务取消，已在途的请求让其自然结束），
+    未覆盖的标的降级为分析时实时查询。price_map：{symbol: {"markPrice": ...}}，命中则省 mark price 请求。
+    返回统计 {total, stale, done, updated, timed_out}。"""
+    from concurrent.futures import ThreadPoolExecutor, wait
+    syms = list(dict.fromkeys(symbols or []))
+    stale = [x for x in syms if _needs_refresh(x, ranges)]
+    stats = {"total": len(syms), "stale": len(stale), "done": 0, "updated": 0, "timed_out": 0}
+    if not stale:
+        return stats
+    pm = price_map or {}
+
+    def _job(x: str) -> bool:
+        try:
+            p = float((pm.get(x) or {}).get("markPrice") or 0.0)
+        except Exception:
+            p = 0.0
+        return _prefetch_one(x, ranges, p)
+
+    pool = ThreadPoolExecutor(max_workers=LIQ_PREFETCH_MAX_WORKERS, thread_name_prefix="liq-prescan")
+    try:
+        futs = [pool.submit(_job, x) for x in stale]
+        done, pending = wait(futs, timeout=max(0.0, float(deadline_sec)))
+        for f in pending:
+            f.cancel()
+        stats["done"] = len(done)
+        stats["timed_out"] = len(pending)
+        stats["updated"] = sum(1 for f in done if not f.cancelled() and f.exception() is None and f.result())
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return stats
 
 
 _bg_stop = threading.Event()

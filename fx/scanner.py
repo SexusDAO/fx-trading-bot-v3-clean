@@ -3719,6 +3719,21 @@ def run_scan(dry_run: bool = False, signal_watcher=None) -> dict:
     }
     # [fix] mark_price_map 用 partial 以关键字绑定：analyze_symbol 的第 9 个位置参数是 deadline，
     # _run_parallel_with_deadline 又以关键字传 deadline，位置传 map 会 TypeError(multiple values for 'deadline')
+    # 并行分析前先有界预热本轮候选池里过期的清算区缓存：analyze_one 内 get_liq_zones_cached 尽量命中缓存，
+    # 少在分析线程里做同步 SSL 请求；超时/失败直接进入分析（降级为分析时实时查询）
+    try:
+        import config as _cfg_pf
+        if getattr(_cfg_pf, "LIQ_PRESCAN_PREFETCH_ENABLED", True):
+            from shared.liq_cache import prefetch_liq_cache_bounded as _plb
+            _pf_t = time.perf_counter()
+            _pf = _plb(list(scan_pool), float(getattr(_cfg_pf, "LIQ_PRESCAN_PREFETCH_TIMEOUT_SEC", 30.0)),
+                       price_map=_mark_price_map)
+            if _pf.get("stale"):
+                logger.info(f"[scanner] 扫描前清算区预热: 候选 {_pf['total']}，过期 {_pf['stale']}，"
+                            f"完成 {_pf['done']}，写入 {_pf['updated']}，超时未处理 {_pf['timed_out']}，"
+                            f"耗时 {time.perf_counter() - _pf_t:.1f}s")
+    except Exception as _pfe:
+        logger.debug(f"[scanner] 扫描前清算区预热跳过: {_pfe}")
     # 阶段3：主进程标记「分析中」，仅供影子触发器读取；scanner 不因此跳过任何标的
     try:
         from shared import trigger_detector as _tdm
