@@ -740,6 +740,30 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
                     )
                     return False, out
 
+    # ── 15 分钟动能确认（最后一道）：最近 3 根 15M 里至少 1 根顺势K线（LONG 阳线 / SHORT 阴线）且成交量不为零 ──
+    # 拿不到 k15（None / 空 / 不足 1 根）则跳过本检查，不拒绝信号
+    if k15:
+        try:
+            _recent15 = k15[-3:]
+            _want_up = direction == "LONG"
+            _confirm15 = any(
+                float(_k[5]) > 0 and ((float(_k[4]) > float(_k[1])) if _want_up else (float(_k[4]) < float(_k[1])))
+                for _k in _recent15
+            )
+        except Exception as _e15:
+            logger.debug(f"[judge_pullback] {ind.get('symbol', '')} 15M确认检查异常，跳过: {_e15}")
+        else:
+            if not _confirm15:
+                out["reject_reason"] = (
+                    f"15M动能未确认：最近{len(_recent15)}根15M无{'阳' if _want_up else '阴'}线（或成交量为零），"
+                    f"pullback {direction} 短期动能已熄"
+                )
+                logger.debug(f"[judge_pullback] {ind.get('symbol', '')} {direction} 15M确认未通过")
+                return False, out
+            logger.debug(f"[judge_pullback] {ind.get('symbol', '')} {direction} 15M确认通过")
+    else:
+        logger.debug(f"[judge_pullback] {ind.get('symbol', '')} {direction} 无k15数据，跳过15M确认")
+
     return True, out
 
 
