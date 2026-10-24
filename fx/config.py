@@ -245,8 +245,8 @@ RISK_PER_TRADE     = 0.03    # 每笔最大风险比例（止损定仓核心参�
 
 # 熔断参数
 # [fix B] 恢复日内亏损熔断：改为按账户权益比例触发（默认 8%）。
-CIRCUIT_BREAKER_DAILY_LOSS_PCT = 0.08   # 当日净亏损超过权益的 8% 触发熔断
-CIRCUIT_BREAKER_DAILY_LOSS = 100.0      # 兜底绝对值：取不到账户权益时使用（≈1250U 权益 × 8%）
+CIRCUIT_BREAKER_DAILY_LOSS_PCT = 0.20   # 当日净亏损超过权益的 8% 触发熔断
+CIRCUIT_BREAKER_DAILY_LOSS = 999.0      # 兜底绝对值：取不到账户权益时使用（≈1250U 权益 × 8%）
 
 # 止损距离上限（动态，按波动层级）
 # low tier(ATR<3%): 12%  mid tier(ATR 3-8%): 15%  high tier(ATR>8%): 20%
