@@ -345,8 +345,39 @@ def buffer_signal(sig_id: str, header: str) -> None:
     _signal_buffer.start(sig_id, header)
 
 
+# [v3.97] 在途 flush 登记：flush_signal 先清空缓冲区、后发送消息并登记 _card_cache，这段时间里
+#   缓冲区已空、_card_cache 也还没有该 sig_id。此时 executor 立刻拒绝并 card_append，会命中
+#   「无卡片缓存 → 降级独立推送」，变成一条没有标的名的孤立消息（随后 card_remove 又被 flush 的
+#   登记覆盖，留下幽灵缓存）。因此 card_append / card_remove 遇到在途 flush 先等它完成。
+_flushing: dict = {}                 # sig_id -> threading.Event（flush 完成时 set）
+_flushing_lock = threading.Lock()
+_FLUSH_WAIT_SEC = 10.0               # 等在途 flush 的上限（_send 最坏 HTTP6s+socket5s 之内通常已返回）
+
+
+def _wait_inflight_flush(sig_id: str) -> None:
+    with _flushing_lock:
+        ev = _flushing.get(sig_id)
+    if ev is not None and not ev.wait(_FLUSH_WAIT_SEC):
+        logger.warning(f"[card] sig_id={sig_id} 等待在途 flush 超过 {_FLUSH_WAIT_SEC:.0f}s，继续（可能降级独立消息）")
+
+
 def flush_signal(sig_id: str) -> bool:
     """[v3.90 通知聚合] 把缓冲区内容合并一次性推送（标题 + 所有追加行）。"""
+    with _flushing_lock:                      # 先登记再 pop：保证 pop 之后的 card_append 一定能看到在途标记
+        own = sig_id not in _flushing
+        if own:
+            _flushing[sig_id] = threading.Event()
+    try:
+        return _flush_signal_inner(sig_id)
+    finally:
+        if own:
+            with _flushing_lock:
+                ev = _flushing.pop(sig_id, None)
+            if ev is not None:
+                ev.set()
+
+
+def _flush_signal_inner(sig_id: str) -> bool:
     lines = _signal_buffer.pop(sig_id)
     if not lines:
         return False
@@ -446,6 +477,7 @@ def card_append(sig_id: str, line: str) -> bool:
         logger.debug(f"[card] 缓冲追加 sig_id={sig_id}")
         return True
 
+    _wait_inflight_flush(sig_id)   # [v3.97] 缓冲区已被 flush 取走但消息还在发送：等卡片登记后再追加
     return _card_append_now(sig_id, line)
 
 
@@ -502,6 +534,7 @@ async def card_append_async(sig_id: str, line: str) -> bool:
 
 def card_remove(sig_id: str) -> None:
     """信号结束后清理卡片缓存。"""
+    _wait_inflight_flush(sig_id)   # [v3.97] 避免在途 flush 稍后又把已移除的卡片登记回来
     with _card_lock_for(sig_id):
         _card_cache.pop(sig_id, None)
     _save_card_state(_card_snapshot())
