@@ -2352,6 +2352,10 @@ async def _close_position_post_static(
             logger.error(f"[pm] 黑名单检查失败: {_be}")
 
 
+    # 步骤4之前先保存 MFE/MAE 终值：步骤4会 pop 掉，步骤5写 trade_log 必须用局部变量，否则恒为 0
+    _mfe_final = _mfe.get(pos_id, 0.0)
+    _mae_final = _mae.get(pos_id, 0.0)
+
     # 步骤4:清除持仓状态
     try:
         (await asyncio.to_thread(_remove_position_checked, pos_id))
@@ -2398,8 +2402,8 @@ async def _close_position_post_static(
                       pos.get("ind", {}).get("vol_ratio", 0) or 0), 4
             ),
             # 事后标注:最大有利/不利偏移(MFE/MAE),用于后续策略质量分析
-            "mfe_pct":           round(_mfe.get(pos_id, 0.0) * 100, 4),
-            "mae_pct":           round(_mae.get(pos_id, 0.0) * 100, 4),
+            "mfe_pct":           round(_mfe_final * 100, 4),
+            "mae_pct":           round(_mae_final * 100, 4),
             # 开仓时市场环境快照
             "btc_trend":         pos.get("market_env", {}).get("btc_trend", ""),
             "market_mode":       pos.get("market_env", {}).get("market_mode", ""),
