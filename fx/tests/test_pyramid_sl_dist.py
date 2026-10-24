@@ -1,6 +1,13 @@
 import asyncio
+import pytest
 import config
 import position_manager as pm
+
+
+@pytest.fixture(autouse=True)
+def _pyramid_on(monkeypatch):
+    # 默认配置已暂停加仓(PYRAMID_ENABLED=False);本文件测试加仓内部检查,显式打开
+    monkeypatch.setattr(config, "PYRAMID_ENABLED", True)
 
 
 def _setup(monkeypatch, price, atr_ratio, entry=0.07655):
@@ -86,3 +93,11 @@ def test_tp_space_check(monkeypatch):
 def test_zbtusdt_tp_space_alone_would_pass():
     # ZBTUSDT:加仓价0.07431、TP1=0.07345 → 剩余(0.07431-0.07345)/0.07431=1.157% > 1.0×0.84%
     assert (0.07431 - 0.07345) / 0.07431 > 0.0084
+
+
+def test_disabled_by_default_places_no_order(monkeypatch):
+    monkeypatch.setattr(config, "PYRAMID_ENABLED", False)
+    entry = 0.07655
+    pos, placed = _setup(monkeypatch, entry * (1 - 5.0 * 0.005), 0.005)   # 其余条件全部满足
+    asyncio.run(pm._maybe_pyramid(pos))
+    assert placed == []

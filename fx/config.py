@@ -890,7 +890,7 @@ SIGNAL_PRICE_SHIFT_REORDER_ATR    = 1.0    # 价格偏离原入场价 > 1 ATR �
 SIGNAL_PRICE_SHIFT_REORDER_TYPES  = ("reversal", "breakout")  # 只对这两类信号生效
 
 # ── 加仓逻辑（Pyramiding，v3.72）────────────────────────────────────────────────
-PYRAMID_ENABLED                   = True   # 总开关
+PYRAMID_ENABLED                   = False  # 总开关。暂停加仓，等积累数据后决定是否重启或改用影子模式（代码全部保留）
 PYRAMID_FLOAT_PROFIT_ATR          = 1.5    # 浮盈 >= 1.5 ATR 才允许加仓（原 1.0，价格走得更充分再加，减少刚加仓就被打出）
 PYRAMID_SIZE_RATIO                = 0.5    # 加仓仓位 = 原仓位 × 0.5
 PYRAMID_MAX_ADDUP                 = 1      # 每个方向每个标的最多加一次
