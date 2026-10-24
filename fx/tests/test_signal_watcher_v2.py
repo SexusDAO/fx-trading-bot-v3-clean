@@ -72,6 +72,9 @@ def test_hub_stale_falls_back_rest(monkeypatch, _no_net):
 
 def test_cancel_unknown_places_sl(monkeypatch, caplog):
     from shared import binance_api
+    import executor
+    # 业务代码会调 executor._get_precision(内部请求 exchangeInfo);打桩避免依赖真实网络/限流
+    monkeypatch.setattr(executor, "_get_precision", lambda sym: {"tick": 0.01, "step": 0.001})
     monkeypatch.setattr(binance_api, "get_position",
                         MagicMock(return_value=[{"positionAmt": "0.5", "positionSide": "LONG"}]))
     sl = MagicMock(return_value={"orderId": 1})
