@@ -359,6 +359,33 @@ def _liq_freshness(sym: str, now: float) -> float:
     return 1.0 - (age - 300) / 600.0
 
 
+# [机制一] recheck 重挂去重：入场价/止损/止盈变化均 <= 0.1ATR 视为「参数没变」，不重挂、不通知
+_REORDER_NOCHANGE_ATR = 0.1
+
+
+def _reorder_params_unchanged(entry: 'WatchEntry', new_entry_price: float,
+                              new_params: dict | None, atr: float) -> bool:
+    """重算后的入场价与（旧条目有记录的）sl/tp1/tp2 相对旧条目的变化是否都 <= 0.1ATR。
+    旧条目没有记录的字段不参与比较；atr<=0 时保守返回 False（照常重挂）。"""
+    try:
+        if atr <= 0:
+            return False
+        tol = _REORDER_NOCHANGE_ATR * atr
+        if abs(float(new_entry_price) - float(entry.entry_price)) > tol:
+            return False
+        old_pp = (entry.signal.get("pre_params") or {})
+        for k in ("sl_price", "tp1_price", "tp2_price"):
+            ov = old_pp.get(k)
+            nv = (new_params or {}).get(k)
+            if ov is None:
+                continue
+            if nv is None or abs(float(nv) - float(ov)) > tol:
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def _calc_pending_score(entry: 'WatchEntry', now: float | None = None) -> float:
     """
     计算挂单综合分（0-100）。纯函数，无副作用。
@@ -566,6 +593,10 @@ class SignalWatcher:
             if _cur.cancel_state != "none":
                 logger.info(f"[signal_watcher] {symbol} 旧挂单撤单状态={_cur.cancel_state}，不下新单")
                 return
+            if _cur.is_reorder and not is_reorder:
+                # [机制二] 重挂单受保护，不参与同标的竞争：新信号直接丢弃
+                logger.debug(f"[signal_watcher] {symbol} 已有重挂单(is_reorder)受保护，丢弃新信号")
+                return
             _probe = WatchEntry(signal=signal, entry_low=entry_low, entry_high=entry_high,
                                 entry_price=entry_price, expire_ts=expire_ts, on_trigger=on_trigger,
                                 score_created_at=score_created_at or time.time(),
@@ -657,7 +688,7 @@ class SignalWatcher:
                 if (len(same_dir) >= max_dir or total_pending >= MAX_PENDING_TOTAL):
                     # 槽位满 → 竞争
                     if entry.pending_score < PENDING_MIN_SCORE_TO_COMPETE:
-                        logger.info(
+                        logger.debug(
                             f"[signal_watcher] {symbol} 分数 {entry.pending_score:.0f} "
                             f"< {PENDING_MIN_SCORE_TO_COMPETE}，直接丢弃（不参与竞争）"
                         )
@@ -665,9 +696,13 @@ class SignalWatcher:
                         return  # 不注册
 
                     # 找最低分的非保护（非 is_reorder）挂单
-                    evictable = [e for e in same_dir if not e.is_reorder]
+                    # 方向上限已满 → 只在同方向里选；仅总数已满 → 在全部未触发挂单里选最低分
+                    _pool = same_dir if len(same_dir) >= max_dir else [
+                        e for e in self._watched.values()
+                        if not e.triggered and not e.is_expired() and e.cancel_state == "none"]
+                    evictable = [e for e in _pool if not e.is_reorder and not e.triggered]
                     if not evictable:
-                        logger.info(
+                        logger.debug(
                             f"[signal_watcher] {symbol} 槽位满且全部为重挂单，无法替换，丢弃"
                         )
                         # 槽位满且全部受保护，静默丢弃
@@ -675,7 +710,7 @@ class SignalWatcher:
 
                     lowest = min(evictable, key=lambda e: e.pending_score)
                     if entry.pending_score <= lowest.pending_score + PENDING_REPLACE_MARGIN:
-                        logger.info(
+                        logger.debug(
                             f"[signal_watcher] {symbol} 新分 {entry.pending_score:.0f} "
                             f"≤ 最低分 {lowest.pending_score:.0f}+{PENDING_REPLACE_MARGIN}，"
                             f"竞争未胜出，丢弃"
@@ -739,14 +774,28 @@ class SignalWatcher:
                 # sig_id = symbol + 扫描时间戳（避免同标的多次信号冲突）
                 _scan_ts   = str(_sig.get("_scan_ts", int(time.time())))
                 _sig_id    = f"{symbol}_{_scan_ts}"
+                # [机制一] 重挂/改价（replace 或 is_reorder）沿用原卡片 sig_id：不新建缓冲、不再生成「进入监控」行，
+                #   否则每次重挂都会留下一份孤立缓冲，30 分钟后被兜底 flush 成一条重复的「进入监控」通知
+                _reuse_card = False
+                _prev_sid = _sig.get("_sig_id", "") if (is_reorder or replace) else ""
+                if _prev_sid:
+                    try:
+                        from shared.notifier import _signal_buffer as _sbuf, _card_cache as _ccache
+                        if _sbuf.has(_prev_sid) or _prev_sid in _ccache:
+                            _sig_id, _reuse_card = _prev_sid, True
+                    except Exception:
+                        pass
                 _sig["_sig_id"] = _sig_id   # 写回 signal，供后续节点使用
                 _expire_min   = int(max(0, expire_ts - time.time()) / 60)
                 _sl_deg       = bool(_sig.get("sl_degraded") or (_sig.get("params") or {}).get("sl_degraded"))
                 _monitor_line = fmt_node_monitor(_score_val, entry_price, _expire_min, _sl_deg)
                 # [fix] 只进缓冲区（buffer_signal），不 flush：等 _trigger 里价格触发后再 flush 合并发出
                 #   未触发就过期/被淘汰 → discard_signal 静默丢弃，不会产生幽灵卡片
-                buffer_signal(_sig_id, _header)
-                (await asyncio.to_thread(card_append, _sig_id, _monitor_line))
+                if _reuse_card:
+                    logger.debug(f"[signal_watcher] {symbol} 重挂沿用原卡片 {_sig_id}，静默更新（不发通知）")
+                else:
+                    buffer_signal(_sig_id, _header)
+                    (await asyncio.to_thread(card_append, _sig_id, _monitor_line))
             except Exception as _ne:
                 logger.debug(f"[signal_watcher] 信号卡片创建失败（非致命）: {_ne}")
 
@@ -1681,6 +1730,66 @@ class SignalWatcher:
 
 
     @staticmethod
+    def _validity_check(entry: 'WatchEntry', price: float, rsi_1h: float, atr: float,
+                        ema20: float = 0.0, close_1h: float = 0.0, funding: float = 0.0) -> str:
+        """[机制四] recheck 持续有效性检查（只用 recheck 已有数据，不新增请求）。返回退出原因，空串 = 通过。
+        评分(<30)检查沿用 _recheck_one 里已有的时效耗尽逻辑，不在此重复；BTC 1H 急跌保护因拿不到 1H 数据未实现。
+        """
+        direction = entry.signal.get('direction', 'LONG').upper()
+        mode = entry.mode
+        if atr <= 0:
+            return ""
+        # ② EMA20 结构（仅趋势类 pullback / breakout；反转类入场本来就逆 EMA，不适用）
+        if mode in ('pullback', 'breakout') and ema20 > 0:
+            cp = close_1h if close_1h > 0 else price
+            if direction == 'LONG' and cp < ema20 - atr:
+                return f"EMA20 结构翻转：1H收盘 {cp:.6g} 跌破 EMA20-1ATR={ema20 - atr:.6g}"
+            if direction == 'SHORT' and cp > ema20 + atr:
+                return f"EMA20 结构翻转：1H收盘 {cp:.6g} 涨破 EMA20+1ATR={ema20 + atr:.6g}"
+        # ③ RSI 极端：追高/追空侧对所有模式生效；信号前提侧（超卖做多/超买做空）对反转类豁免
+        if rsi_1h > 0:
+            if direction == 'LONG':
+                if rsi_1h > 72:
+                    return f"RSI 极端：LONG 时 RSI1H={rsi_1h:.1f}>72"
+                if rsi_1h < 28 and mode != 'reversal':
+                    return f"RSI 极端：LONG 时 RSI1H={rsi_1h:.1f}<28"
+            else:
+                if rsi_1h < 28:
+                    return f"RSI 极端：SHORT 时 RSI1H={rsi_1h:.1f}<28"
+                if rsi_1h > 72 and mode != 'reversal':
+                    return f"RSI 极端：SHORT 时 RSI1H={rsi_1h:.1f}>72"
+        # ④ 价格位置：已越过入场区间不利一侧超过 1ATR（funding_arb 为即时入场，不适用）
+        if mode != 'funding_arb' and price > 0:
+            if direction == 'LONG' and entry.entry_low > 0 and price < entry.entry_low - atr:
+                return f"价格跌破入场区间超过 1ATR（{price:.6g} < {entry.entry_low - atr:.6g}）"
+            if direction == 'SHORT' and entry.entry_high > 0 and price > entry.entry_high + atr:
+                return f"价格涨破入场区间超过 1ATR（{price:.6g} > {entry.entry_high + atr:.6g}）"
+        # ⑤ 资金费率
+        if direction == 'LONG' and funding > 0.002:
+            return f"资金费率过高：LONG 时 funding={funding * 100:.3f}%>0.2%"
+        if direction == 'SHORT' and funding < -0.002:
+            return f"资金费率过低：SHORT 时 funding={funding * 100:.3f}%<-0.2%"
+        return ""
+
+    async def _notify_exit(self, sym: str, entry: 'WatchEntry', reason: str) -> None:
+        """[机制四] 信号退出监控通知（仅当条目确实已移除时发送），并丢弃其未发送的「进入监控」缓冲。"""
+        async with self._lock:
+            removed = self._watched.get(sym) is not entry
+        if not removed:
+            return
+        try:
+            from shared.notifier import discard_signal, notify, _hhmm
+            sid = entry.signal.get("_sig_id", "")
+            if sid:
+                discard_signal(sid)
+            d = entry.signal.get("direction", "LONG").upper()
+            text = (f"\n🚪 {_hhmm()} 退出监控\n {sym} {'多' if d == 'LONG' else '空'}单 · {entry.mode}"
+                    f"\n 原因：{reason}")
+            await asyncio.to_thread(notify, text)
+        except Exception as _ne:
+            logger.debug(f"[signal_watcher] {sym} 退出通知发送失败（忽略）: {_ne}")
+
+    @staticmethod
     def _survival_check(entry: 'WatchEntry', price: float, rsi_1h: float, atr: float,
                         realtime_ema20: float = 0.0, close_1h: float = 0.0,
                         post_high: float = 0.0, post_low: float = 0.0,
@@ -1859,6 +1968,7 @@ class SignalWatcher:
         mark_mp = float((_mpd or {}).get('markPrice', 0) or 0)
         if mark_mp <= 0:
             return
+        funding_now = float((_mpd or {}).get('lastFundingRate', 0) or 0)   # [机制四] 复用同一次取数
         # 触发后新高/新低（reversal 用）：注册后的已收盘 1H 高低点
         _added_ms = entry.added_ts * 1000
         _post = [k for k in k1h[:-1] if float(k[0]) >= _added_ms]
@@ -1902,6 +2012,16 @@ class SignalWatcher:
             if _new_score < _abandon_score and not entry.is_reorder:
                 cancel_reason = f"时效耗尽（分数{_new_score:.0f}<{_abandon_score}），主动释放槽位"
                 logger.info(f"[recheck] {sym} abandoned_low_score: {cancel_reason}")
+
+        # ── [机制四] 持续有效性检查（评分 / EMA20 / RSI / 价格位置 / 资金费率）──────
+        if cancel_reason is None:
+            _vr = self._validity_check(entry, mark_mp, rsi_v, atr_v, ema20=ema20,
+                                       close_1h=close_1h, funding=funding_now)
+            if _vr:
+                cancel_reason = _vr
+                logger.debug(f'[recheck] {sym} 有效性检查未通过: {_vr}')
+            else:
+                logger.debug(f'[recheck] {sym} 有效性检查通过')
 
         # BTC 大盘结构：BTC 4H 空头时，非 SHORT 挂单全撤
         # 豁免（v3.7）：独立行情信号保留——满足以下任一则豁免撤单：
@@ -1987,6 +2107,7 @@ class SignalWatcher:
         if cancel_reason:
             logger.info(f'[recheck] {sym} 撤单: {cancel_reason}')
             await self._cancel_and_remove(sym, entry, cancel_reason)
+            await self._notify_exit(sym, entry, cancel_reason)   # [机制四] 退出监控通知
             return
 
         # ── B1. 价格位移重挂（v3.72：reversal/breakout 入场价偏离 > 1 ATR 时重算）──
@@ -2020,35 +2141,40 @@ class SignalWatcher:
                             _new_sig['pre_entry_price'] = _new_params['entry_price']
                             from shared.signal_watcher import compute_entry_range as _cer
                             _el, _eh, _ep = _cer(_new_sig, mark_mp, liq_long=_liq_long, liq_short=_liq_short)
-                            # 按 mode 使用对应有效期
-                            try:
-                                from config import ORDER_EXPIRE_BREAKOUT_MIN as _exp_bo, ORDER_EXPIRE_PULLBACK_MIN as _exp_pb
-                            except Exception:
-                                _exp_bo, _exp_pb = 30, 240
-                            if mode == "breakout":
-                                _exp_min = _exp_bo          # 30 分钟
-                            elif mode == "reversal":
-                                _exp_min = int(_exp_pb * 1.5)  # 360 分钟
+                            if _reorder_params_unchanged(entry, _ep, _new_params, atr_v):
+                                # [机制一] 参数变化 <=0.1ATR：什么都不做（不重挂、不通知）
+                                logger.debug(f'[recheck] {sym} 重算参数无实质变化(<=0.1ATR)，维持原挂单 '
+                                             f'old_ep={entry.entry_price:.6g} new_ep={_ep:.6g}')
                             else:
-                                _exp_min = _exp_pb           # 240 分钟
-                            # [v3.87 STEP5-8] 参数与清算区位移重挂对齐：补 on_trigger 和触发快照字段，去掉不存在的 loop；
-                            #   先注册新单、成功后才撤旧单（见 _reorder_replace）。
-                            await self._reorder_replace(
-                                sym, entry, _new_sig,
-                                entry_low=_el, entry_high=_eh, entry_price=_ep,
-                                expire_ts=time.time() + _exp_min * 60,
-                                on_trigger=entry.on_trigger,
-                                trigger_price=mark_mp,
-                                trigger_rsi_1h=rsi_v,
-                                breakout_ref=entry.breakout_ref,
-                                ema20_at_trigger=ema20,
-                                atr_at_trigger=atr_v,
-                                is_reorder=True,
-                                reorder_count=entry.reorder_count + 1,
-                                score_created_at=entry.score_created_at,
-                                score_original_expire=entry.score_original_expire,
-                            )
-                            return  # 重挂完成，本次 recheck 结束
+                                # 按 mode 使用对应有效期
+                                try:
+                                    from config import ORDER_EXPIRE_BREAKOUT_MIN as _exp_bo, ORDER_EXPIRE_PULLBACK_MIN as _exp_pb
+                                except Exception:
+                                    _exp_bo, _exp_pb = 30, 240
+                                if mode == "breakout":
+                                    _exp_min = _exp_bo          # 30 分钟
+                                elif mode == "reversal":
+                                    _exp_min = int(_exp_pb * 1.5)  # 360 分钟
+                                else:
+                                    _exp_min = _exp_pb           # 240 分钟
+                                # [v3.87 STEP5-8] 参数与清算区位移重挂对齐：补 on_trigger 和触发快照字段，去掉不存在的 loop；
+                                #   先注册新单、成功后才撤旧单（见 _reorder_replace）。
+                                await self._reorder_replace(
+                                    sym, entry, _new_sig,
+                                    entry_low=_el, entry_high=_eh, entry_price=_ep,
+                                    expire_ts=time.time() + _exp_min * 60,
+                                    on_trigger=entry.on_trigger,
+                                    trigger_price=mark_mp,
+                                    trigger_rsi_1h=rsi_v,
+                                    breakout_ref=entry.breakout_ref,
+                                    ema20_at_trigger=ema20,
+                                    atr_at_trigger=atr_v,
+                                    is_reorder=True,
+                                    reorder_count=entry.reorder_count + 1,
+                                    score_created_at=entry.score_created_at,
+                                    score_original_expire=entry.score_original_expire,
+                                )
+                                return  # 重挂完成，本次 recheck 结束
                     except Exception as _pe_sw:
                         logger.warning(f'[recheck] {sym} 价格位移重挂失败，保留原挂单: {_pe_sw}')  # [v3.87 STEP5-8] debug→warning，失败不再被淹没
         except Exception as _pse:
