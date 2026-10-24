@@ -807,7 +807,7 @@ OI_DIV_ORDER_EXPIRE_MIN      = 60      # oi_divergence 挂单有效期（分钟�
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── 触发门槛 ──────────────────────────────────────────────────────────────────
-EMA_TREND_EMA_GAP_MIN_PCT     = 0.003  # EMA20 > EMA50 至少差距 0.3%（防止刚刚交叉的假多头；原 0.5%，影子数据显示过严）
+EMA_TREND_EMA_GAP_MIN_PCT     = 0.005  # EMA20 > EMA50 至少差距 0.5%（防止刚刚交叉的假多头；影子数据：排列不明确被拒信号 EV 为负，0.3% 已回滚）
 EMA_TREND_RSI1H_MIN           = 48     # 1H RSI 下限（太低说明已经超卖，走 reversal 更合适）
 EMA_TREND_RSI1H_MAX           = 68     # 1H RSI 上限（太高说明已超买，不是好的回踩入场点）
 EMA_TREND_RSI1H_SHORT_MIN     = 32     # 做空 RSI1H 下限（原沿用做多 48）
@@ -820,6 +820,7 @@ EMA_TREND_RSI4H_MAX           = 72     # 4H RSI 上限（超买区域放弃）
 # ── 回踩深度：价格必须在 EMA20 附近（回踩确认） ───────────────────────────────
 EMA_TREND_PULLBACK_ABOVE_EMA  = 0.02   # 价格最多在 EMA20 上方 2%（过高说明没回踩，追高）
 EMA_TREND_PULLBACK_BELOW_EMA  = 0.015  # 价格最多在 EMA20 下方 1.5%（过低说明已破结构）
+EMA_TREND_PULLBACK_BELOW_EMA_LONG = 0.02  # 做多专用：价格最多在 EMA20 下方 2.0%（做空仍用上面的 1.5%）
 
 # ── BTC 协同：只在 BTC 不处于明显熊市时允许做多 ─────────────────────────────
 # 由 scanner 的 btc_trend 处理，不在 judge 层重复检查

@@ -3841,6 +3841,7 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
             EMA_TREND_RSI4H_MAX        as _RSI4H_MAX,
             EMA_TREND_PULLBACK_ABOVE_EMA as _PB_ABOVE,
             EMA_TREND_PULLBACK_BELOW_EMA as _PB_BELOW,
+            EMA_TREND_PULLBACK_BELOW_EMA_LONG as _PB_BELOW_LONG,
             EMA_TREND_VOL_RATIO_MIN    as _VOL_MIN,
             EMA_TREND_BASE_STRONG      as _BASE_STRONG,
             EMA_TREND_BASE_MEDIUM      as _BASE_MEDIUM,
@@ -3849,10 +3850,10 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
             EMA_TREND_ATR_MIN          as _ATR_MID_MIN,
         )
     except Exception:
-        _EMA_GAP      = 0.003
+        _EMA_GAP      = 0.005
         _RSI1H_MIN    = 48;  _RSI1H_MAX = 68
         _RSI4H_MIN    = 45;  _RSI4H_MAX = 72
-        _PB_ABOVE     = 0.02; _PB_BELOW = 0.015
+        _PB_ABOVE     = 0.02; _PB_BELOW = 0.015; _PB_BELOW_LONG = 0.02
         _VOL_MIN      = 0.5
         _BASE_STRONG  = 65;  _BASE_MEDIUM = 52
         _CHG24_MAX    = 12.0; _CHG24_MIN = -8.0
@@ -3981,10 +3982,10 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
                 f"{pb_ratio*100:.1f}% > {_PB_ABOVE*100:.1f}%，非回踩入场"
             )
             return False, out
-        if pb_ratio < -_PB_BELOW:
+        if pb_ratio < -_PB_BELOW_LONG:
             out["reject_reason"] = (
                 f"价格破位: price={price:.4g} 在 EMA20={ema20_4h:.4g} 下方 "
-                f"{abs(pb_ratio)*100:.1f}% > {_PB_BELOW*100:.1f}%，EMA 支撑失效"
+                f"{abs(pb_ratio)*100:.1f}% > {_PB_BELOW_LONG*100:.1f}%，EMA 支撑失效"
             )
             return False, out
     else:  # SHORT
