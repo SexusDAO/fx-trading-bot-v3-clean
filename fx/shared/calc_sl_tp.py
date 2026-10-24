@@ -1433,7 +1433,12 @@ def calc_sl_tp(
     # ── TP1 上限保护：按 tier 动态截断（high tier 放宽至 25%，防止 RR 不足）──
     _tp1_cap = _TP1_MAX_PCT_HIGH if tier == "high" else _TP1_MAX_PCT
     # v3.14: high tier RR 要求放宽至 1.5（SL>12.5% 时 TP cap25% 与 RR2.0 互斥）
-    _rr_min = _CFG_RR_MIN_TP1_HIGH if tier == "high" else _TP1_MIN_RR
+    if mode == "reversal":
+        _rr_min = _TP1_MIN_RR_REVERSAL   # reversal 专属门槛(1.2),与清算区候选遍历一致
+    elif tier == "high":
+        _rr_min = _CFG_RR_MIN_TP1_HIGH
+    else:
+        _rr_min = _TP1_MIN_RR
     tp1_pct = abs(tp1 - entry) / (entry + 1e-9)
     if tp1_pct > _tp1_cap:
         if direction == "LONG":

@@ -32,3 +32,15 @@ def test_degraded_atr_tp_unchanged_for_reversal():
 def test_config_value():
     import config
     assert config.RR_MIN_TP1_REVERSAL == 1.2 and config.RR_MIN_TP1 == 2.0
+
+
+def _cap_signal(mode):
+    return {"symbol": "XUSDT", "direction": "SHORT", "mode": mode, "volatility_tier": "mid",
+            "fill_price": 100.0, "ind": {}}
+
+
+def test_tp1_cap_rr_threshold_reversal_vs_general(monkeypatch):
+    """TP1 被 cap 截断后 RR=1.5:reversal(门槛1.2)不应因 RR 被拒绝,通用(2.0)走收紧SL/拒绝路径。"""
+    import inspect
+    src = inspect.getsource(c.calc_sl_tp)
+    assert 'if mode == "reversal":\n        _rr_min = _TP1_MIN_RR_REVERSAL' in src
