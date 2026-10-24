@@ -109,9 +109,14 @@ def _http_edit(message_id: str, new_text: str) -> bool:
                 "message":   new_text,
             },
         }, headers=_GW_HDR, timeout=6)
+        if resp.status_code != 200:
+            logger.warning(
+                f"[notifier] _http_edit 失败: status={resp.status_code} "
+                f"body={(resp.text or '')[:200]}"
+            )
         return resp.status_code == 200
     except Exception as e:
-        logger.debug(f"[notifier] _http_edit 失败: {e}")
+        logger.warning(f"[notifier] _http_edit 异常: {e}")
     return False
 
 
