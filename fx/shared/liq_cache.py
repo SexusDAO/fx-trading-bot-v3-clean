@@ -18,6 +18,11 @@ from typing import Any
 
 logger = logging.getLogger("fx.liq_cache")
 
+try:
+    from config import LIQ_PREFETCH_MAX_WORKERS, LIQ_PREFETCH_SLEEP_SEC
+except ImportError:   # config 缺这两项时的兜底（与 config.py 默认值一致）
+    LIQ_PREFETCH_MAX_WORKERS, LIQ_PREFETCH_SLEEP_SEC = 2, 1.0
+
 # ── 缓存存储 ───────────────────────────────────────────────────────────────
 _CACHE: dict[str, dict] = {}
 _CACHE_TTL = 15 * 60   # 15 分钟
@@ -317,7 +322,7 @@ def _prefetch_one(sym: str) -> bool:
 
         if wrote > 0:
             logger.debug(f"[liq_cache] {sym} 预热写入 {wrote}/3 个 range key")
-        time.sleep(0.5)   # 每个工作线程内保持 0.5s 节流
+        time.sleep(LIQ_PREFETCH_SLEEP_SEC)   # 每个工作线程内的节流（config.LIQ_PREFETCH_SLEEP_SEC）
         return wrote > 0
     except Exception as e:
         logger.debug(f"[liq_cache] {sym} 预热失败: {e}")
@@ -327,11 +332,11 @@ def _prefetch_one(sym: str) -> bool:
 def prefetch_liq_cache(symbols: list) -> None:
     """
     后台批量预热缓存（每 15 分钟由 main.py 触发）。
-    [perf 4-B] 固定 5 个工作线程的线程池处理全部标的，线程数不随标的数增长。
+    [perf 4-B] 固定 LIQ_PREFETCH_MAX_WORKERS（默认 2）个工作线程的线程池处理全部标的，线程数不随标的数增长。
     """
     from concurrent.futures import ThreadPoolExecutor
     logger.info(f"[liq_cache] 开始预热 {len(symbols)} 个标的的清算区缓存")
-    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="liq-prefetch") as pool:
+    with ThreadPoolExecutor(max_workers=LIQ_PREFETCH_MAX_WORKERS, thread_name_prefix="liq-prefetch") as pool:
         results = list(pool.map(_prefetch_one, symbols))
     updated = sum(1 for x in results if x)
     logger.info(f"[liq_cache] 预热完成，共 {len(symbols)} 个标的，更新 {updated} 个")
