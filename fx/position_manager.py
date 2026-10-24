@@ -582,6 +582,8 @@ class PositionManager:
             from config import MFE_DRAWBACK_USE_PROGRESS as _MFE_USE_PROG
         except Exception:
             _MFE_USE_PROG = True
+        # 两套逻辑互斥隔离:开关=True 且仓位有 orig_tp_dist 时 _prog 非 None,只走进度版(下面 elif 的旧逻辑不会执行);
+        #   开关=False 或旧仓位无 orig_tp_dist 时 _prog 为 None,只走旧逻辑。任何情况下两套不会同时触发。
         _prog = _mfe_drawback_progress_hit(pos, _mfe_val, fav, entry_p) if _MFE_USE_PROG else None
         if _prog is not None:
             # 进度版:有 orig_tp_dist 的仓位走这里,不再进入下面的旧逻辑
@@ -2859,7 +2861,7 @@ async def _maybe_pyramid(pos: dict) -> None:
     浮盈 >= PYRAMID_FLOAT_PROFIT_ATR × ATR 时,顺势加一笔 PYRAMID_SIZE_RATIO × 原仓位。
     每个方向每个标的最多加一次(pyramid_addup=True 标记后不重复)。
     加仓条件:
-      1 浮盈 >= 1.0 ATR
+      1 浮盈 >= PYRAMID_FLOAT_PROFIT_ATR(1.5) ATR
       2 RSI 未到超买/超卖极端(LONG: RSI1H < 75; SHORT: RSI1H > 25)
       3 总持仓未超上限
       4 未加过仓(pyramid_addup 标记)
@@ -2966,6 +2968,29 @@ async def _maybe_pyramid(pos: dict) -> None:
         if remaining <= 0:
             logger.debug(f"[pm] {symbol} 加仓跳过: 当前剩余数量为 0")
             return
+
+        # 加仓后止损距离检查:加仓后 SL 移到原入场价(保本线),若新均价离保本线不足 1.5 ATR,
+        #   说明加仓后几乎没有缓冲,稍有回撤就会被打出,本轮跳过。
+        _new_remaining_pre = remaining + addup_qty
+        _new_avg_pre = (entry * remaining + price * addup_qty) / _new_remaining_pre
+        _post_sl_dist = abs(_new_avg_pre - entry) / _new_avg_pre if _new_avg_pre > 0 else 0.0
+        if atr_ratio > 0 and _post_sl_dist < 1.5 * atr_ratio:
+            logger.debug(
+                f"[pm] {symbol} 加仓跳过: 加仓后止损距离"
+                f"{_post_sl_dist*100:.2f}% < 1.5ATR({1.5*atr_ratio*100:.2f}%)"
+            )
+            return
+
+        # TP 空间检查:加仓价到 TP1 的剩余空间须 >= 1.0 ATR,否则大部分利润已兑现,加仓意义不大
+        _tp1_chk = float(pos.get("tp1_price", 0) or 0)
+        if _tp1_chk > 0 and price > 0 and atr_ratio > 0:
+            _remaining_to_tp = ((_tp1_chk - price) if direction == "LONG" else (price - _tp1_chk)) / price
+            if _remaining_to_tp < 1.0 * atr_ratio:
+                logger.debug(
+                    f"[pm] {symbol} 加仓跳过: 距TP1剩余空间"
+                    f"{_remaining_to_tp*100:.2f}% < 1.0ATR({atr_ratio*100:.2f}%)"
+                )
+                return
 
         # 市价加仓(顺势,不挂限价单避免滑点窗口问题)
         buy_side = "BUY" if direction == "LONG" else "SELL"
