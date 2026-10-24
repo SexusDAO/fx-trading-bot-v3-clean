@@ -326,7 +326,7 @@ HUB_LOAD_MAX_WORKERS = 2  # hub历史K线加载并发上限
 HUB_NO_MSG_TIMEOUT = 180  # 120→180：给历史加载留余量，减少阻塞引发的假断线； WebSocket 无消息超时（秒），过短会因GIL饿死误触发重连
 KLINE_FETCH_CONCURRENCY = 6  # hub历史K线REST拉取并发上限
 LIQ_PREFETCH_MAX_WORKERS = 2   # 预热线程数，降低SSL并发防止阻塞事件循环
-LIQ_PREFETCH_SLEEP_SEC   = 1.0 # 每个标的预热后的节流间隔（秒）
+LIQ_PREFETCH_SLEEP_SEC   = 2.0 # 每个标的预热后的节流间隔（秒）
 KLINE_LOAD_BATCH_SIZE = 200  # hub 每次对账最多新建的历史K线加载任务数（超出留到下一轮，每 2s 一轮）
 KLINE_GAP_RELOAD_COOLDOWN_SEC = 60  # 同一 series 因K线缺口触发重拉的冷却时间（秒）
 HUB_WS_PROXY = ""  # hub WebSocket 代理，空字符串=直连，"__env__"=跟随环境变量 PROXY_URL
