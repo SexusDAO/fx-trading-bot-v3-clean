@@ -1199,6 +1199,7 @@ async def _on_position_closed(pos_id: str, symbol: str,
             pnl_pct      = _pnl_pct,
             tp1_filled   = _tp1_ok,
             tp2_filled   = _tp2_ok,
+            symbol=symbol, pos=pos,
         )
         if _sig_id_ws:
             import asyncio as _aio_ws

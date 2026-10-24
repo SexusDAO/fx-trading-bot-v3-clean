@@ -615,6 +615,15 @@ _CLOSE_REASON_CN = {
     "partial_time_stop": "时间止损",
     "breakout_fail":     "突破失败",
     "exit_signal_reversal": "反向信号平仓",
+    # [v3.98] 平仓通知可读性：新增原因映射（未收录的原因码保持显示原始英文）
+    "rr_below_threshold": "盈亏比不足，主动锁利",
+    "tp1_hit":           "止盈1触发",
+    "tp2_hit":           "止盈2触发",
+    "sl_hit":            "止损触发",
+    "time_limit":        "持仓超时，强制离场",
+    "health_check":      "健康检查不通过，主动离场",
+    "manual":            "手动平仓",
+    "funding_cost":      "资金费率过高，主动离场",
 }
 
 
@@ -704,29 +713,67 @@ def fmt_node_tp1(tp1_fill_price, new_sl_price) -> str:
     )
 
 
+def _fmt_hold_cn(hold_minutes: float) -> str:
+    """持仓时长中文展示：2小时15分 / 45分钟（负数或异常按 0 处理）。"""
+    try:
+        total = max(int(float(hold_minutes)), 0)
+    except (TypeError, ValueError):
+        total = 0
+    h, m = divmod(total, 60)
+    if h > 0:
+        return f"{h}小时{m}分"
+    return f"{m}分钟"
+
+
+def _fmt_tp_status(filled: bool, exists: bool, label: str) -> str:
+    """单个止盈单状态：已触发 ✅ / 未触发 ✗ / 无此挂单 → 空串（不显示）。"""
+    if filled:
+        return f"{label}已触发 ✅"
+    if not exists:
+        return ""
+    return f"{label}未触发 ✗"
+
+
 def fmt_node_close(close_reason: str, exit_price, hold_minutes: float,
                    pnl_usdt: float, pnl_pct: float,
-                   tp1_filled: bool, tp2_filled: bool) -> str:
-    """节点6：平仓完成（含尾部分隔线）"""
-    reason_cn  = _CLOSE_REASON_CN.get(close_reason, close_reason)
-    hold_str   = fmt_hold_time(hold_minutes)
-    tp1_mark   = "✓" if tp1_filled else "✗"
-    tp2_mark   = "✓" if tp2_filled else "✗"
-    if pnl_usdt >= 0:
-        emoji    = "🟢"
-        pnl_line = f" PnL +{pnl_usdt:.1f}U (+{pnl_pct:.2f}%)"
-        result_line = f" TP1 {tp1_mark} TP2 {tp2_mark}"
-    else:
-        emoji    = "🔴"
-        pnl_line = f" PnL {pnl_usdt:.1f}U ({pnl_pct:.2f}%)"
-        result_line = f" TP1 {tp1_mark} 止损 ✓"
-    return (
-        f"\n{emoji} {_hhmm()} 平仓完成 {reason_cn}"
-        f"\n 出场价 {_fmt_price(exit_price)}"
-        f"\n 持仓 {hold_str} · {pnl_line}"
-        f"\n{result_line}"
-        f"\n{_SEP}"
-    )
+                   tp1_filled: bool, tp2_filled: bool,
+                   symbol: str = "", direction: str = "",
+                   tp1_exists: bool | None = None, tp2_exists: bool | None = None,
+                   pos: dict | None = None) -> str:
+    """节点6：平仓完成（含尾部分隔线）
+
+    [v3.98] 可读性优化：带标的/方向标题，逐行展示出场价/持仓时长/盈亏/出场原因/止盈情况。
+      · 出场原因：映射表有则显示中文，未知原因码原样显示（不翻译）
+      · 止盈情况：TP1/TP2 已触发 ✅ / 未触发 ✗；无此挂单（exists=False 且未成交）则不显示该项，两项都无则整行不显示
+      · 可直接传 pos（持仓记录）：自动取 symbol/direction，并以 tp1/tp2_order_id 是否存在判断「有无此挂单」；
+        显式传入的 symbol/direction/tp1_exists/tp2_exists 优先。未传 pos 且未传 *_exists 时按「有挂单」处理。
+    新增参数均有默认值，旧调用方式不受影响。"""
+    pos = pos or {}
+    symbol = symbol or pos.get("symbol", "") or ""
+    direction = direction or pos.get("direction", "") or ""
+    if tp1_exists is None:
+        tp1_exists = bool(pos.get("tp1_order_id")) if pos else True
+    if tp2_exists is None:
+        tp2_exists = bool(pos.get("tp2_order_id")) if pos else True
+    reason_cn = _CLOSE_REASON_CN.get(close_reason, close_reason)
+    emoji = "🟢" if pnl_usdt >= 0 else "🔴"
+    dir_cn = {"LONG": "多单", "SHORT": "空单"}.get(str(direction or "").upper(), "")
+    title = f"{symbol} {dir_cn}平仓".strip() if symbol else "平仓完成"
+    tp_parts = [x for x in (
+        _fmt_tp_status(bool(tp1_filled), bool(tp1_exists), "TP1"),
+        _fmt_tp_status(bool(tp2_filled), bool(tp2_exists), "TP2"),
+    ) if x]
+    lines = [
+        f"\n{emoji} {title} {_hhmm()}",
+        f"出场价：{_fmt_price(exit_price)}",
+        f"持仓时长：{_fmt_hold_cn(hold_minutes)}",
+        f"盈亏：{pnl_usdt:+.1f}U（{pnl_pct:+.2f}%）",
+        f"出场原因：{reason_cn}",
+    ]
+    if tp_parts:
+        lines.append("止盈情况：" + " / ".join(tp_parts))
+    lines.append(_SEP)
+    return "\n".join(lines)
 
 
 def fmt_node_timeout(waited_min: int) -> str:

@@ -2366,6 +2366,8 @@ async def _close_position_post_static(
             pnl_pct      = pnl_pct,
             tp1_filled   = pos.get("tp1_filled", False),
             tp2_filled   = pos.get("tp2_filled", False),
+            symbol       = symbol,
+            pos          = pos,
         )
         if _sig_id_cls:
             await card_append_async(_sig_id_cls, _close_line)
