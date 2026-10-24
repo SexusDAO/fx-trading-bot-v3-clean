@@ -140,3 +140,91 @@ def test_vol_ratio_nonzero_with_forming_bar():
                            ks + [B._forming(200 * H, 100.0, H, last_vol)],
                            ks[::4] + [B._forming(200 * H, 100.0, H, last_vol)])
     assert ind2["vol_ratio"] > 0 and abs(ind2["vol_ratio"] - 1.0) < 1e-6
+
+
+# ───────────── 限价回踩入场（--entry-mode limit）─────────────
+def test_limit_price_sides():
+    assert abs(B.limit_price("LONG", 100.0, 0.005) - 99.5) < 1e-9
+    assert abs(B.limit_price("SHORT", 100.0, 0.005) - 100.5) < 1e-9
+
+
+def test_entry_direct_returns_signal_bar_and_close():
+    assert B.entry_for(flat(10), 2, "LONG", 100.0, 4, "direct") == (2, 100.0)
+
+
+def test_entry_limit_long_fills_on_first_touch_at_limit_price():
+    k = flat(10)
+    k[4] = bar(4, 100, 100, 99.4, 99.8)               # low 99.4 <= 99.5 → 成交
+    fi, ep = B.entry_for(k, 2, "LONG", 100.0, 4, "limit", 0.005)
+    assert fi == 4 and abs(ep - 99.5) < 1e-9
+
+
+def test_entry_limit_short_uses_high():
+    k = flat(10)
+    k[3] = bar(3, 100, 100.6, 100, 100.2)
+    fi, ep = B.entry_for(k, 2, "SHORT", 100.0, 4, "limit", 0.005)
+    assert fi == 3 and abs(ep - 100.5) < 1e-9
+
+
+def test_entry_limit_signal_bar_itself_does_not_count():
+    k = flat(10)
+    k[2] = bar(2, 100, 101, 98, 100)                   # 信号K线自己的 high/low 不能触发成交
+    assert B.entry_for(k, 2, "LONG", 100.0, 4, "limit", 0.005)[0] is None
+
+
+def test_entry_limit_unfilled_and_na():
+    assert B.entry_for(flat(10), 2, "LONG", 100.0, 4, "limit", 0.005)[0] is None      # 窗口内未触及
+    assert B.entry_for(flat(5), 2, "LONG", 100.0, 4, "limit", 0.005)[0] == "na"       # 窗口越界
+    k = flat(10); k.pop(4)
+    assert B.entry_for(k, 2, "LONG", 100.0, 4, "limit", 0.005)[0] == "na"             # 断档
+
+
+def test_entry_limit_touch_on_last_window_bar_counts_but_after_does_not():
+    k = flat(12)
+    k[6] = bar(6, 100, 100, 99.0, 99.6)               # idx=2,n=4 → 窗口 3..6，第6根算
+    assert B.entry_for(k, 2, "LONG", 100.0, 4, "limit", 0.005)[0] == 6
+    k = flat(12)
+    k[7] = bar(7, 100, 100, 99.0, 99.6)               # 第7根已超窗口
+    assert B.entry_for(k, 2, "LONG", 100.0, 4, "limit", 0.005)[0] is None
+
+
+def test_evaluate_after_limit_fill_uses_limit_price_and_next_bars():
+    k = flat(14)
+    k[4] = bar(4, 100, 100, 99.4, 99.6)               # 成交K线（LONG 挂单 99.5）
+    k[5] = bar(5, 99.6, 100.6, 99.5, 100.5)           # 成交后下一根：high 100.6 >= 99.5+1 → 命中
+    fi, ep = B.entry_for(k, 2, "LONG", 100.0, 4, "limit", 0.005)
+    e = B.evaluate(k, fi, "LONG", ep, 1.0, 4)
+    assert fi == 4 and e["hit"] and e["hit_bar"] == 1
+
+
+def test_block_excludes_unfilled_from_accuracy_and_reports_fill_rate():
+    base = {("LONG", 4): {"acc": 0.4, "win": 0.5, "n": 10, "fill_rate": 0.7}}
+    ev = {"hit": True, "hit_bar": 1, "ret_pct": 0.5, "win": True, "mfe_atr": 1.0, "mae_atr": 0.2}
+    mk = lambda fill, e: _t(fills={4: fill}, evals={4: e})
+    trades = [mk(3, ev), mk(None, None), mk(None, None), mk(5, dict(ev, hit=False, win=False, ret_pct=-0.2)),
+              mk("na", None)]
+    b = B.block(trades, base)
+    assert b["signals"] == 5 and b["insufficient"] == 1 and b["unfilled"] == 2 and b["filled"] == 2
+    assert abs(b["fill_rate"] - 0.5) < 1e-9                    # 2 成交 / 4 可判定
+    assert b["valid"] == 2 and b["accuracy"] == 0.5 and b["baseline_fill_rate"] == 0.7
+
+
+def test_baseline_limit_vs_direct_fill_rate():
+    k = flat(30)
+    for j in range(6, 30, 6):
+        k[j] = bar(j, 100, 100, 99.0, 99.8)           # 每隔6根有一次回踩
+    hours = [(i, 1.0, 100.0) for i in range(2, 20)]
+    d, l = {}, {}
+    B.accumulate_baseline(d, k, hours, (4,), "direct")
+    B.accumulate_baseline(l, k, hours, (4,), "limit", 0.005)
+    fd, fl = B.finalize_baseline(d), B.finalize_baseline(l)
+    assert fd[("LONG", 4)]["fill_rate"] == 1.0
+    assert 0.0 < fl[("LONG", 4)]["fill_rate"] < 1.0
+    assert ("SHORT", 4) not in fl                                # 这组数据里 SHORT 从不成交 → 没有有效样本，不产生基线项
+
+
+def test_cli_args_default_and_override():
+    a = B.parse_args([])
+    assert a.entry_mode == "direct" and abs(a.limit_offset - 0.005) < 1e-12
+    a = B.parse_args(["--entry-mode", "limit", "--limit-offset", "0.01"])
+    assert a.entry_mode == "limit" and abs(a.limit_offset - 0.01) < 1e-12

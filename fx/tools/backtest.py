@@ -3,7 +3,11 @@
 方向准确率回测框架 v1（纯离线计算，不依赖实盘账户，不改任何现有业务代码）
 
 核心问题：信号触发后，价格是否朝信号方向运动？
-  · 每根 1H K 线收盘时复用 calc_indicators / judge_* 生成信号；入场价 = 该根收盘价（视为市价入场）
+  · 每根 1H K 线收盘时复用 calc_indicators / judge_* 生成信号
+  · 入场方式 --entry-mode：direct = 该根收盘价市价入场（默认）；
+    limit = 限价回踩：挂单价 = 收盘价×(1∓offset)（LONG 下方、SHORT 上方，--limit-offset 默认 0.005），
+    之后 N 根 1H 内 LONG 的 low<=挂单价 / SHORT 的 high>=挂单价 才成交，成交价=挂单价，
+    从成交那根的下一根开始观察 N 小时；N 根内没触及算「未成交」，不计入准确率统计，只计入成交率
   · 清算图 / 盘口在回测里全部为空（liq_zones 不模拟），不调用 calc_sl_tp，不模拟挂单与止盈止损
   · 方向正确：入场后 N 根 1H 内，最高/最低价朝信号方向触及 ≥ 1×ATR（入场时的 1H ATR）
   · 时间止损：入场后第 N 根 1H 收盘价平仓，收益（按方向）> 0 记盈利
@@ -346,22 +350,52 @@ def evaluate(k1h_all: list, idx: int, direction: str, entry: float, atr: float, 
             "mfe_atr": mfe, "mae_atr": mae}
 
 
-def accumulate_baseline(acc: dict, k1h_all: list, hours: list, ns) -> None:
-    """所有判定小时、LONG/SHORT 两个方向、各 N 下的无条件命中/盈利计数。"""
+def limit_price(direction: str, price: float, offset: float) -> float:
+    return price * (1 - offset) if direction == "LONG" else price * (1 + offset)
+
+
+def entry_for(k1h_all: list, idx: int, direction: str, price: float, n: int, mode: str = "direct",
+              offset: float = 0.005):
+    """
+    返回 (fill_idx, entry_price)。fill_idx：成交 K 线下标；None=窗口内未成交（限价模式）；"na"=窗口数据不足/断档。
+    direct：fill_idx=idx，入场价=收盘价。limit：在 idx+1..idx+n 内首根触及挂单价的 K 线，入场价=挂单价。
+    """
+    if n < 1 or idx + n >= len(k1h_all) or int(k1h_all[idx + n][0]) - int(k1h_all[idx][0]) != n * H1:
+        return "na", price
+    if mode != "limit":
+        return idx, price
+    lim = limit_price(direction, price, offset)
+    for j in range(idx + 1, idx + n + 1):
+        if (float(k1h_all[j][3]) <= lim) if direction == "LONG" else (float(k1h_all[j][2]) >= lim):
+            return j, lim
+    return None, lim
+
+
+def accumulate_baseline(acc: dict, k1h_all: list, hours: list, ns, mode: str = "direct", offset: float = 0.005) -> None:
+    """所有判定小时、LONG/SHORT 两个方向、各 N 下的无条件命中/盈利计数（与信号用同一入场规则）。
+    acc[(d,n)] = [命中数, 盈利数, 有效数, 可判定的挂单数, 成交数]"""
     for idx, atr, price in hours:
         for d in ("LONG", "SHORT"):
             for n in ns:
-                e = evaluate(k1h_all, idx, d, price, atr, n)
+                fi, ep = entry_for(k1h_all, idx, d, price, n, mode, offset)
+                if fi == "na":
+                    continue
+                a = acc.setdefault((d, n), [0, 0, 0, 0, 0])
+                a[3] += 1
+                if fi is None:
+                    continue
+                a[4] += 1
+                e = evaluate(k1h_all, fi, d, ep, atr, n)
                 if e is None:
                     continue
-                a = acc.setdefault((d, n), [0, 0, 0])
                 a[0] += 1 if e["hit"] else 0
                 a[1] += 1 if e["win"] else 0
                 a[2] += 1
 
 
 def finalize_baseline(acc: dict) -> dict:
-    return {k: {"acc": v[0] / v[2], "win": v[1] / v[2], "n": v[2]} for k, v in acc.items() if v[2] > 0}
+    return {k: {"acc": v[0] / v[2], "win": v[1] / v[2], "n": v[2],
+                "fill_rate": (v[4] / v[3]) if v[3] else None} for k, v in acc.items() if v[2] > 0}
 
 
 # ═════════════════════════ 统计层 ═════════════════════════
@@ -376,23 +410,36 @@ def wilson(k: int, n: int, z: float = 1.96):
 
 
 def block(trades: list, base_rates: dict, n: int | None = None) -> dict:
-    """n=None：每笔按自己的 n_hours 评估；否则统一用 n 评估（用于 N 曲线）。"""
+    """n=None：每笔按自己的 n_hours 评估；否则统一用 n 评估（用于 N 曲线）。
+    限价模式：未成交的信号只计入 signals/unfilled 与成交率，不进入准确率；窗口数据不足的计入 insufficient。"""
     nn = (lambda t: n) if n is not None else (lambda t: t["n_hours"])
-    valid = [(t, t["evals"].get(nn(t))) for t in trades]
-    valid = [(t, e) for t, e in valid if e]
-    out = {"signals": len(trades), "valid": len(valid), "insufficient": len(trades) - len(valid)}
+
+    def status(t):
+        if t.get("fills") is not None and t["fills"].get(nn(t), "na") is None:
+            return "unfilled", None
+        e = t["evals"].get(nn(t))
+        return ("ok", e) if e else ("na", None)
+    st = [(t,) + status(t) for t in trades]
+    valid = [(t, e) for t, k, e in st if k == "ok"]
+    unfilled = sum(1 for _, k, _ in st if k == "unfilled")
+    na = sum(1 for _, k, _ in st if k == "na")
+    judged = len(trades) - na
+    out = {"signals": len(trades), "valid": len(valid), "insufficient": na, "unfilled": unfilled,
+           "filled": judged - unfilled, "fill_rate": ((judged - unfilled) / judged) if judged > 0 else None}
     if n is not None:
         out["n_hours"] = n
     if not valid:
         out.update({"accuracy": None, "accuracy_ci95": None, "baseline_accuracy": None, "excess_accuracy": None,
-                    "timestop_win_rate": None, "baseline_win_rate": None, "avg_ret_pct": None,
-                    "avg_mfe_atr": None, "avg_mae_atr": None, "long": 0, "short": 0})
+                    "timestop_win_rate": None, "baseline_win_rate": None, "baseline_fill_rate": None,
+                    "avg_ret_pct": None, "avg_mfe_atr": None, "avg_mae_atr": None, "long": 0, "short": 0})
         return out
     m = len(valid)
     hits = sum(1 for _, e in valid if e["hit"])
     wins = sum(1 for _, e in valid if e["win"])
-    b_acc = [base_rates[(t["direction"], nn(t))]["acc"] for t, _ in valid if (t["direction"], nn(t)) in base_rates]
-    b_win = [base_rates[(t["direction"], nn(t))]["win"] for t, _ in valid if (t["direction"], nn(t)) in base_rates]
+    keys = [(t["direction"], nn(t)) for t, _ in valid if (t["direction"], nn(t)) in base_rates]
+    b_acc = [base_rates[k]["acc"] for k in keys]
+    b_win = [base_rates[k]["win"] for k in keys]
+    b_fill = [base_rates[k]["fill_rate"] for k in keys if base_rates[k].get("fill_rate") is not None]
     acc = hits / m
     b_acc_m = sum(b_acc) / len(b_acc) if b_acc else None
     out.update({"accuracy": round(acc, 4), "accuracy_ci95": wilson(hits, m),
@@ -400,6 +447,7 @@ def block(trades: list, base_rates: dict, n: int | None = None) -> dict:
                 "excess_accuracy": round(acc - b_acc_m, 4) if b_acc_m is not None else None,
                 "timestop_win_rate": round(wins / m, 4),
                 "baseline_win_rate": round(sum(b_win) / len(b_win), 4) if b_win else None,
+                "baseline_fill_rate": round(sum(b_fill) / len(b_fill), 4) if b_fill else None,
                 "avg_ret_pct": round(sum(e["ret_pct"] for _, e in valid) / m, 4),
                 "avg_mfe_atr": round(sum(e["mfe_atr"] for _, e in valid) / m, 3),
                 "avg_mae_atr": round(sum(e["mae_atr"] for _, e in valid) / m, 3),
@@ -475,7 +523,7 @@ def _p(v, d=1):
     return "   -  " if v is None else f"{v * 100:.{d}f}%"
 
 
-def _row(name: str, b: dict, show_n=True) -> str:
+def _row(name: str, b: dict, show_n=True, show_fill=False) -> str:
     ci = b.get("accuracy_ci95")
     cis = f"[{ci[0] * 100:.0f}-{ci[1] * 100:.0f}]" if ci else "-"
     ex = b.get("excess_accuracy")
@@ -483,60 +531,69 @@ def _row(name: str, b: dict, show_n=True) -> str:
     ret = b.get("avg_ret_pct")
     rets = "-" if ret is None else f"{ret:+.3f}%"
     nn = f"{b.get('n_hours', ''):>2}" if show_n and b.get("n_hours") else "  "
-    return (f"{name:<16}{nn} 信号{b['signals']:>4} 有效{b['valid']:>4} 准确率{_p(b['accuracy']):>7} {cis:<9}"
+    fill = ""
+    if show_fill:
+        fill = f" 成交{b.get('filled', 0):>4}({_p(b.get('fill_rate'))},基线{_p(b.get('baseline_fill_rate'))})"
+    return (f"{name:<16}{nn} 信号{b['signals']:>4} 有效{b['valid']:>4}{fill} 准确率{_p(b['accuracy']):>7} {cis:<9}"
             f"基线{_p(b['baseline_accuracy']):>7} 超额{exs:>8} | 时间止损胜率{_p(b['timestop_win_rate']):>7}"
             f"(基线{_p(b['baseline_win_rate'])}) 均收益{rets:>9}")
 
 
 def print_report(rep: dict, sens: dict, curve: dict, meta: dict) -> None:
     line = "=" * 150
+    lim = meta.get("entry_mode") == "limit"
+    row = lambda name, b, show_n=True: _row(name, b, show_n, lim)   # noqa: E731
     print(line)
     print(f"方向准确率回测 v1  标的={','.join(meta['symbols'])}  天数={meta['days']}  策略={','.join(meta['strategies'])}")
-    print(f"区间 {meta['range_utc'][0]} ~ {meta['range_utc'][1]} (UTC)  入场=信号K线收盘价  方向正确=N小时内触及±1×ATR  "
+    entry_desc = (f"限价回踩(挂单价=收盘价∓{meta['limit_offset'] * 100:.2f}%，N根内未触及=未成交，不计入准确率)" if lim
+                  else "信号K线收盘价直接入场")
+    print(f"区间 {meta['range_utc'][0]} ~ {meta['range_utc'][1]} (UTC)  入场={entry_desc}  方向正确=N小时内触及±1×ATR  "
           f"时间止损=第N根收盘  liq_zones为空")
     print(line)
     print("【总体】")
-    print(_row("总计", rep["overall"], show_n=False))
+    print(row("总计", rep["overall"], False))
     print("【按策略】（N=时间止损小时数）")
     for k, v in rep["by_strategy"].items():
-        v = dict(v, n_hours=meta["n_by_strategy"].get(k))
-        print(_row(k, v))
+        print(row(k, dict(v, n_hours=meta["n_by_strategy"].get(k))))
     print("【按时段】")
     for k, v in rep["by_session"].items():
-        print(_row(k, v, show_n=False))
+        print(row(k, v, False))
     print("【按方向】")
     for k, v in rep["by_direction"].items():
-        print(_row(k, v, show_n=False))
+        print(row(k, v, False))
     print("【市值分组】（当前市值，非历史）")
     for k, v in rep["by_mcap"].items():
-        print(_row(k, v, show_n=False))
+        print(row(k, v, False))
     print("【参数敏感性 — reversal（现行门槛上的二次过滤）】")
     if not sens["reversal_signals"]:
         print("  reversal 在本次区间内没有信号，无法做敏感性分析")
     else:
-        print(_row("未过滤", sens["unfiltered"]))
+        print(row("未过滤", sens["unfiltered"]))
         for key, g in sens["grids"].items():
             for r in g["rows"]:
                 tag = "(=未过滤)" if r["same_as_unfiltered"] else ""
-                print(_row(f"{g['label']}={r['value']}{tag}", r))
-    print("【时间止损 N 曲线】")
+                print(row(f"{g['label']}={r['value']}{tag}", r))
+    print("【时间止损 N 曲线】" + ("（限价模式下每个 N 用各自的成交窗口）" if lim else ""))
     for s, rows in curve.items():
         for r in rows:
-            print(_row(f"{s}", r))
+            print(row(f"{s}", r))
     print(line)
-    print("读法：准确率=N小时内触及±1×ATR 的比例；基线=同区间所有小时同方向同N的无条件概率；超额=准确率-基线。"
-          "有效样本较少时请看 95% 置信区间 [下-上]，区间很宽说明结论不可靠。")
+    print("读法：准确率=N小时内触及±1×ATR 的比例；基线=同区间所有小时同方向同N、同一入场规则下的无条件概率；"
+          "超额=准确率-基线。有效样本较少时请看 95% 置信区间 [下-上]，区间很宽说明结论不可靠。")
+    if lim:
+        print("限价模式提示：未成交的信号被排除，留下的是「先反向走 offset 才成交」的信号；"
+              "成交率与准确率要一起看，不能拿成交后的准确率绝对值直接和直接入场的结果比。")
 
 
 def write_outputs(out_dir: Path, stamp: str, payload: dict, trades: list):
     out_dir.mkdir(parents=True, exist_ok=True)
     jp, cp = out_dir / f"backtest_{stamp}.json", out_dir / f"backtest_{stamp}.csv"
-    slim = [{k: v for k, v in t.items() if k != "evals"} for t in trades]
+    slim = [{k: v for k, v in t.items() if k not in ("evals", "fills")} for t in trades]
     payload = dict(payload, trades=slim)
     jp.write_text(json.dumps(payload, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
     cols = ["ts_utc", "symbol", "strategy", "direction", "session", "weekend", "mcap_group", "mcap_usd", "n_hours",
-            "entry", "atr", "atr_pct", "rsi_1h", "rsi_4h", "chg24", "vol_ratio", "strength",
-            "hit_1atr", "hit_bar", "ret_pct", "win", "mfe_atr", "mae_atr"]
+            "entry_mode", "signal_close", "entry_price", "filled", "fill_delay_bars", "atr", "atr_pct", "rsi_1h",
+            "rsi_4h", "chg24", "vol_ratio", "strength", "hit_1atr", "hit_bar", "ret_pct", "win", "mfe_atr", "mae_atr"]
     with cp.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(cols)
@@ -544,7 +601,9 @@ def write_outputs(out_dir: Path, stamp: str, payload: dict, trades: list):
             e = t.get("eval") or {}
             w.writerow([_dt.datetime.fromtimestamp(t["ts"] / 1000, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M"),
                         t["symbol"], t["strategy"], t["direction"], t["session"], int(t["weekend"]), t["mcap_group"],
-                        t.get("mcap_usd") or "", t["n_hours"], t["price"], round(t["atr"], 8),
+                        t.get("mcap_usd") or "", t["n_hours"], t.get("entry_mode", "direct"), t["price"],
+                        t.get("entry_price", t["price"]), int(t.get("filled", True)),
+                        "" if t.get("fill_delay") is None else t["fill_delay"], round(t["atr"], 8),
                         "" if t["atr_pct"] is None else round(t["atr_pct"], 4),
                         "" if t["rsi_1h"] is None else round(float(t["rsi_1h"]), 2),
                         "" if t["rsi_4h"] is None else round(float(t["rsi_4h"]), 2), round(t["chg24"], 3),
@@ -556,7 +615,9 @@ def write_outputs(out_dir: Path, stamp: str, payload: dict, trades: list):
 
 
 CAVEATS = [
-    "入场价=信号 1H K 线收盘价（市价入场），不模拟挂单回踩；不计手续费、滑点、资金费率",
+    "入场：direct=信号 1H K 线收盘价市价入场；limit=收盘价∓offset 限价回踩（N 根内触及才成交，成交价=挂单价，"
+    "成交那根只确认成交、观察从下一根开始）；均不计手续费、滑点、资金费率",
+    "限价模式：未成交的信号被排除出准确率，选择效应会让成交样本偏向「先反向走」的信号；基线按同一规则计算",
     "liq_zones、盘口全部为空；资金费率、OI、BTC 趋势等实盘上下文为默认值（0/空），依赖它们的策略分支可能不触发或偏离实盘",
     "k15 取自历史 15m K 线，4h 由 1h 聚合；『未收盘 K 线』只合成开盘价，不含未来数据",
     "方向正确按 high/low 触及判定（不论先后顺序）；时间止损胜率只看第 N 根收盘价是否有利（>0），与是否曾触及 1ATR 无关",
@@ -573,6 +634,10 @@ def parse_args(argv=None):
     ap.add_argument("--days", type=int, default=180, help="回测天数（最多 365）")
     ap.add_argument("--strategy", nargs="+", default=None, choices=ALL_STRATEGIES, help="默认全部")
     ap.add_argument("--time-stop", type=int, default=None, help="时间止损小时数；默认 reversal=4/pullback=2/ema_trend=6/其他=4")
+    ap.add_argument("--entry-mode", choices=["direct", "limit"], default="direct",
+                    help="入场方式：direct=信号K线收盘价直接入场（默认）；limit=限价回踩，N根内触及挂单价才成交")
+    ap.add_argument("--limit-offset", type=float, default=0.005,
+                    help="limit 模式的挂单偏移比例，默认 0.005（LONG 收盘价下方 0.5%%、SHORT 上方 0.5%%）")
     ap.add_argument("--output", default="results/", help="结果输出目录（默认 results/）")
     ap.add_argument("--no-cache", action="store_true", help="不使用本地 K 线缓存")
     ap.add_argument("--no-mcap", action="store_true", help="不拉市值（分组全部记为未知）")
@@ -581,6 +646,9 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     a = parse_args(argv)
+    if not (0.0 <= a.limit_offset < 0.2):
+        print("--limit-offset 需在 [0, 0.2) 内（比例，0.005=0.5%）", file=sys.stderr)
+        return 2
     days = max(1, min(int(a.days), 365))
     strategies = a.strategy or list(ALL_STRATEGIES)
     n_hours_of = lambda s: n_for(s, a.time_stop)           # noqa: E731
@@ -609,10 +677,21 @@ def main(argv=None) -> int:
         mc = mcap_of(sym, caps)
         for s in sigs:
             s["n_hours"] = n_hours_of(s["strategy"])
-            s["evals"] = {n: evaluate(k1h, s["idx"], s["direction"], s["price"], s["atr"], n) for n in ns_all}
+            s["fills"], s["evals"] = {}, {}
+            for n in ns_all:      # 限价窗口=该 N（与基线一致）；direct 模式成交下标=信号下标
+                fi, ep = entry_for(k1h, s["idx"], s["direction"], s["price"], n, a.entry_mode, a.limit_offset)
+                s["fills"][n] = fi
+                s["evals"][n] = (evaluate(k1h, fi, s["direction"], ep, s["atr"], n)
+                                 if fi not in (None, "na") else None)
+                if n == s["n_hours"]:
+                    s["entry_price"] = ep
+            fi = s["fills"][s["n_hours"]]
             s["eval"] = s["evals"][s["n_hours"]]
+            s["entry_mode"] = a.entry_mode
+            s["filled"] = fi not in (None, "na")
+            s["fill_delay"] = (fi - s["idx"]) if s["filled"] else None
             s["mcap_usd"], s["mcap_group"] = mc, mcap_group(mc)
-        accumulate_baseline(base_acc, k1h, hours, ns_all)
+        accumulate_baseline(base_acc, k1h, hours, ns_all, a.entry_mode, a.limit_offset)
         all_trades.extend(sigs)
         per_symbol[sym] = {**cnt, "signals_after_dedupe": len(sigs), "bars_1h": len(k1h), "bars_15m": len(k15),
                            "mcap_usd": mc, "mcap_group": mcap_group(mc), "seconds": round(time.time() - t0, 1)}
@@ -629,7 +708,7 @@ def main(argv=None) -> int:
     meta = {"symbols": list(per_symbol), "days": days, "strategies": strategies,
             "n_by_strategy": {s: n_hours_of(s) for s in strategies}, "time_stop_override": a.time_stop,
             "range_utc": [fmt(start_ms), fmt(end_ms)], "generated_at_utc": fmt(now_ms),
-            "market_caps_loaded": bool(caps)}
+            "market_caps_loaded": bool(caps), "entry_mode": a.entry_mode, "limit_offset": a.limit_offset}
     print_report(report, sens, curve, meta)
     out = Path(a.output)
     if not out.is_absolute():
