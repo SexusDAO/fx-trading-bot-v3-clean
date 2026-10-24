@@ -1115,7 +1115,10 @@ class SignalWatcher:
         if victims:
             logger.warning(f"[signal_watcher] btc_guard={st}，撤 {len(victims)} 个 {d} 挂单")
         for s_, e in victims:
-            await self._cancel_and_remove(s_, e, f"btc_guard {st}")
+            await self._cancel_and_remove(s_, e, f'btc_guard {st}')
+            # 撤单后补发退出通知（_notify_exit 内部会确认条目已从 _watched 移除才发；撤单未确认/已成交则不发）
+            _why = 'BTC急跌保护，触发撤单' if d == 'LONG' else 'BTC急涨保护，触发撤单'
+            await self._notify_exit(s_, e, _why)
 
     @staticmethod
     def _realtime_falsified(entry: 'WatchEntry', price: float) -> tuple:
