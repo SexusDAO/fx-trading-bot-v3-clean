@@ -578,7 +578,22 @@ class PositionManager:
         # 注意:_mfe 存小数(0.03 = 3%),门槛 0.005 = 0.5%
         # 目的:防止「从 +3% 滑回 +0%」白送利润
         _mfe_val = _mfe[pid]
-        if _mfe_val > 0.005 and fav > 0:
+        try:
+            from config import MFE_DRAWBACK_USE_PROGRESS as _MFE_USE_PROG
+        except Exception:
+            _MFE_USE_PROG = True
+        _prog = _mfe_drawback_progress_hit(pos, _mfe_val, fav, entry_p) if _MFE_USE_PROG else None
+        if _prog is not None:
+            # 进度版:有 orig_tp_dist 的仓位走这里,不再进入下面的旧逻辑
+            _hit, _pk_prog, _cur_prog, _dd = _prog
+            if _hit:
+                logger.info(
+                    f"[pm] {pos.get('symbol', pid)} MFE回撤保护(进度版)触发: "
+                    f"峰值进度={_pk_prog:.1%} 当前进度={_cur_prog:.1%} 回撤={_dd:.0%}≥50%,平仓锁利"
+                )
+                await _force_close_static(pos, "mfe_drawback_50pct")
+                return
+        elif _mfe_val > 0.005 and fav > 0:
             _drawdown_from_peak = (_mfe_val - fav) / _mfe_val
             if _drawdown_from_peak >= 0.5:
                 # v3.39: 加绝对浮盈门槛--浮盈须≥TP1距离×30%才值得锁利
@@ -3687,6 +3702,30 @@ def _vol_ratios_closed(k1h: list) -> list:
         ma = sum(vols[i - 20:i]) / 20.0
         out.append(v / ma if ma > 0 else None)
     return out
+
+
+def _mfe_drawback_progress_hit(pos: dict, mfe_frac: float, fav_frac: float, entry_p: float):
+    """mfe_drawback_50pct 的进度版判断(纯函数)。返回 None=不适用(无 orig_tp_dist,调用方回退旧逻辑);
+    否则返回 (是否触发, 峰值进度, 当前进度, 回撤比例)。
+    mfe_frac/fav_frac 是相对 entry_p 的小数(0.03=3%),按 entry_p 换算成价格距离后再除以 orig_tp_dist。
+    触发需同时满足:峰值进度>=60%;从峰值回撤>=50%;当前进度<=峰值进度×0.5(即真正从峰值回撤一半);当前仍盈利(fav>0)。
+    注:早期版本用「当前进度<30%」,峰值越高实际要求回撤越深(峰值100%时需回撤>70%),已改为与峰值挂钩。
+    回撤>=50% 与 当前进度<=峰值×0.5 在数学上等价,这里两个都写出来只为可读;浮点边界用极小容差。"""
+    try:
+        orig_dist = float(pos.get("orig_tp_dist") or 0)
+        if orig_dist <= 0 or entry_p <= 0:
+            return None
+        peak_progress = mfe_frac * entry_p / orig_dist
+        cur_progress = fav_frac * entry_p / orig_dist
+        if peak_progress <= 0:
+            return (False, peak_progress, cur_progress, 0.0)
+        drawback = (peak_progress - cur_progress) / peak_progress
+        _eps = 1e-9
+        hit = (peak_progress >= 0.60 - _eps and drawback >= 0.50 - _eps
+               and cur_progress <= peak_progress * 0.5 + _eps and fav_frac > 0)
+        return (hit, peak_progress, cur_progress, drawback)
+    except Exception:
+        return None
 
 
 def _log_vol_exhaust_result(pos: dict, close_reason: str, exit_price: float, close_ms: float) -> str | None:

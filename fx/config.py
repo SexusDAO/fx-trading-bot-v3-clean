@@ -935,6 +935,7 @@ OPT_REVERSAL_SHORT_TIER_RSI = False   # OPT-7 反转做空的 RSI4H 门槛按波
 OPT_PULLBACK_ENTRY_AT_CONFIRM = False   # OPT-8 回踩在确认处入场（mark∓0.1ATR）  # [v3.87 合并决策] 默认 False：OPT-8 按评审：舍弃，会绕过清算区加权入场价；代码保留但永久关闭
 OPT_INVALIDATION_SL           = False   # OPT-9 回踩/EMA趋势/反转用失效位止损（1H 结构点外 0.3ATR，1~3ATR）  # [v3.87 合并决策] 默认 False：OPT-9 按评审：舍弃，会绕过清算区止损；代码保留但永久关闭
 OPT_OI_DIV_EXHAUSTION_CONFIRM = False   # OPT-10 OI 背离需不创新低(高) + 主动买卖比确认  # [v3.87 合并决策] 默认 False：OPT-10 按评审：暂缓，待 oi_divergence 累计 20+ 笔再定
+MFE_DRAWBACK_USE_PROGRESS   = True    # mfe_drawback_50pct 改用「进度」判断(峰值进度>=60%、回撤>=50%、当前进度<30%、仍盈利);False=回退旧逻辑(峰值>0.5%且回撤>=50%)
 OPT_EMA_TREND_TRIGGER_BAR     = False   # OPT-11 EMA 趋势需 1H/15M 触发 K 线  # [v3.87 合并决策] 默认 False：OPT-11 评审未列入：保守起见默认关闭，待数据
 
 # v3.87 第二批
