@@ -740,29 +740,32 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
                     )
                     return False, out
 
-    # ── 15 分钟动能确认（最后一道）：最近 3 根 15M 里至少 1 根顺势K线（LONG 阳线 / SHORT 阴线）且成交量不为零 ──
-    # 拿不到 k15（None / 空 / 不足 1 根）则跳过本检查，不拒绝信号
-    if k15:
+    # ── 15 分钟动能确认（最后一道）：最近 3 根已收盘 15M 里至少 1 根顺势K线（LONG 阳线 / SHORT 阴线）且成交量不为零 ──
+    # 传入的 k15 最后一根通常是未收盘的（hub / REST 缓存都带当前这一根），先按收盘时间过滤掉再判断；
+    # 拿不到 k15、或过滤后不足 3 根则跳过本检查，不拒绝信号
+    _k15_closed = _only_closed(k15)
+    if len(_k15_closed) >= 3:
+        _recent15 = _k15_closed[-3:]
+        _want_up = direction == "LONG"
         try:
-            _recent15 = k15[-3:]
-            _want_up = direction == "LONG"
             _confirm15 = any(
                 float(_k[5]) > 0 and ((float(_k[4]) > float(_k[1])) if _want_up else (float(_k[4]) < float(_k[1])))
                 for _k in _recent15
             )
         except Exception as _e15:
+            _confirm15 = True
             logger.debug(f"[judge_pullback] {ind.get('symbol', '')} 15M确认检查异常，跳过: {_e15}")
-        else:
-            if not _confirm15:
-                out["reject_reason"] = (
-                    f"15M动能未确认：最近{len(_recent15)}根15M无{'阳' if _want_up else '阴'}线（或成交量为零），"
-                    f"pullback {direction} 短期动能已熄"
-                )
-                logger.debug(f"[judge_pullback] {ind.get('symbol', '')} {direction} 15M确认未通过")
-                return False, out
-            logger.debug(f"[judge_pullback] {ind.get('symbol', '')} {direction} 15M确认通过")
+        if not _confirm15:
+            out["reject_reason"] = (
+                f"15M动能未确认：最近{len(_recent15)}根已收盘15M无{'阳' if _want_up else '阴'}线（或成交量为零），"
+                f"pullback {direction} 短期动能已熄"
+            )
+            logger.debug(f"[judge_pullback] {ind.get('symbol', '')} {direction} 15M确认未通过")
+            return False, out
+        logger.debug(f"[judge_pullback] {ind.get('symbol', '')} {direction} 15M确认通过")
     else:
-        logger.debug(f"[judge_pullback] {ind.get('symbol', '')} {direction} 无k15数据，跳过15M确认")
+        logger.debug(f"[judge_pullback] {ind.get('symbol', '')} {direction} 已收盘k15不足3根"
+                     f"（{len(_k15_closed)}），跳过15M确认")
 
     return True, out
 
@@ -810,8 +813,24 @@ def _is_pulse_candle(k1h: list, k4h: list) -> str | None:
     return _check(k4h, _PC_LB_4H, _PC_VOL_4H, _PC_BODY_4H, "4H")
 
 
+def _only_closed(klines: list) -> list:
+    """只保留已收盘K线：收盘时间 float(k[6]) < 当前毫秒。解析失败的单根丢弃；入参为空返回 []。"""
+    import time as _time
+    _now_ms = _time.time() * 1000
+    out = []
+    for k in (klines or []):
+        try:
+            if float(k[6]) < _now_ms:
+                out.append(k)
+        except Exception:
+            continue
+    return out
+
+
 def _reversal_signal_15m(k15: list, direction: str) -> str | None:
     """在最近已闭合3根15M K线里找至少一种止跌/止涨信号"""
+    # 传入的 k15 最后一根通常是未收盘的（hub / REST 缓存都带当前这一根）：先按收盘时间过滤，再取最近3根
+    k15 = _only_closed(k15)
     if len(k15) < 3: return None
     recent = k15[-3:]
 
@@ -848,6 +867,7 @@ def _reversal_signal_15m(k15: list, direction: str) -> str | None:
 
 def _reversal_signal_1h(k1h: list, direction: str) -> str | None:
     """在最近已闭合2根1H K线里找止跌/止涨信号(高波动层)"""
+    k1h = _only_closed(k1h)   # 同上：剔除未收盘的最后一根
     if len(k1h) < 2: return None
     recent = k1h[-2:]
 
