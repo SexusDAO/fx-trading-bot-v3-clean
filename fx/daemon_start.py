@@ -306,6 +306,20 @@ def _daemon_loop():
 
     notify(f"✅ fx trading daemon 启动 (PID={os.getpid()})")
 
+    # [fix] 启动前自动补全依赖，防止环境重建后漏装（requirements.txt 已有但未 pip install）
+    _req_file = FX_DIR / "requirements.txt"
+    if _req_file.exists():
+        log("检查并补全 pip 依赖...")
+        _pip_ret = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", str(_req_file),
+             "-q", "--break-system-packages"],
+            capture_output=True, text=True
+        )
+        if _pip_ret.returncode == 0:
+            log("pip 依赖检查完成")
+        else:
+            log(f"pip 依赖安装警告（继续启动）: {_pip_ret.stderr.strip()[-200:]}")
+
     restarts = 0
     while restarts < MAX_RESTARTS:
         start = time.time()
