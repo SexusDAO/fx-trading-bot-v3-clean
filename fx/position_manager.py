@@ -114,6 +114,8 @@ _mfe:  dict[str, float]    = {}   # pos_id → 持仓期间最大有利偏移(MF
 _mae:  dict[str, float]    = {}   # pos_id → 持仓期间最大不利偏移(MAE,始终≥0)
 # 动态TP状态机数据层(只记录不动作): pos_id → {"peak": 绝对峰值价, "wpeak": 上次写盘的峰值价, "phase": 当前阶段}
 _phase_state: dict[str, dict] = {}
+# 量能耗尽影子日志去重: pos_id → 已记录过的最后一根已收盘 1H 的开盘时间(同一根 K 线只记一次)
+_vol_shadow_logged: dict[str, float] = {}
 _last_price: dict[str, float] = {} # symbol → 最新标记价格
 _last_price_ts: dict[str, float] = {} # symbol → 最后更新时间(防抖)
 _health_warned: dict[str, float] = {} # pos_id → 最后告警时间戳
@@ -2339,6 +2341,7 @@ async def _close_position_post_static(
         _mfe.pop(pos_id, None)
         _mae.pop(pos_id, None)
         _phase_state.pop(pos_id, None)
+        _vol_shadow_logged.pop(pos_id, None)
     except Exception as e:
         logger.error(f"[pm] remove_position 失败: {e}")
 
@@ -3671,6 +3674,83 @@ async def _maybe_daily_report_static() -> None:
 #   不应触发「条件B」的 TP 收紧；需要在本函数内加保护。后续单独处理。
 # TODO(待办-TP向有利方向扩展): calc_sl_tp 重算后，若新 TP 比旧 TP 更有利
 #   （空单更低 / 多单更高），应允许更新挂单（当前 TP 的调整规则见下方文档）。后续单独处理。
+def _vol_ratios_closed(k1h: list) -> list:
+    """每根已收盘 1H 的量比 = 该根成交量 ÷ 其前 20 根成交量均值(口径同 scanner._vol_ratio_closed)。
+    前面不足 20 根的位置为 None。"""
+    vols = [float(k[5]) for k in k1h]
+    out = []
+    for i, v in enumerate(vols):
+        if i < 20:
+            out.append(None)
+            continue
+        ma = sum(vols[i - 20:i]) / 20.0
+        out.append(v / ma if ma > 0 else None)
+    return out
+
+
+def _check_volume_exhaustion_shadow(pos: dict, k1h: list, mark_price: float) -> dict | None:
+    """量能耗尽【影子】检查:满足全部条件只写一条 info 日志并返回信号摘要,不触发任何平仓/止损/改单。
+    条件:reversal;阶段=3;当前仍盈利;峰值进度>=50%;MFE 所在 1H 及前后 3 根内最大量比>=2.0;
+    MFE 之后最近 2 根已收盘 1H 量比均<=0.5;MFE 之后至少 2 根已收盘 1H(期间未刷新峰值,否则 peak_ts 会后移)。
+    k1h 必须是已收盘 K 线。同一根最新收盘 K 线只记一次。永不抛异常。"""
+    try:
+        if pos.get("mode") != "reversal" or not k1h or len(k1h) < 24:
+            return None
+        pid = pos.get("pos_id", pos.get("symbol", "unknown"))
+        st = _phase_state.get(pid) or {}
+        phase = int(st.get("phase") or pos.get("phase") or 1)
+        if phase != 3:
+            return None
+        orig_entry = float(pos.get("orig_entry") or 0)
+        orig_dist = float(pos.get("orig_tp_dist") or 0)
+        peak = float(st.get("peak") or pos.get("peak_price") or 0)
+        peak_ts = float(st.get("peak_ts") or pos.get("peak_ts") or 0)
+        if orig_entry <= 0 or orig_dist <= 0 or peak <= 0 or peak_ts <= 0:
+            return None
+        is_long = pos["direction"].upper() == "LONG"
+        fav = ((mark_price - orig_entry) if is_long else (orig_entry - mark_price)) / orig_entry
+        if fav <= 0:
+            return None
+        peak_fav = (peak - orig_entry) if is_long else (orig_entry - peak)
+        progress = peak_fav / orig_dist if peak_fav > 0 else 0.0
+        if progress < 0.5:
+            return None
+        # 定位 MFE 所在的已收盘 1H:开盘时间 <= peak_ts 的最后一根,且 peak_ts 落在该根时间范围内
+        idx = None
+        for i, k in enumerate(k1h):
+            if float(k[0]) <= peak_ts:
+                idx = i
+        if idx is None or peak_ts >= float(k1h[idx][0]) + 3_600_000:
+            return None   # MFE 在尚未收盘的那根 1H 里,暂不评估
+        ratios = _vol_ratios_closed(k1h)
+        lo, hi = max(idx - 3, 0), min(idx + 3, len(k1h) - 1)
+        window = [r for r in ratios[lo:hi + 1] if r is not None]
+        if not window or max(window) < 2.0:
+            return None
+        after = ratios[idx + 1:]
+        if len(after) < 2 or any(r is None for r in after[-2:]):
+            return None
+        recent = after[-2:]
+        if any(r > 0.5 for r in recent):
+            return None
+        last_ot = float(k1h[-1][0])
+        if _vol_shadow_logged.get(pid) == last_ot:
+            return None
+        _vol_shadow_logged[pid] = last_ot
+        mfe_vol = max(window)
+        logger.info(
+            f"[vol_exhaust_shadow] {pos.get('symbol', pid)} 量能耗尽信号\n"
+            f"  progress={progress:.1%} phase={phase} fav={fav:.2%}\n"
+            f"  peak_ts={int(peak_ts)} mfe_vol_ratio={mfe_vol:.2f}\n"
+            f"  recent_vol_ratios={[round(r, 2) for r in recent]} 当前价={mark_price:.6g}"
+        )
+        return {"progress": progress, "phase": phase, "fav": fav, "peak_ts": peak_ts,
+                "mfe_vol_ratio": mfe_vol, "recent_vol_ratios": recent, "price": mark_price}
+    except Exception as e:
+        logger.debug(f"[vol_exhaust_shadow] 检查异常(忽略): {e}")
+        return None
+
+
 async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
     """
     对单个持仓重新拉数据+清算图,重算 SL/TP,决定是否更新挂单。
@@ -3748,6 +3828,9 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
 
     if atr <= 0:
         return None
+
+    # 量能耗尽影子日志(只记日志,不影响后续任何 SL/TP 逻辑)
+    _check_volume_exhaustion_shadow(pos, k1h, mark_price)
 
     # ── 重算 TP/SL ────────────────────────────────────────────────────────────
     try:
