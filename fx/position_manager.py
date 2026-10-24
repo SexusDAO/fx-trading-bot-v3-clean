@@ -3757,6 +3757,24 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
             logger.error(f"[adjust_sltp] {symbol} 止损上限检查异常，保守不调整 SL: {_rle}")
 
     # ── TP1 判断(双向,下调有门槛)────────────────────────────────────────────
+    # ── 收紧 TP 前预算 RR（切断「收紧 TP → RR<阈值 → rr_below_threshold 平仓」的自伤链）──
+    #   预算用本轮实际会生效的 SL（SL 本轮要改则用 new_sl，否则 old_sl）和函数开头取的 mark_price；
+    #   预算 RR 低于 TP_MIN_RR_LIVE 就放弃这次收紧（不置 tp1_changed），只写 debug 日志。
+    #   只拦「会让 TP 变近」的两条路径：shrink 下调分支、条件 A/B。「improve」（TP 更有利）不受影响。
+    def _tighten_rr_ok(_tag: str) -> bool:
+        _budget_sl = new_sl if sl_changed else old_sl
+        _budget_tp1_dist = abs(new_tp1 - mark_price)
+        _budget_sl_dist = abs(mark_price - _budget_sl)
+        if _budget_sl_dist > 0:
+            _budget_rr = _budget_tp1_dist / _budget_sl_dist
+            if _budget_rr < TP_MIN_RR_LIVE:
+                logger.debug(
+                    f"[adjust_sltp] {symbol} TP收紧({_tag})后预算RR={_budget_rr:.2f}"
+                    f"<{TP_MIN_RR_LIVE}，放弃收紧"
+                )
+                return False
+        return True
+
     if not tp1_filled:
         if direction == "LONG":
             tp_move = new_tp1 - old_tp1   # 正 = 上移(更好)
@@ -3767,8 +3785,9 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
             tp1_reason  = f"improve +{tp_move:.6g}"
         elif tp_move < -1e-8:
             if abs(tp_move) > TP_SL_ADJUST_TP_SHRINK_ATR * atr:
-                tp1_changed = True
-                tp1_reason  = f"shrink {tp_move:.6g} (>{TP_SL_ADJUST_TP_SHRINK_ATR}ATR)"
+                if _tighten_rr_ok("shrink"):
+                    tp1_changed = True
+                    tp1_reason  = f"shrink {tp_move:.6g} (>{TP_SL_ADJUST_TP_SHRINK_ATR}ATR)"
 
         # ── 浮盈收紧 TP:价格已向有利方向移动但 TP 仍很远时,主动拉近 ──────────
         # 触发条件A(顺势浮盈):
@@ -3797,10 +3816,11 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
             cond_b = (tp_dist_now >= atr * 3.0 and tp_will_closer)
 
             if cond_a or cond_b:
-                tp1_changed = True
                 reason_tag  = "profit_tighten" if cond_a else "tp_too_far"
-                tp1_reason  = (f"{reason_tag}: price_moved={price_moved:.4g}"
-                               f" tp_dist={tp_dist_now:.4g} ({tp_dist_now/atr:.1f}ATR)")
+                if _tighten_rr_ok(reason_tag):
+                    tp1_changed = True
+                    tp1_reason  = (f"{reason_tag}: price_moved={price_moved:.4g}"
+                                   f" tp_dist={tp_dist_now:.4g} ({tp_dist_now/atr:.1f}ATR)")
 
     # ── TP2 判断(仅当 TP1 已触发且 TP2 存在时才调整)──────────────────────────
     if tp1_filled and old_tp2 and new_tp2 and tp2_id:
