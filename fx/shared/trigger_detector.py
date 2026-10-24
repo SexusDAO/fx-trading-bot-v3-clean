@@ -44,7 +44,6 @@ STATE_SAVE_SEC = 60
 EXINFO_REFRESH_SEC = 6 * 3600
 ANALYZING_TTL_SEC = 600
 STARTUP_TOKEN_MAX = 30
-YIELD_EVERY = 10
 RECONCILE_EXCLUDE = {"funding_arb"}
 NO_KLINE_STRATS = ("reversal", "funding_arb", "oi_divergence")
 POST_HORIZONS = (("15m", 900), ("1h", 3600), ("4h", 14400))
@@ -396,26 +395,30 @@ class TriggerDetector:
             pass
         syms = sorted(syms)
 
-        info = {}
-        for i, sym in enumerate(syms):
-            info[sym] = self._refresh_klines(hub, sym, now)
-            if (i + 1) % YIELD_EVERY == 0:
-                await asyncio.sleep(0)
+        # 500+ 个标的的 EMA/RSI/ATR/pivots 纯 Python 计算整体移到线程，不再占用事件循环
+        # （apoll 由 run() 串行 await，同一时刻只有一个 _compute_all 在跑）
+        def _compute_all():
+            result = {}
+            for sym in syms:
+                result[sym] = self._refresh_klines(hub, sym, now)
+            return result
+        info = await asyncio.to_thread(_compute_all)
         kl = [s for s, v in info.items() if v[0]]
         ratio = (sum(1 for s in kl if info[s][1]) / len(kl)) if kl else 0.0
         self.gate_open = ratio >= GATE_RATIO or now - self._start_ts > GATE_SEC
 
         arb_due = now - self._last_arb >= FUNDING_ARB_INTERVAL
         out = []
-        for i, sym in enumerate(syms):
-            if sym in self._tradable:
-                try:
-                    has_k, ready = info[sym]
-                    self._check_symbol(hub, sym, now, has_k and ready and self.gate_open, arb_due)  # 结果进令牌桶队列
-                except Exception as e:
-                    logger.debug(f"[trigger] {sym} 检查失败: {e}")
-            if (i + 1) % YIELD_EVERY == 0:
-                await asyncio.sleep(0)
+
+        def _check_all():
+            for sym in syms:
+                if sym in self._tradable:
+                    try:
+                        has_k, ready = info[sym]
+                        self._check_symbol(hub, sym, now, has_k and ready and self.gate_open, arb_due)  # 结果进令牌桶队列
+                    except Exception as e:
+                        logger.debug(f"[trigger] {sym} 检查失败: {e}")
+        await asyncio.to_thread(_check_all)
         if arb_due:
             self._last_arb = now
         out += self._drain(now)
