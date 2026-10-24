@@ -3726,7 +3726,7 @@ def run_scan(dry_run: bool = False, signal_watcher=None) -> dict:
         if getattr(_cfg_pf, "LIQ_PRESCAN_PREFETCH_ENABLED", True):
             from shared.liq_cache import prefetch_liq_cache_bounded as _plb
             _pf_t = time.perf_counter()
-            _pf = _plb(list(scan_pool), float(getattr(_cfg_pf, "LIQ_PRESCAN_PREFETCH_TIMEOUT_SEC", 30.0)),
+            _pf = _plb(list(scan_pool)[:50], float(getattr(_cfg_pf, "LIQ_PRESCAN_PREFETCH_TIMEOUT_SEC", 30.0)),
                        price_map=_mark_price_map)
             if _pf.get("stale"):
                 logger.info(f"[scanner] 扫描前清算区预热: 候选 {_pf['total']}，过期 {_pf['stale']}，"
