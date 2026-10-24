@@ -2557,6 +2557,8 @@ async def _confirm_market_fill(symbol: str, resp: dict, retries: int = 2):
     return False, snap.get("status", ""), _safe_float(snap.get("executedQty")), _safe_float(snap.get("avgPrice"))
 
 
+# TODO(待办-加仓后TP重挂): _maybe_pyramid 加仓成功后，需要撤销旧 TP，
+#   按「新均价 + 新总量」重新挂 TP1/TP2；目前加仓量的止盈没有保护。后续单独处理。
 async def _maybe_pyramid(pos: dict) -> None:
     """
     浮盈 >= PYRAMID_FLOAT_PROFIT_ATR × ATR 时,顺势加一笔 PYRAMID_SIZE_RATIO × 原仓位。
@@ -3385,6 +3387,10 @@ async def _maybe_daily_report_static() -> None:
 # 动态 TP/SL 调整(每30分钟,双向,静默,写日志供复盘)
 # =============================================================================
 
+# TODO(待办-TP收紧条件B缺陷): 顺势行情（价格向有利方向运动 > 2 ATR）时，
+#   不应触发「条件B」的 TP 收紧；需要在本函数内加保护。后续单独处理。
+# TODO(待办-TP向有利方向扩展): calc_sl_tp 重算后，若新 TP 比旧 TP 更有利
+#   （空单更低 / 多单更高），应允许更新挂单（当前 TP 的调整规则见下方文档）。后续单独处理。
 async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
     """
     对单个持仓重新拉数据+清算图,重算 SL/TP,决定是否更新挂单。

@@ -44,7 +44,7 @@ def test_unknown_reason_shown_raw():
 
 def test_legacy_reasons_unchanged():
     assert "出场原因：止损" in _fmt(close_reason="sl")
-    assert "出场原因：突破失败" in _fmt(close_reason="breakout_fail")
+    assert "出场原因：突破失败，主动离场" in _fmt(close_reason="breakout_fail")
 
 
 def test_tp_status_filled_unfilled_and_absent():
@@ -89,3 +89,21 @@ def test_pos_arg_explicit_values_take_priority_and_filled_wins():
     assert "止盈情况：TP1已触发 ✅" in t and "TP2" not in t   # 已成交即使挂单号已清空也显示
     t2 = N.fmt_node_close("manual", 1.0, 30, 1.0, 2.0, False, False, pos={"symbol": "ABCUSDT"})
     assert "止盈情况" not in t2                                # pos 里没有任何 TP 挂单
+
+
+def test_extra_reason_mappings():
+    expect = {
+        "health_force_close": "健康评分不足，主动离场",
+        "mfe_drawback_50pct": "浮盈回撤过大，主动锁利",
+        "soft_sl_fallback": "止损保护触发",
+        "exit_signal_reversal": "反向信号触发，主动离场",
+        "early_stagnation": "早期横盘，主动离场",
+        "time_stop_no_progress": "持仓无进展，超时离场",
+        "time_stop_loss": "亏损超时，强制离场",
+        "time_stop_hard": "持仓达上限，强制离场",
+        "breakout_fail": "突破失败，主动离场",
+        "tp1_protect_exit": "TP1后回撤保护，主动锁利",
+    }
+    for code, cn in expect.items():
+        assert N._CLOSE_REASON_CN[code] == cn, code
+        assert f"出场原因：{cn}" in _fmt(close_reason=code), code
