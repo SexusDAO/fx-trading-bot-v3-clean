@@ -52,7 +52,7 @@ from config import (
     ORDER_MAINTAIN_EMA_CHANGE, ORDER_MAINTAIN_LIQ_ATR_MULT,
     ORDER_CANCEL_BTC_MOVE_PCT, ORDER_CANCEL_FUNDING_DELTA, ORDER_CANCEL_OI_DROP_PCT,
     ORDER_EXPIRE_BREAKOUT_MIN, ORDER_EXPIRE_PULLBACK_MIN,
-    SCAN_SYMBOL_TIMEOUT_SEC, SCAN_TOTAL_TIMEOUT_SEC, SCAN_MAX_WORKERS,
+    SCAN_SYMBOL_TIMEOUT_SEC, SCAN_TOTAL_TIMEOUT_SEC, SCAN_MAX_WORKERS, FUNDING_ARB_SCAN_WORKERS,
     # 信号排序
     SIGNAL_PRIORITY, SIGNAL_STRENGTH_ORDER,
     # 止损倍数（条件二验证用）
@@ -4345,7 +4345,7 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
         _todo.append((sym_full, fr_current))
 
     _arb_signals = []
-    _exe = ThreadPoolExecutor(max_workers=8, thread_name_prefix="arb-sym")
+    _exe = ThreadPoolExecutor(max_workers=FUNDING_ARB_SCAN_WORKERS, thread_name_prefix="arb-sym")
     try:
         futs = {_exe.submit(_analyze_one_arb, sym, fr): sym for sym, fr in _todo}
         try:
