@@ -1667,7 +1667,17 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
         except ImportError:
             _RR_NORM, _RR_HIGH = 2.0, 1.5
         _tier_rr = signal.get("volatility_tier", "mid")
-        _rr_min  = _RR_HIGH if _tier_rr == "high" else _RR_NORM
+        _mode_rr = signal.get("mode", "")
+        if _mode_rr == "reversal":
+            try:
+                from config import RR_MIN_TP1_REVERSAL as _RR_REVERSAL
+            except ImportError:
+                _RR_REVERSAL = 1.2
+            _rr_min = _RR_REVERSAL
+        elif _tier_rr == "high":
+            _rr_min = _RR_HIGH
+        else:
+            _rr_min = _RR_NORM
         if round(_rr_ratio, 4) < _rr_min:
             logger.warning(
                 f"[executor] {symbol} 盈亏比不足: TP1距离={_rr_tp1/entry_price*100:.1f}% "
