@@ -120,6 +120,9 @@ class WatchEntry:
     cancel_state: str = "none"
     # [v3.89 #102] 触发结果状态：none=正常 / unknown=触发结果未知（on_trigger 在可能已下单之后失败），待人工核查
     trigger_state: str = "none"
+    # ── recheck 冷却：重算后「参数没变」时记录时间(monotonic)与当时 mark，5 分钟内且 mark 偏移 <1ATR 则跳过 B1 重算 ──
+    last_recheck_skip_ts:   float = 0.0
+    last_recheck_skip_mark: float = 0.0
 
     @property
     def symbol(self) -> str:
@@ -384,6 +387,31 @@ def _reorder_params_unchanged(entry: 'WatchEntry', new_entry_price: float,
         return True
     except Exception:
         return False
+
+
+# recheck 冷却：参数无变化跳过后 5 分钟内不再重算（mark 相对跳过时偏移 >=1ATR 则冷却失效）
+_RECHECK_SKIP_COOLDOWN_SEC = 300.0
+_RECHECK_SKIP_RESET_ATR = 1.0
+
+
+def _recheck_cooling(entry: 'WatchEntry', mark: float, atr: float, now: float | None = None) -> bool:
+    """True = 处于冷却中，应跳过 B1 重算。从未记录过跳过 / atr<=0 / mark 偏移 >=1ATR / 超过 5 分钟 → False。"""
+    try:
+        ts = entry.last_recheck_skip_ts
+        if ts <= 0 or atr <= 0:
+            return False
+        now = time.monotonic() if now is None else now
+        if now - ts >= _RECHECK_SKIP_COOLDOWN_SEC:
+            return False
+        return abs(float(mark) - entry.last_recheck_skip_mark) < atr * _RECHECK_SKIP_RESET_ATR
+    except Exception:
+        return False
+
+
+def _mark_recheck_skip(entry: 'WatchEntry', mark: float, now: float | None = None) -> None:
+    """重算后判定「参数没变」时调用：记录跳过时间与当时 mark，开启冷却。"""
+    entry.last_recheck_skip_ts = time.monotonic() if now is None else now
+    entry.last_recheck_skip_mark = float(mark)
 
 
 def _calc_pending_score(entry: 'WatchEntry', now: float | None = None) -> float:
@@ -2119,7 +2147,10 @@ class SignalWatcher:
             if mode in _shift_types and atr_v > 0:
                 old_ep  = entry.entry_price
                 _price_shift_atr = abs(mark_mp - old_ep) / atr_v
-                if _price_shift_atr > SIGNAL_PRICE_SHIFT_REORDER_ATR:
+                _b1_cooling = _price_shift_atr > SIGNAL_PRICE_SHIFT_REORDER_ATR and _recheck_cooling(entry, mark_mp, atr_v)
+                if _b1_cooling:
+                    logger.debug(f'[recheck] {sym} 参数冷却中，跳过重算')
+                if _price_shift_atr > SIGNAL_PRICE_SHIFT_REORDER_ATR and not _b1_cooling:
                     logger.info(
                         f'[recheck] {sym} 价格位移 {_price_shift_atr:.2f}ATR > {SIGNAL_PRICE_SHIFT_REORDER_ATR}，'
                         f'重算入场参数并重挂 (mark={mark_mp:.6g} old_ep={old_ep:.6g})'
@@ -2145,6 +2176,7 @@ class SignalWatcher:
                                 # [机制一] 参数变化 <=0.1ATR：什么都不做（不重挂、不通知）
                                 logger.debug(f'[recheck] {sym} 重算参数无实质变化(<=0.1ATR)，维持原挂单 '
                                              f'old_ep={entry.entry_price:.6g} new_ep={_ep:.6g}')
+                                _mark_recheck_skip(entry, mark_mp)   # 开启 5 分钟冷却
                             else:
                                 # 按 mode 使用对应有效期
                                 try:
