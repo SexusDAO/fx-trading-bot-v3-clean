@@ -2557,8 +2557,183 @@ async def _confirm_market_fill(symbol: str, resp: dict, retries: int = 2):
     return False, snap.get("status", ""), _safe_float(snap.get("executedQty")), _safe_float(snap.get("avgPrice"))
 
 
-# TODO(待办-加仓后TP重挂): _maybe_pyramid 加仓成功后，需要撤销旧 TP，
-#   按「新均价 + 新总量」重新挂 TP1/TP2；目前加仓量的止盈没有保护。后续单独处理。
+async def _pyramid_replace_tp(pos: dict, new_avg_entry: float, new_remaining: float) -> bool:
+    """加仓成功且 SL 同步之后：按「新均价 + 新总量」重算并重挂 TP，让加仓量也有止盈保护。
+
+    流程（先算后撤，计算或校验失败时旧 TP 原样保留）：
+      1. 用 new_avg_entry 作为 fill_price 重新调用 calc_sl_tp，得到新 TP1/TP2
+      2. 校验新 TP 在现价的有利一侧（否则放弃重挂，保留旧单）
+      3. 加系统撤单锁(mark_system_order_update) → 撤旧 TP1/TP2（已成交的不撤、不重挂）
+      4. 按 TP1_CLOSE_RATIO(60%)/剩余(40%) 重新分配数量，重挂 TP1/TP2 限价单
+      5. 更新持仓记录：tp1/tp2 的 price、order_id、quantity
+    TP1 已成交时仓位只剩 TP2 一档：新总量全部挂在 TP2 上。
+    任何一步失败都会 notify 告警（含「旧单已撤、新单未挂」的无止盈保护情形），不静默。
+    返回 True = 至少有一档 TP 已按新参数重挂成功。
+    """
+    symbol = pos.get("symbol", "")
+    pid = pos.get("pos_id", symbol)
+    direction = pos.get("direction", "long").upper()
+    try:
+        from config import TP1_CLOSE_RATIO
+        from executor import _get_precision
+        from shared.liq_cache import get_liq_zones_cached
+        from shared.calc_sl_tp import calc_sl_tp
+
+        tp1_filled = bool(pos.get("tp1_filled", False))
+        old_tp1_id = pos.get("tp1_order_id")
+        old_tp2_id = pos.get("tp2_order_id")
+        old_tp1 = float(pos.get("tp1_price") or 0)
+        old_tp2 = float(pos.get("tp2_price") or 0) or None
+        has_tp2 = bool(old_tp2 or old_tp2_id)
+        loop = asyncio.get_running_loop()
+
+        # ── 1. 拉数据 + 按新均价重算 TP ───────────────────────────────
+        k1h_raw = await loop.run_in_executor(None, lambda: api.get_klines(symbol, "1h", 55))
+        now_ms = time.time() * 1000
+        k1h = [k for k in (k1h_raw or []) if float(k[6]) < now_ms]
+        if len(k1h) < 10:
+            raise RuntimeError("1H K线不足，无法重算 TP")
+        closes = [float(k[4]) for k in k1h]
+        atr = _calc_atr_from_klines(k1h)
+        if atr <= 0:
+            raise RuntimeError("ATR<=0，无法重算 TP")
+        md = await loop.run_in_executor(None, lambda: api.get_mark_price(symbol))
+        mark_price = float(md.get("markPrice", closes[-1]))
+        funding = float(md.get("lastFundingRate", 0))
+        sig_type = pos.get("sig_type", pos.get("mode", "pullback"))
+        range_ = "24h" if sig_type in ("reversal", "funding_arb", "oi_divergence") else "7d"
+        liq_long = await loop.run_in_executor(
+            None, lambda: get_liq_zones_cached(symbol, "LONG", mark_price, range_=range_))
+        liq_short = await loop.run_in_executor(
+            None, lambda: get_liq_zones_cached(symbol, "SHORT", mark_price, range_=range_))
+        fake_signal = {
+            "symbol": symbol, "direction": direction,
+            "mode": pos.get("mode", "pullback"),
+            "volatility_tier": pos.get("volatility_tier", "mid"),
+            "ind": {"rsi_1h": _calc_rsi(closes), "vol_ratio": 1.0, "funding_rate": funding},
+            "fill_price": new_avg_entry,                       # 关键：以新均价为基准
+            "tp1_buffer_locked": pos.get("tp1_liq_buffer_atr"),
+        }
+        params = calc_sl_tp(signal=fake_signal, mark_price=mark_price, atr=atr,
+                            liq_zones={"long": liq_long, "short": liq_short},
+                            k1h=k1h, ema20=_calc_ema(closes, 20))
+        if "error" in params:
+            raise RuntimeError(f"calc_sl_tp 拒绝: {params['error']}")
+        new_tp1 = float(params["tp1_price"])
+        new_tp2 = params.get("tp2_price")
+        new_tp2 = float(new_tp2) if new_tp2 else None
+
+        prec = await asyncio.to_thread(_get_precision, symbol)
+        tick, step = prec["tick"], prec["step"]
+        new_tp1 = _round_price(new_tp1, tick)
+        if new_tp2:
+            new_tp2 = _round_price(new_tp2, tick)
+        if tp1_filled and not new_tp2:
+            new_tp2 = old_tp2                                   # TP1 已成交：沿用旧 TP2 价
+        if tp1_filled and not new_tp2:
+            raise RuntimeError("TP1 已成交且无 TP2 价格，无法重挂")
+
+        # ── 2. 校验：TP 必须在现价的有利一侧，否则限价单会立刻成交/被拒 ──
+        def _on_profit_side(px: float) -> bool:
+            return px > mark_price if direction == "LONG" else px < mark_price
+        _check = [new_tp2] if tp1_filled else [new_tp1] + ([new_tp2] if (has_tp2 and new_tp2) else [])
+        for _px in _check:
+            if not _px or not _on_profit_side(_px):
+                raise RuntimeError(f"新 TP {_px} 不在现价 {mark_price:.6g} 的有利一侧，放弃重挂（旧单保留）")
+
+        # ── 3. 数量分配（与开仓逻辑一致：TP1=60%，TP2=其余；单 TP 全量）────
+        if tp1_filled:
+            q1, q2 = 0.0, _round_qty(new_remaining, step)
+        elif has_tp2 and new_tp2:
+            q1 = _round_qty(new_remaining * TP1_CLOSE_RATIO, step)
+            q2 = _round_qty(new_remaining - q1, step)
+        else:
+            q1, q2 = _round_qty(new_remaining, step), 0.0
+        if (not tp1_filled and q1 <= 0) or (has_tp2 and new_tp2 and q2 <= 0 and tp1_filled):
+            raise RuntimeError(f"重新分配后的 TP 数量无效 q1={q1} q2={q2}")
+
+        close_side = "SELL" if direction == "LONG" else "BUY"
+        results = []   # (label, price, qty, ok)
+        updates = {}
+
+        async with _guard_locks[pid]:
+            # ── 4. 加锁 → 撤旧单（已成交的不撤）→ 重挂 ──────────────────
+            mark_system_order_update(symbol)
+
+            async def _cancel_if_open(oid, label) -> bool:
+                """返回 True = 可以重挂（旧单已撤或已不存在）；False = 旧单已成交，不重挂。"""
+                if not oid:
+                    return True
+                try:
+                    od = await loop.run_in_executor(None, lambda: api.get_order(symbol, int(oid)))
+                    st = (od or {}).get("status")
+                    if st in ("FILLED", "PARTIALLY_FILLED"):
+                        logger.warning(f"[pm] {symbol} 加仓后重挂 {label}: 旧单 {oid} 状态={st}，不撤不重挂")
+                        return False
+                except Exception as _ge:
+                    logger.debug(f"[pm] {symbol} 查询旧{label}状态失败(继续尝试撤单): {_ge}")
+                try:
+                    await loop.run_in_executor(None, lambda: api.cancel_order(symbol, int(oid)))
+                except Exception as _ce:
+                    logger.debug(f"[pm] {symbol} 撤旧{label} {oid} 失败(可能已成交/已撤): {_ce}")
+                return True
+
+            async def _place(label, price, qty):
+                resp = await loop.run_in_executor(None, lambda: api.place_order(
+                    symbol=symbol, side=close_side, order_type="LIMIT",
+                    quantity=qty, price=price, timeInForce="GTC", positionSide=direction))
+                oid = int(resp.get("orderId") or resp.get("algoId") or 0)
+                if not oid:
+                    raise RuntimeError(f"id=0, resp={resp}")
+                return oid
+
+            plan = []
+            if not tp1_filled:
+                plan.append(("TP1", old_tp1_id, new_tp1, q1, "tp1"))
+            if (has_tp2 and new_tp2 and q2 > 0):
+                plan.append(("TP2", old_tp2_id, new_tp2, q2, "tp2"))
+            for label, oid_old, price, qty, key in plan:
+                if not await _cancel_if_open(oid_old, label):
+                    results.append((label, price, qty, None))    # 旧单已成交：跳过
+                    continue
+                mark_system_order_update(symbol)
+                try:
+                    new_id = await _place(label, price, qty)
+                except Exception as _pe:
+                    results.append((label, price, qty, False))
+                    logger.error(f"[pm] {symbol} 加仓后 {label} 重挂失败: {_pe}")
+                    await _notify_async(
+                        f"🚨 {symbol} 加仓后 {label} 重挂失败\n"
+                        f"目标价={price:.6g} 数量={qty}\n错误:{_pe}\n"
+                        f"旧{label}已撤、新单未挂，该部分仓位暂无止盈保护，请立即检查。"
+                    )
+                    continue
+                results.append((label, price, qty, True))
+                updates.update({f"{key}_price": price, f"{key}_order_id": new_id, f"{key}_quantity": qty})
+            if updates:
+                updates["tp_replaced_after_pyramid"] = True
+                await asyncio.to_thread(update_position, pid, updates)
+
+        ok_items = [r for r in results if r[3] is True]
+        if ok_items:
+            lines = "\n".join(f"{lb}: {px:.6g}（{qt}）" for lb, px, qt, ok in ok_items)
+            await _notify_async(
+                f"🎯 {symbol} 加仓后止盈已重挂\n"
+                f"基准均价 {new_avg_entry:.6g} · 总量 {new_remaining}\n{lines}"
+            )
+        return bool(ok_items)
+    except Exception as e:
+        logger.warning(f"[pm] {symbol} 加仓后 TP 重挂未完成: {e}")
+        try:
+            await _notify_async(
+                f"⚠️ {symbol} 加仓后 TP 重挂未完成\n原因:{e}\n"
+                f"旧 TP 保持不变（只覆盖原仓位数量），加仓部分暂无止盈保护，请人工确认。"
+            )
+        except Exception:
+            pass
+        return False
+
+
 async def _maybe_pyramid(pos: dict) -> None:
     """
     浮盈 >= PYRAMID_FLOAT_PROFIT_ATR × ATR 时,顺势加一笔 PYRAMID_SIZE_RATIO × 原仓位。
@@ -2736,6 +2911,10 @@ async def _maybe_pyramid(pos: dict) -> None:
                 f"方向:{'多' if direction=='LONG' else '空'} 浮盈 {pnl_pct*100:.1f}%\n"
                 f"加仓量:{addup_qty}(原仓位50%)均价→{new_avg_entry:.6g}"
             )
+            # SL 同步完成后：按新均价/新总量撤旧 TP 并重挂（失败内部已告警，不影响加仓结果）
+            _pos_for_tp = dict(pos)
+            _pos_for_tp["quantity_remaining"] = new_remaining
+            await _pyramid_replace_tp(_pos_for_tp, new_avg_entry, new_remaining)
         else:
             logger.warning(f"[pm] {symbol} 加仓下单失败: {resp}")
     except Exception as e:
