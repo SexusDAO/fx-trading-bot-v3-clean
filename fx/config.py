@@ -164,6 +164,7 @@ WEEKEND_MIN_SCORE_STRONG          = 60   # 周末 strong 信号门槛（维持�
 WEEKEND_MIN_SCORE_MEDIUM_DEFAULT  = 70   # 周末 medium 默认门槛（reversal/range_bounce/oi_divergence/breakout 等）
 WEEKEND_MIN_SCORE_MEDIUM_PULLBACK = 60   # 周末 pullback medium 门槛
 WEEKEND_MIN_SCORE_MEDIUM_EMA      = 60   # 周末 ema_trend medium 门槛
+WEEKEND_MIN_SCORE_MEDIUM_REVERSAL = 60   # 周末 reversal medium 门槛
 WEEKEND_CUTOFF_SUNDAY_UTC_HOUR    = 17   # 周日 UTC 此时起不再注册新信号（主扫描 + funding_arb）
 WEEKEND_MAX_NEW_POSITIONS         = 3    # 整个周末累计注册信号上限（两条路径共用，按注册计，不持久化）
 WEEKEND_SIGNAL_EXPIRE_CUTOFF_HOUR = 17   # 周日 UTC 信号到期时间不得晚于此（breakout 除外）

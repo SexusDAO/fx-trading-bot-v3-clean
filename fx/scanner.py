@@ -2834,7 +2834,8 @@ def _filter_and_register_signals(
             _strength = _detail.get("signal_strength", "medium")
             # v3.92: 门槛参数化，medium 按策略分别控制
             from config import (WEEKEND_MIN_SCORE_STRONG, WEEKEND_MIN_SCORE_MEDIUM_DEFAULT,
-                                WEEKEND_MIN_SCORE_MEDIUM_PULLBACK, WEEKEND_MIN_SCORE_MEDIUM_EMA)
+                                WEEKEND_MIN_SCORE_MEDIUM_PULLBACK, WEEKEND_MIN_SCORE_MEDIUM_EMA,
+                                WEEKEND_MIN_SCORE_MEDIUM_REVERSAL)
             if _strength == "strong":
                 _min_sc = WEEKEND_MIN_SCORE_STRONG
             else:
@@ -2843,6 +2844,8 @@ def _filter_and_register_signals(
                     _min_sc = WEEKEND_MIN_SCORE_MEDIUM_PULLBACK
                 elif _sig_type_w == "ema_trend":
                     _min_sc = WEEKEND_MIN_SCORE_MEDIUM_EMA
+                elif _sig_type_w == "reversal":
+                    _min_sc = WEEKEND_MIN_SCORE_MEDIUM_REVERSAL
                 else:
                     _min_sc = WEEKEND_MIN_SCORE_MEDIUM_DEFAULT
             if sc < _min_sc:
