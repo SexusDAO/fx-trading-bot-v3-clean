@@ -3980,18 +3980,28 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
         logger.info(f"[adjust_sltp] {symbol} TP2 {old_tp2:.6g}→{new_tp2:.6g}")
 
     # 串行执行(避免并发在同一标的上挂单冲突)；新 SL 挂失败 → 保留旧单，不再继续后续逻辑
-    if sl_changed:
-        if not await _replace_sl():
-            _write_adjust_log(pid, symbol, direction, "sl_place_failed",
-                              old_sl, new_sl, old_tp1, new_tp1,
-                              old_tp2, new_tp2, atr,
-                              new_params.get("consistency_score"),
-                              new_params.get("momentum_coeff"),
-                              sl_reason, tp1_reason)
-            return {"sl_changed": False, "sl_reason": "place_failed_kept_old",
-                    "tp1_changed": False, "tp1_reason": tp1_reason, "tp2_changed": False}
-    if tp1_changed: await _replace_tp1()
-    if tp2_changed: await _replace_tp2()
+    # 改单段持有 _guard_locks[pid]：此前只在函数开头检查 lock.locked()，执行期间并未持锁，
+    #   每秒一次的 trail_sl（_execute_trail_sl 持同一把锁）可与这里同时改 SL。
+    #   这里若锁已被占用（trail 刚好开始）则本轮放弃、下一轮再调：本轮的 old_sl 是函数开头的快照，
+    #   等锁后再改可能把 trail 刚上移的止损改回更差的位置。locked() 检查与 acquire 之间没有 await，不会插队。
+    #   注意：只包住改单；后面的 RR 检查/平仓不在锁内（_force_close_static 不使用该锁，避免无谓持锁）。
+    _adj_lock = _guard_locks[pid]
+    if _adj_lock.locked():
+        logger.debug(f"[adjust_sltp] {symbol} 改单前锁被占用(trail_sl/补挂/加仓重挂进行中)，本轮放弃")
+        return None
+    async with _adj_lock:
+        if sl_changed:
+            if not await _replace_sl():
+                _write_adjust_log(pid, symbol, direction, "sl_place_failed",
+                                  old_sl, new_sl, old_tp1, new_tp1,
+                                  old_tp2, new_tp2, atr,
+                                  new_params.get("consistency_score"),
+                                  new_params.get("momentum_coeff"),
+                                  sl_reason, tp1_reason)
+                return {"sl_changed": False, "sl_reason": "place_failed_kept_old",
+                        "tp1_changed": False, "tp1_reason": tp1_reason, "tp2_changed": False}
+        if tp1_changed: await _replace_tp1()
+        if tp2_changed: await _replace_tp2()
     sl_changed, tp1_changed, tp2_changed = sl_placed, tp1_placed, tp2_placed
 
     # 本次没有任何单实际改成功 → 跳过 RR 检查

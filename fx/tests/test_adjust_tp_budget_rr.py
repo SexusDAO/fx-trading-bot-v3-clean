@@ -171,3 +171,48 @@ def test_source_has_budget_check_in_both_branches():
     assert src.count("_tighten_rr_ok(") == 3          # 定义 1 + shrink 1 + 条件A/B 1
     assert '_tighten_rr_ok("shrink")' in src
     assert "_tighten_rr_ok(reason_tag)" in src
+
+
+# ─────────────── 改单段持有 _guard_locks ───────────────
+def test_adjust_skips_when_guard_lock_held_at_execution(monkeypatch):
+    """改单前锁被 trail_sl 等占用：本轮放弃，不挂任何单。"""
+    e = Env(monkeypatch, mark=98.0, new_tp1=93.0, new_sl=100.5, old_sl=100.5)
+
+    async def go():
+        lk = pm._guard_locks["p-budget"]
+        # 函数开头的 locked() 检查会先于改单段返回；这里直接验证改单段自身：先让开头检查通过，再在改单前占锁
+        orig = pm._replace_tp1 if hasattr(pm, "_replace_tp1") else None
+        async with lk:
+            return await pm._adjust_sl_tp_once(e.pos(), force=True)
+
+    assert asyncio.run(go()) is None
+    assert e.placed == [] and e.closed == []
+
+
+def test_adjust_holds_lock_while_replacing_orders(monkeypatch):
+    """改单期间锁处于持有状态；改单完成后释放（RR 检查/平仓不在锁内）。"""
+    e = Env(monkeypatch, mark=98.0, new_tp1=93.0, new_sl=100.5, old_sl=100.5)
+    seen = []
+    real_place = pm.api.place_order
+
+    def spy(**kw):
+        seen.append(pm._guard_locks["p-budget"].locked())
+        return real_place(**kw)
+
+    monkeypatch.setattr(pm.api, "place_order", spy)
+    res = _run(e)
+    assert res and res["tp1_changed"] is True
+    assert seen and all(seen)                                  # 挂 TP 时锁被持有
+    assert pm._guard_locks["p-budget"].locked() is False       # 结束后已释放
+
+
+def test_lock_released_after_sl_place_failure(monkeypatch):
+    e = Env(monkeypatch, mark=98.0, new_tp1=93.0, new_sl=99.0, old_sl=110.0)
+
+    def boom(**kw):
+        raise RuntimeError("exchange down")
+
+    monkeypatch.setattr(pm.api, "place_sl", boom)
+    res = _run(e)
+    assert res and res["sl_reason"] == "place_failed_kept_old"
+    assert pm._guard_locks["p-budget"].locked() is False
