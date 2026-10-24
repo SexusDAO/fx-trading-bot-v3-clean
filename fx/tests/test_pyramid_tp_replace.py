@@ -158,4 +158,6 @@ def test_pyramid_calls_replace_after_sl_sync():
     src = inspect.getsource(pm._maybe_pyramid)
     assert src.index("_execute_trail_sl") < src.index("_pyramid_replace_tp")
     assert "TODO(待办-加仓后TP重挂)" not in inspect.getsource(pm)
-    assert "TODO(待办-TP收紧条件B缺陷)" in inspect.getsource(pm)       # 条件B的 TODO 按要求保留
+    # 条件A/B 顺势保护已实现,原 TODO 已删除并改为"已修复"说明
+    assert "TODO(待办-TP收紧条件B缺陷)" not in inspect.getsource(pm)
+    assert "已修复-TP收紧条件A/B顺势保护" in inspect.getsource(pm)

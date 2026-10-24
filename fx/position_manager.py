@@ -3711,8 +3711,8 @@ async def _maybe_daily_report_static() -> None:
 # 动态 TP/SL 调整(每30分钟,双向,静默,写日志供复盘)
 # =============================================================================
 
-# TODO(待办-TP收紧条件B缺陷): 顺势行情（价格向有利方向运动 > 2 ATR）时，
-#   不应触发「条件B」的 TP 收紧；需要在本函数内加保护。后续单独处理。
+# [已修复-TP收紧条件A/B顺势保护] 价格已向有利方向运动 > 1.5 ATR 时，条件A/B 不再收紧 TP
+#   （见 _adjust_sl_tp_once 内 _trending 判断）；improve（TP 更有利）不受影响。
 # TODO(待办-TP向有利方向扩展): calc_sl_tp 重算后，若新 TP 比旧 TP 更有利
 #   （空单更低 / 多单更高），应允许更新挂单（当前 TP 的调整规则见下方文档）。后续单独处理。
 def _vol_ratios_closed(k1h: list) -> list:
@@ -4093,6 +4093,20 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
             # 条件B:TP 绝对距离过远(>6ATR),无论盈亏都拉近
             # 3ATR 门槛:短线策略(4h以内)TP超过3ATR基本触达概率极低
             cond_b = (tp_dist_now >= atr * 3.0 and tp_will_closer)
+
+            # 顺势保护:价格已向有利方向运动 > 1.5ATR,说明行情还在走,条件A/B 不收紧 TP(只屏蔽收紧,improve 不受影响)
+            if direction == "LONG":
+                _trending = (mark_price - entry_price) > atr * 1.5
+            else:
+                _trending = (entry_price - mark_price) > atr * 1.5
+            if _trending and (cond_a or cond_b):
+                logger.debug(
+                    f"[adjust_sltp] {symbol} 顺势行情(有利移动>{1.5}ATR)，跳过条件A/B收紧TP "
+                    f"cond_a={cond_a} cond_b={cond_b}"
+                )
+            if _trending:
+                cond_a = False
+                cond_b = False
 
             if cond_a or cond_b:
                 reason_tag  = "profit_tighten" if cond_a else "tp_too_far"

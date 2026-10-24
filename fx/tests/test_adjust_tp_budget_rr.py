@@ -216,3 +216,35 @@ def test_lock_released_after_sl_place_failure(monkeypatch):
     res = _run(e)
     assert res and res["sl_reason"] == "place_failed_kept_old"
     assert pm._guard_locks["p-budget"].locked() is False
+
+
+# ─────────────── 条件 A/B 顺势保护(有利移动 > 1.5ATR 不收紧 TP) ───────────────
+def test_trending_blocks_cond_b_tighten(monkeypatch):
+    # 做空 entry=100,mark=96(有利移动4ATR>1.5);旧TP1=90 距现价6≥3ATR → 条件B成立;
+    # 新TP1=90.3(只近0.3ATR,不触发shrink);SL收紧到100使预算RR=5.7/4=1.4>=1.0。无保护时会收紧。
+    e = Env(monkeypatch, mark=96.0, new_tp1=90.3, new_sl=100.0, old_sl=100.0, old_tp1=90.0)
+    res = _run(e)
+    assert res is None and _tp_orders(e) == []          # 顺势:不收紧
+
+
+def test_not_trending_still_tightens_via_cond_b(monkeypatch):
+    # mark=99(有利移动1ATR<1.5);旧TP1=95 距现价4≥3ATR → 条件B成立;新TP1=95.3;预算RR=3.7/1.5=2.5
+    e = Env(monkeypatch, mark=99.0, new_tp1=95.3, new_sl=100.5, old_sl=100.5, old_tp1=95.0)
+    res = _run(e)
+    assert res and res["tp1_changed"] is True
+    assert [o["price"] for o in _tp_orders(e)] == [95.3]
+
+
+def test_trending_does_not_block_improve(monkeypatch):
+    # 顺势(mark=96)时 TP 向更有利方向移动(新TP1=88<旧90)仍允许
+    e = Env(monkeypatch, mark=96.0, new_tp1=88.0, new_sl=100.0, old_sl=100.0, old_tp1=90.0)
+    res = _run(e)
+    assert res and res["tp1_changed"] is True
+    assert [o["price"] for o in _tp_orders(e)] == [88.0]
+
+
+def test_trending_does_not_block_large_shrink_branch(monkeypatch):
+    # 说明:顺势保护只管条件A/B;新TP比旧TP近超过0.5ATR 走的是 shrink 分支,不在保护范围
+    e = Env(monkeypatch, mark=96.0, new_tp1=92.0, new_sl=100.0, old_sl=100.0, old_tp1=90.0)
+    res = _run(e)
+    assert res and res["tp1_changed"] is True and "shrink" in res.get("tp1_reason", "shrink")
