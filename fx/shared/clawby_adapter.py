@@ -334,7 +334,7 @@ def _parse_retry_after(value, default: float = 30.0, max_wait: float = 60.0) -> 
         return default
 
 
-def cg_get(path: str, params: dict = None, timeout: int = 12) -> "list | dict | None":
+def cg_get(path: str, params: dict = None, timeout: int = 8) -> "list | dict | None":
     """
     GET https://vip2.coinglass.site/<path>
     返回 data 字段（成功）或 None（失败/限速）。
@@ -1245,7 +1245,7 @@ def get_derivatives_signals(symbol: str, current_price: float = None,
         "_raw": {}
     }
 
-    with ThreadPoolExecutor(max_workers=7) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         f_lsr     = ex.submit(_get_top_lsr,      sym, exchange)
         f_tkr     = ex.submit(_get_taker,        sym, exchange)
         f_oi      = ex.submit(_get_oi_history,   sym, exchange)
@@ -1253,6 +1253,7 @@ def get_derivatives_signals(symbol: str, current_price: float = None,
         f_whale   = ex.submit(get_whale_index,   sym, exchange)
         f_cvd     = ex.submit(get_cvd,           sym, exchange)
         f_cb      = ex.submit(get_coinbase_premium)
+        f_liq     = ex.submit(_get_liq_history,  sym, exchange)
         # 在 with 块内取结果：shutdown(wait=True) 保证所有任务已完成，并发效果最大化
         lsr_data   = f_lsr.result()
         taker_data = f_tkr.result()
@@ -1261,6 +1262,7 @@ def get_derivatives_signals(symbol: str, current_price: float = None,
         whale_data = f_whale.result()
         cvd_data   = f_cvd.result()
         cb_data    = f_cb.result()
+        liq_hist_prefetch = f_liq.result()
 
     # ── 1. 多空比 ─────────────────────────────────────────────────────────────
     if lsr_data:
@@ -1314,7 +1316,7 @@ def get_derivatives_signals(symbol: str, current_price: float = None,
         result["_raw"]["fr"] = rates[-3:]
 
     # ── 5. 爆仓（Clawby）─────────────────────────────────────────────────────
-    liq_hist = _get_liq_history(sym, exchange)
+    liq_hist = liq_hist_prefetch
     if liq_hist:
         latest    = liq_hist[-1]
         long_liq  = float(latest.get("long_liquidation_usd",  0))
