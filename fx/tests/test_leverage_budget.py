@@ -166,9 +166,10 @@ class TestExecutorHelper(Base):
         self.assertTrue(ok); self.assertEqual(n, guard); self.assertEqual(reason, "")
 
     def test_min_notional_check_end_to_end(self):
-        self.market("range"); self.positions([pos(qty=24.5, price=100)])     # used 2450 → remaining 50 < guard
+        # used 2480 → remaining 20 < guard（MIN_NOTIONAL_GUARD 已由 100 降到 50，原 remaining=50 不再低于门槛）
+        self.market("range"); self.positions([pos(qty=24.8, price=100)])
         ok, n, reason = self._call(nominal=500.0, equity=1000.0)
-        self.assertFalse(ok); self.assertEqual(reason, "杠杆预算不足最小名义"); self.assertEqual(n, 50.0)
+        self.assertFalse(ok); self.assertEqual(reason, "杠杆预算不足最小名义"); self.assertEqual(n, 20.0)
 
     def test_nominal_kept_when_remaining_larger(self):
         with mock.patch.object(RM, "calc_leverage_remaining", return_value=1500.0):

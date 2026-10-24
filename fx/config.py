@@ -238,7 +238,7 @@ LEVERAGE_SHORT_RATIO_BEAR_STRONG = 0.80
 # 例：本金1000U / 5仓 = 200U保证金 × 5杠杆 = 1000U名义
 # 代码里用 net_value / MAX_POSITIONS_TOTAL_BULL 动态计算，此值仅作兜底上限
 MAX_SINGLE_NOMINAL = 1000    # 单仓名义上限（v3.36: 2000→1000，单仓不超1000U）
-MIN_NOTIONAL_GUARD = 100.0   # 单仓名义下限（v3.36: 6.0→100.0，低于100U不浪费槽位）
+MIN_NOTIONAL_GUARD = 50.0   # 单仓名义下限（v3.36: 6.0→100.0；v3.96: 100→50，小账户也能开仓）
 TAKER_FEE_RATE     = 0.0005  # [fix #44] 无法从成交回报取手续费时的估算用 taker 费率（0.05%）
 RISK_PER_TRADE     = 0.01    # 每笔最大风险比例（止损定仓核心参数）  # [fix] 5% → 1%
 

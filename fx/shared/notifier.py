@@ -350,9 +350,9 @@ def flush_signal(sig_id: str) -> bool:
     lines = _signal_buffer.pop(sig_id)
     if not lines:
         return False
-    _card_create_now(sig_id, lines[0])
-    for ln in lines[1:]:
-        _card_append_now(sig_id, ln)
+    # 合并成一条消息一次发出（标题 + 全部已缓冲行，与编辑追加时 "\n" 拼接的排版一致）。
+    # 旧写法先单独发标题、再逐行编辑追加：一旦拿不到 message_id 或编辑失败，每一行都会降级成独立消息。
+    _card_create_now(sig_id, "\n".join(lines))
     logger.debug(f"[card] flush sig_id={sig_id} 合并推送 {len(lines)} 行")
     return True
 

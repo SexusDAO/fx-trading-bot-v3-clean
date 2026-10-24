@@ -553,6 +553,22 @@ def _fetch_liq(symbol: str, mark_price: float = 0.0) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # 步骤5：账户状态终检
 # ─────────────────────────────────────────────────────────────────────────────
+async def _reject_card(signal: dict, title: str, detail: str = "") -> None:
+    """[v3.96] 挂单前最后几步被 executor 拒绝时，向该信号的卡片追加一行 ❌，再清理卡片缓存。
+    sig_id 为空（没有卡片）时改发一条独立消息。通知失败只记日志，不影响拒绝流程。"""
+    try:
+        from shared.notifier import _hhmm as _hm
+        line = f"\n❌ {_hm()} {title}" + (f"\n {detail}" if detail else "")
+        sid = (signal or {}).get("_sig_id", "")
+        if sid:
+            await card_append_async(sid, line)
+            card_remove(sid)
+        else:
+            await notify_async(line.strip())
+    except Exception as _e:
+        logger.debug(f"[executor] 拒绝通知失败（忽略）: {_e}")
+
+
 def _account_final_check(notional: float, notifier_fn=None) -> tuple[bool, str]:
     try:
         acc = api.get_account()
@@ -1585,6 +1601,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     )
     if "error" in params:
         logger.warning(f"[executor] {symbol} calc_sl_tp 拒绝: {params['error']}")
+        await _reject_card(signal, "止损计算拒绝", str(params["error"]))
         return False
 
     entry_price = params["entry_price"]
@@ -1625,6 +1642,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
                 f"[executor] {symbol} 盈亏比不足: TP1距离={_rr_tp1/entry_price*100:.1f}% "
                 f"SL距离={_rr_sl/entry_price*100:.1f}% RR={_rr_ratio:.2f}x < {_rr_min:.1f}(tier={_tier_rr})，拒绝开仓"
             )
+            await _reject_card(signal, f"盈亏比不足 RR={_rr_ratio:.2f}x，拒绝开仓")
             return False
         logger.debug(f"[executor] {symbol} 盈亏比={_rr_ratio:.2f}x ✅")
     except Exception as _rre:
@@ -1799,6 +1817,8 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
             f"[executor] {symbol} 名义仓位 {notional:.2f}U < 最小保护值 {MIN_NOTIONAL_GUARD}U，"
             f"账户余额不足以安全开仓，跳过（不报错）"
         )
+        await _reject_card(signal, "余额不足",
+                           f"计算仓位={notional:.0f}U < 最小保护值={MIN_NOTIONAL_GUARD:.0f}U\n 当前余额={total_bal:.0f}U")
         return False
 
     # ── 步骤5：账户终检 ───────────────────────────────────────────────────────
@@ -1808,6 +1828,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
         # [v3.89 #102] 账户查询失败是暂时性故障（可重试）；余额/名义/回撤等业务拒绝仍 return False
         if str(reason).startswith("账户查询失败"):
             raise PreOrderError(f"{symbol} {reason}")
+        await _reject_card(signal, "账户检查失败", str(reason))
         return False
 
     # ── 杠杆利用率预算（v3.90）：在终检通过之后、设置杠杆/下单之前，把名义仓位截断到该方向剩余预算 ──
@@ -1819,6 +1840,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     _liq_ok, _liq_reason = await asyncio.to_thread(_check_liquidity_gate, symbol, direction, notional)
     if not _liq_ok:
         logger.info(f"[executor] {symbol} 流动性检查拒绝: {_liq_reason}")
+        await _reject_card(signal, "流动性不足", str(_liq_reason))
         return False
 
     # ── 步骤6：设置全仓 + 最大杠杆 ───────────────────────────────────────────
