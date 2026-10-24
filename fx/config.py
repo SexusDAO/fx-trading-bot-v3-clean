@@ -313,8 +313,8 @@ ORDER_EXPIRE_PULLBACK_MIN = 240   # 回踩/反转挂单超时，分钟
 # 扫描超时保护
 SCAN_SYMBOL_TIMEOUT_SEC   = 10    # 单标的分析超时（秒），超时跳过
 SCAN_TOTAL_TIMEOUT_SEC    = 120   # 整轮扫描总超时（秒）；v3.26: 240→120，并发25线程理论8~12s
-SCAN_MAX_WORKERS          = 2     # 并行分析线程数（10→4：降低 GIL 竞争导致事件循环阻塞）；v3.82: 25→10，控制并发内存峰值（25线程×11MB=275MB峰值，pymalloc不归还导致水位积累至3.5GB）
-FUNDING_ARB_SCAN_WORKERS = 2  # funding_arb并发扫描线程数，降低SSL并发防止阻塞事件循环
+SCAN_MAX_WORKERS          = 4     # 并行分析线程数（10→4：降低 GIL 竞争导致事件循环阻塞）；v3.82: 25→10，控制并发内存峰值（25线程×11MB=275MB峰值，pymalloc不归还导致水位积累至3.5GB）
+FUNDING_ARB_SCAN_WORKERS = 8  # funding_arb并发扫描线程数，降低SSL并发防止阻塞事件循环
 SCAN_USE_PROCESS_POOL     = False  # True：并行分析走 spawn 进程池（shared/analysis_worker.py）；False：保持线程池（默认）
 SCAN_KLINE_TIMING       = True  # 是否统计 K 线请求耗时（每轮 info 一条汇总），生产环境建议开启
 KLINE_CACHE_ENABLED     = True  # 是否启用 K 线 REST 缓存（按收盘时间失效；False 时每轮直接 REST）
@@ -322,10 +322,10 @@ KLINE_CACHE_INTERVALS   = ["1h", "4h", "15m"]  # 缓存哪些周期
 KLINE_REQUEST_TIMEOUT   = (3, 5)  # (connect_s, read_s)：K 线单次 HTTP 请求超时
 KLINE_REQUEST_MAX_RETRY = 1       # K 线请求最多重试次数（总尝试 = 1 + 此值）
 MARKET_DATA_HUB_ENABLED = True   # 公共市场数据 WS 中心（阶段一：全市场标记价/资金费率）；False 时行为与未引入 hub 前完全一致；hub 未就绪/过旧时 scanner 自动回落 REST
-HUB_LOAD_MAX_WORKERS = 2  # hub历史K线加载并发上限
+HUB_LOAD_MAX_WORKERS = 8  # hub历史K线加载并发上限
 HUB_NO_MSG_TIMEOUT = 180  # 120→180：给历史加载留余量，减少阻塞引发的假断线； WebSocket 无消息超时（秒），过短会因GIL饿死误触发重连
 KLINE_FETCH_CONCURRENCY = 6  # hub历史K线REST拉取并发上限
-LIQ_PREFETCH_MAX_WORKERS = 2   # 预热线程数，降低SSL并发防止阻塞事件循环
+LIQ_PREFETCH_MAX_WORKERS = 4   # 预热线程数，降低SSL并发防止阻塞事件循环
 LIQ_PREFETCH_SLEEP_SEC   = 2.0 # 每个标的预热后的节流间隔（秒）
 LIQ_PRESCAN_PREFETCH_ENABLED     = True   # 每轮扫描前先有界预热本轮候选池里过期的 liq_cache（False=回到分析时实时查询）
 LIQ_PRESCAN_PREFETCH_TIMEOUT_SEC = 30.0   # 扫描前预热的最长等待（秒），超时直接进入分析
