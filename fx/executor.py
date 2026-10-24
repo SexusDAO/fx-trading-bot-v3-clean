@@ -1353,6 +1353,11 @@ def _write_position(
         "tp1_liq_buffer_atr":    params.get("tp1_liq_buffer_atr"),  # [v3.88 OPT-14e] 重算时锁定
         # ── 问题一修复：atr_at_entry，_calc_trail_sl 动态止损依赖此字段 ──────
         "atr_at_entry":          atr,
+        # ── 动态TP状态机数据层（只记录不动作）：orig_* 开仓时写一次，之后只读 ──
+        "orig_entry":            fill_price,
+        "orig_tp_dist":          abs(float(guard.get("tp1_price", params["tp1_price"])) - fill_price),
+        "peak_price":            fill_price,
+        "phase":                 1,
         # ── funding_arb 专属字段（pos_state 里必须有，_patrol_funding_arb 会读这些字段）
         "sig_type":              signal.get("sig_type", signal.get("mode")),
         "funding_rate_at_entry": signal.get("funding_rate"),

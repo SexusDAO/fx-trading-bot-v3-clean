@@ -86,6 +86,10 @@ _TP1_MAX_PCT = _CFG_TP1_MAX  # low/mid tier TP1 距入场价上限
 _TP1_MAX_PCT_HIGH = _CFG_TP1_HIGH  # high tier TP1 距入场价上限
 _TP1_MIN_RR = _CFG_RR_MIN_TP1   # v3.14: 从 config.RR_MIN_TP1 加载，与配置同步（原硬编码 1.5）
 try:
+    from config import RR_MIN_TP1_REVERSAL as _TP1_MIN_RR_REVERSAL   # reversal 专属 TP1 RR 门槛（仅用于清算区候选遍历）
+except Exception:
+    _TP1_MIN_RR_REVERSAL = 1.2   # 与 config.RR_MIN_TP1_REVERSAL 默认值一致
+try:
     from config import RR_MIN_TP2 as _TP2_MIN_RR   # [fix #41] 统一从 config 读取，删除硬编码 2.5
 except Exception:
     _TP2_MIN_RR = 3.0                                # 与 config.RR_MIN_TP2 默认值一致
@@ -819,7 +823,7 @@ def _orderbook_tp(entry: float, atr: float, direction: str, symbol: str) -> floa
 def _calc_tp(entry: float, sl: float, atr: float, direction: str,
               liq_long: list, liq_short: list,
               symbol: str = "", tier: str = "mid", vol24_usd: float = 0.0,
-              liq_ctx: dict | None = None) -> tuple[float, float | None, bool]:
+              liq_ctx: dict | None = None, mode: str = "") -> tuple[float, float | None, bool]:
     """
     TP 计算策略：
       有清算图且 2 处以上密集区 → TP1 + TP2 分批止盈
@@ -830,6 +834,9 @@ def _calc_tp(entry: float, sl: float, atr: float, direction: str,
     sl_dist  = abs(entry - sl) + 1e-9
     degraded = False
     tp2      = None   # 默认无 TP2
+    # reversal 的目标就是清算区，清算区候选遍历用专属 RR 门槛；其他策略仍用通用 _TP1_MIN_RR。
+    # 仅影响下方 liq_candidates 遍历，ATR 降级 TP1、订单簿降级、_tp1_cap 等其他 RR 逻辑不变。
+    _liq_tp1_rr = _TP1_MIN_RR_REVERSAL if mode == "reversal" else _TP1_MIN_RR
 
     # ── 收集清算图候选区 ─────────────────────────────────────────────────────
     if direction == "LONG":
@@ -872,11 +879,11 @@ def _calc_tp(entry: float, sl: float, atr: float, direction: str,
         for z in liq_candidates:
             if direction == "LONG":
                 candidate = z["price_low"] - atr * _tp1_buf(z)
-                if (candidate - entry) >= sl_dist * _TP1_MIN_RR:
+                if (candidate - entry) >= sl_dist * _liq_tp1_rr:
                     tp1 = candidate; break
             else:
                 candidate = z["price_high"] + atr * _tp1_buf(z)
-                if (entry - candidate) >= sl_dist * _TP1_MIN_RR:
+                if (entry - candidate) >= sl_dist * _liq_tp1_rr:
                     tp1 = candidate; break
 
         if tp1 is None:
@@ -1382,7 +1389,7 @@ def calc_sl_tp(
         tp1, tp2, tp_degraded = _calc_tp(entry, sl, atr, direction,
                                           liq_long, liq_short,
                                           symbol=symbol_hint, tier=tier,
-                                          vol24_usd=(signal.get("ind") or {}).get("vol24_usd", 0.0), liq_ctx=_liq_ctx)
+                                          vol24_usd=(signal.get("ind") or {}).get("vol24_usd", 0.0), liq_ctx=_liq_ctx, mode=mode)
 
     # v3.62: VP TP1 增强——tp_degraded 时（无清算图 TP 锚点）用 VP vah/val 作为候选
     # LONG：vah（价值区上沿）在入场价上方 + RR >= 1.2 时，替换 tp_degraded TP1

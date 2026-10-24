@@ -264,6 +264,9 @@ SL_MULT_HIGH = 2.0
 
 # 盈亏比要求（复盘优化：益亏比 0.61→2.0+）
 RR_MIN_TP1      = 2.0   # TP1 盈亏比要求（low/mid tier）
+RR_MIN_TP1_REVERSAL = 1.2   # reversal 专属 TP1 盈亏比要求
+                              # 低于通用 2.0，因为 reversal 目标就是清算区，
+                              # 强行要求 2.0 会系统性过滤掉最近的清算区
 RR_MIN_TP1_HIGH = 1.5   # TP1 盈亏比要求（high tier，SL 较宽故放宽 RR）
 RR_MIN_TP2      = 3.0   # TP2 盈亏比要求（原2.5）
 

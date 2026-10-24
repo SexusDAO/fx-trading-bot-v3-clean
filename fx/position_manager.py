@@ -112,6 +112,8 @@ def is_system_order_update(symbol: str) -> bool:
 _peak: dict[str, float]    = {}   # pos_id → 持仓期间最高浮盈价格(做多高,做空低)
 _mfe:  dict[str, float]    = {}   # pos_id → 持仓期间最大有利偏移(MFE,始终≥0)
 _mae:  dict[str, float]    = {}   # pos_id → 持仓期间最大不利偏移(MAE,始终≥0)
+# 动态TP状态机数据层(只记录不动作): pos_id → {"peak": 绝对峰值价, "wpeak": 上次写盘的峰值价, "phase": 当前阶段}
+_phase_state: dict[str, dict] = {}
 _last_price: dict[str, float] = {} # symbol → 最新标记价格
 _last_price_ts: dict[str, float] = {} # symbol → 最后更新时间(防抖)
 _health_warned: dict[str, float] = {} # pos_id → 最后告警时间戳
@@ -453,6 +455,52 @@ class PositionManager:
                 logger.warning(f"[pm] mark_price_loop 异常: {e}")
                 await asyncio.sleep(5)
 
+    async def _update_phase_observe(self, pos: dict, pid: str, direction: str, price: float):
+        """阶段观测(只写日志/落盘,不动作)。依赖开仓时写入的 orig_entry/orig_tp_dist(只读);旧仓位无此字段则跳过。
+        进度用「峰值进度」= 峰值有利移动 / orig_tp_dist,否则回撤到61.8%时当前进度已不足30%,衰竭阶段几乎不可达。"""
+        orig_entry = float(pos.get("orig_entry") or 0)
+        orig_dist = float(pos.get("orig_tp_dist") or 0)
+        if orig_entry <= 0 or orig_dist <= 0:
+            return
+        is_long = direction == "LONG"
+        st = _phase_state.get(pid)
+        if st is None:
+            pk = float(pos.get("peak_price") or orig_entry)
+            st = {"peak": pk, "wpeak": pk, "phase": int(pos.get("phase") or 1)}
+            _phase_state[pid] = st
+        favorable = (price - orig_entry) if is_long else (orig_entry - price)
+        if favorable > 0:
+            st["peak"] = max(st["peak"], price) if is_long else min(st["peak"], price)
+        peak = st["peak"]
+        peak_fav = (peak - orig_entry) if is_long else (orig_entry - peak)
+        progress = peak_fav / orig_dist if peak_fav > 0 else 0.0
+        drawback = 0.0
+        if peak_fav > 0:
+            drawback = ((peak - price) if is_long else (price - peak)) / peak_fav
+            drawback = max(drawback, 0.0)
+        if progress < 0.30:
+            phase = 1
+        elif drawback < 0.382:
+            phase = 2
+        elif drawback < 0.618:
+            phase = 3
+        else:
+            phase = 4
+        updates: dict = {}
+        if phase != st["phase"]:
+            logger.info(f"[phase] {pos.get('symbol', pid)} 进入阶段{phase} progress={progress:.1%} drawback={drawback:.1%}")
+            st["phase"] = phase
+            updates["phase"] = phase
+            updates["peak_price"] = peak
+            st["wpeak"] = peak
+        else:
+            atr = float(pos.get("atr_at_entry") or 0)
+            if atr > 0 and abs(peak - st["wpeak"]) > 0.1 * atr:
+                updates["peak_price"] = peak
+                st["wpeak"] = peak
+        if updates:
+            await asyncio.to_thread(update_position, pid, updates)
+
     async def _on_price_update(self, pos: dict, price: float):
         """价格更新 → 检查动态止损"""
         pid       = pos.get("pos_id", pos.get("symbol","unknown"))
@@ -470,6 +518,12 @@ class PositionManager:
             adv = (price - entry_p) / entry_p
         _mfe[pid] = max(_mfe.get(pid, 0.0), fav)   # 最大有利偏移
         _mae[pid] = max(_mae.get(pid, 0.0), adv)   # 最大不利偏移
+
+        # ── 动态TP状态机数据层:只更新 peak_price/phase 并写日志,不触发任何平仓或改单 ──
+        try:
+            await self._update_phase_observe(pos, pid, direction, price)
+        except Exception as _ph_e:
+            logger.debug(f"[phase] 观测异常(忽略): {_ph_e}")
 
         # ── MFE 高水位回撤保护(v3.24)──────────────────────────────────────
         # 条件:1 曾盈利 > 0.5%(排除噪声)2 当前仍盈利 3 从峰值回撤超过 50%
@@ -2238,6 +2292,7 @@ async def _close_position_post_static(
         _peak.pop(pos_id, None)
         _mfe.pop(pos_id, None)
         _mae.pop(pos_id, None)
+        _phase_state.pop(pos_id, None)
     except Exception as e:
         logger.error(f"[pm] remove_position 失败: {e}")
 
