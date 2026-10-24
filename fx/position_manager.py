@@ -2291,6 +2291,7 @@ async def _close_position_post_static(
         pnl_usdt = (entry - exit_price) * fill_qty
     pnl_pct      = pnl_usdt / (nominal + 1e-9) * 100
     hold_minutes = (close_ms - open_ms) / 60000
+    _log_vol_exhaust_result(pos, close_reason, exit_price, close_ms)   # 量能耗尽信号结果回填(只写日志)
 
     # 步骤2:更新熔断器(v3.16 修复:record_pnl 正确区分盈亏,盈利不再计入 daily_loss)
     # [fix #44] 用交易所成交回报里的实际手续费，并计入总亏损
@@ -3688,6 +3689,28 @@ def _vol_ratios_closed(k1h: list) -> list:
     return out
 
 
+def _log_vol_exhaust_result(pos: dict, close_reason: str, exit_price: float, close_ms: float) -> str | None:
+    """平仓时回填量能耗尽信号结果:仓位曾触发过信号(vol_exhaust_signal_price>0)才写一条 info 日志。
+    价格变化按「对该仓位有利为正」计算:做多=(平仓价-信号价)/信号价,做空=(信号价-平仓价)/信号价。
+    持续时间=信号触发到平仓的分钟数。返回日志文本(未触发/数据无效返回 None)。永不抛异常。"""
+    try:
+        sig_px = float(pos.get("vol_exhaust_signal_price") or 0)
+        if sig_px <= 0 or float(exit_price) <= 0:
+            return None
+        sig_ts = float(pos.get("vol_exhaust_signal_ts") or 0)
+        is_long = str(pos.get("direction", "long")).upper() == "LONG"
+        chg = ((exit_price - sig_px) if is_long else (sig_px - exit_price)) / sig_px
+        minutes = (close_ms - sig_ts) / 60000.0 if sig_ts > 0 else 0.0
+        msg = (f"[vol_exhaust_result] {pos.get('symbol', '?')} 平仓原因={close_reason}\n"
+               f"  信号价格={sig_px:.6g} 平仓价格={float(exit_price):.6g}\n"
+               f"  价格变化={chg:+.2%} 持续时间={minutes:.0f}分钟")
+        logger.info(msg)
+        return msg
+    except Exception as e:
+        logger.debug(f"[vol_exhaust_result] 回填日志异常(忽略): {e}")
+        return None
+
+
 def _check_volume_exhaustion_shadow(pos: dict, k1h: list, mark_price: float) -> dict | None:
     """量能耗尽【影子】检查:满足全部条件只写一条 info 日志并返回信号摘要,不触发任何平仓/止损/改单。
     条件:reversal;阶段=3;当前仍盈利;峰值进度>=50%;MFE 所在 1H 及前后 3 根内最大量比>=2.0;
@@ -3830,7 +3853,15 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
         return None
 
     # 量能耗尽影子日志(只记日志,不影响后续任何 SL/TP 逻辑)
-    _check_volume_exhaustion_shadow(pos, k1h, mark_price)
+    try:
+        _vs = _check_volume_exhaustion_shadow(pos, k1h, mark_price)
+        if _vs and not float(pos.get("vol_exhaust_signal_price") or 0) > 0:
+            _vs_upd = {"vol_exhaust_signal_price": float(mark_price),
+                       "vol_exhaust_signal_ts": float(int(time.time() * 1000))}
+            pos.update(_vs_upd)
+            await asyncio.to_thread(update_position, pid, _vs_upd)
+    except Exception as _vs_e:
+        logger.debug(f"[vol_exhaust_shadow] 信号落盘异常(忽略): {_vs_e}")
 
     # ── 重算 TP/SL ────────────────────────────────────────────────────────────
     try:
