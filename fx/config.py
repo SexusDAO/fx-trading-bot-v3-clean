@@ -682,6 +682,7 @@ BTC_BEAR_SHORT_MIN_FUNDING = -0.0015   # 熊市顺势空单最低费率门槛（
 # 完全数据驱动，无需维护标的列表，ATR ratio 实时决定当前所在档位
 ATR_TIER_HIGH_MIN            = 2.5    # 高波动档下限（meme / 山寨大涨期）
 ATR_TIER_MID_MIN             = 1.0    # 中波动档下限（主流 / 新兴币）
+EMA_TREND_ATR_MIN           = 0.8    # ema_trend 专用 ATR 比例下限(%)；不再共用 ATR_TIER_MID_MIN(1.0)，其他策略不受影响
 
 ATR_TIER_MID_SCORE_ADJ       = -5     # 中波动档评分惩罚（不确定性更高）
 
@@ -806,7 +807,7 @@ OI_DIV_ORDER_EXPIRE_MIN      = 60      # oi_divergence 挂单有效期（分钟�
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── 触发门槛 ──────────────────────────────────────────────────────────────────
-EMA_TREND_EMA_GAP_MIN_PCT     = 0.005  # EMA20 > EMA50 至少差距 0.5%（防止刚刚交叉的假多头）
+EMA_TREND_EMA_GAP_MIN_PCT     = 0.003  # EMA20 > EMA50 至少差距 0.3%（防止刚刚交叉的假多头；原 0.5%，影子数据显示过严）
 EMA_TREND_RSI1H_MIN           = 48     # 1H RSI 下限（太低说明已经超卖，走 reversal 更合适）
 EMA_TREND_RSI1H_MAX           = 68     # 1H RSI 上限（太高说明已超买，不是好的回踩入场点）
 EMA_TREND_RSI1H_SHORT_MIN     = 32     # 做空 RSI1H 下限（原沿用做多 48）

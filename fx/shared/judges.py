@@ -3846,17 +3846,17 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
             EMA_TREND_BASE_MEDIUM      as _BASE_MEDIUM,
             EMA_TREND_CHG24_MAX        as _CHG24_MAX,
             EMA_TREND_CHG24_MIN        as _CHG24_MIN,
-            ATR_TIER_MID_MIN           as _ATR_MID_MIN,
+            EMA_TREND_ATR_MIN          as _ATR_MID_MIN,
         )
     except Exception:
-        _EMA_GAP      = 0.005
+        _EMA_GAP      = 0.003
         _RSI1H_MIN    = 48;  _RSI1H_MAX = 68
         _RSI4H_MIN    = 45;  _RSI4H_MAX = 72
         _PB_ABOVE     = 0.02; _PB_BELOW = 0.015
         _VOL_MIN      = 0.5
         _BASE_STRONG  = 65;  _BASE_MEDIUM = 52
         _CHG24_MAX    = 12.0; _CHG24_MIN = -8.0
-        _ATR_MID_MIN  = 0.5
+        _ATR_MID_MIN  = 0.8
 
     price    = ind["price"]
     atr      = ind["atr_1h"]
