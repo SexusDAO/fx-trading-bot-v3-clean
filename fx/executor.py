@@ -1358,6 +1358,7 @@ def _write_position(
         "orig_tp_dist":          abs(float(guard.get("tp1_price", params["tp1_price"])) - fill_price),
         "peak_price":            fill_price,
         "phase":                 1,
+        "peak_ts":               float(int(time.time() * 1000)),   # 峰值价对应的时间(毫秒,与 open_time/K线开盘时间同口径);初始=开仓时间
         # ── funding_arb 专属字段（pos_state 里必须有，_patrol_funding_arb 会读这些字段）
         "sig_type":              signal.get("sig_type", signal.get("mode")),
         "funding_rate_at_entry": signal.get("funding_rate"),

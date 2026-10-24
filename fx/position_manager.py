@@ -466,12 +466,16 @@ class PositionManager:
         st = _phase_state.get(pid)
         if st is None:
             pk = float(pos.get("peak_price") or orig_entry)
-            st = {"peak": pk, "wpeak": pk, "phase": int(pos.get("phase") or 1)}
+            st = {"peak": pk, "wpeak": pk, "phase": int(pos.get("phase") or 1),
+                  "peak_ts": float(pos.get("peak_ts") or pos.get("open_time") or 0)}
             _phase_state[pid] = st
         old_phase = st["phase"]
         favorable = (price - orig_entry) if is_long else (orig_entry - price)
         if favorable > 0:
-            st["peak"] = max(st["peak"], price) if is_long else min(st["peak"], price)
+            _new_peak = max(st["peak"], price) if is_long else min(st["peak"], price)
+            if _new_peak != st["peak"]:
+                st["peak_ts"] = float(int(time.time() * 1000))   # 峰值刷新时间(毫秒)
+            st["peak"] = _new_peak
         peak = st["peak"]
         peak_fav = (peak - orig_entry) if is_long else (orig_entry - peak)
         progress = peak_fav / orig_dist if peak_fav > 0 else 0.0
@@ -493,11 +497,13 @@ class PositionManager:
             st["phase"] = phase
             updates["phase"] = phase
             updates["peak_price"] = peak
+            updates["peak_ts"] = st["peak_ts"]
             st["wpeak"] = peak
         else:
             atr = float(pos.get("atr_at_entry") or 0)
             if atr > 0 and abs(peak - st["wpeak"]) > 0.1 * atr:
                 updates["peak_price"] = peak
+                updates["peak_ts"] = st["peak_ts"]
                 st["wpeak"] = peak
         if updates:
             await asyncio.to_thread(update_position, pid, updates)
