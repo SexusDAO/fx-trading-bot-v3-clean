@@ -122,3 +122,21 @@ def test_aggregate_4h_requires_four_bars():
 
 def test_session_boundaries():
     assert B.session_of(0).startswith("亚盘") and B.session_of(8 * H).startswith("欧盘") and B.session_of(16 * H).startswith("美盘")
+
+
+def test_forming_bar_carries_volume_proxy_not_zero():
+    """合成未收盘K线的量必须用代理值：calc_indicators 的 vol_ratio 取最后一根的量，写0会让 vol_ratio 恒为0。"""
+    b = B._forming(5 * H, 100.0, H, vol=123.0)
+    assert float(b[5]) == 123.0 and float(b[7]) == 123.0
+    assert float(b[1]) == float(b[2]) == float(b[3]) == float(b[4]) == 100.0     # 价格只有开盘价，无未来数据
+
+
+def test_vol_ratio_nonzero_with_forming_bar():
+    from scanner import calc_indicators
+    ks = [bar(i, 100, 101, 99, 100) for i in range(120)]
+    last_vol = float(ks[-1][5])
+    ind = calc_indicators(ks[-60:], ks, ks[-30:] if False else ks[::4])
+    ind2 = calc_indicators(ks[-60:] + [B._forming(200 * H, 100.0, H, last_vol)],
+                           ks + [B._forming(200 * H, 100.0, H, last_vol)],
+                           ks[::4] + [B._forming(200 * H, 100.0, H, last_vol)])
+    assert ind2["vol_ratio"] > 0 and abs(ind2["vol_ratio"] - 1.0) < 1e-6

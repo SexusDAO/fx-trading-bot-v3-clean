@@ -142,10 +142,13 @@ def aggregate_4h(k1h: list) -> list:
     return out
 
 
-def _forming(open_ms: int, price: float, step: int) -> list:
-    """合成「未收盘 K 线」：只含开盘价（= 上一根收盘价），不含任何未来数据。"""
+def _forming(open_ms: int, price: float, step: int, vol: float = 0.0) -> list:
+    """合成「未收盘 K 线」：价格只含开盘价（= 上一根收盘价），不含任何未来数据。
+    成交量用上一根已收盘 K 线的量做代理（vol）：calc_indicators 的 vol_ratio 取最后一根（含未收盘）的量，
+    写 0 会让 vol_ratio 恒为 0，被 reversal 量能门槛全部拒掉。"""
     p = repr(float(price))
-    return [open_ms, p, p, p, p, "0", open_ms + step - 1, "0", 0, "0", "0", "0"]
+    v = repr(float(vol))
+    return [open_ms, p, p, p, p, v, open_ms + step - 1, v, 0, "0", "0", "0"]
 
 
 # ═════════════════════════ 市值（当前市值，非历史）═════════════════════════
@@ -277,8 +280,9 @@ def generate_signals(sym: str, k1h_all: list, k15_all: list, strategies: list, s
         if len(k1h) < 60 or len(k4h) < 20 or len(k15) < 40:
             continue
         price = float(k1h_all[i][4])
-        ind = calc_indicators(k15 + [_forming(T, price, M15)], k1h + [_forming(T, price, H1)],
-                              k4h + [_forming(T, price, H4)])
+        ind = calc_indicators(k15 + [_forming(T, price, M15, float(k15[-1][5]))],
+                              k1h + [_forming(T, price, H1, float(k1h[-1][5]))],
+                              k4h + [_forming(T, price, H4, float(k4h[-1][5]))])
         c1h = [float(k[4]) for k in k1h]
         chg24 = (c1h[-1] - float(k1h[-24][1])) / float(k1h[-24][1]) * 100
         wk = _is_weekend_period(_dt.datetime.fromtimestamp(T / 1000, _dt.timezone.utc))
