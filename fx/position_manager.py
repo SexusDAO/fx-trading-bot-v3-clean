@@ -783,6 +783,14 @@ class PositionManager:
 
     async def _handle_order_filled(self, pos: dict, filled_oid: int, event: dict):
         pid       = pos.get("pos_id", pos.get("symbol","unknown"))
+        # 重新读取最新 pos，避免加仓后 tp_order_id 过期（调用方传入的可能是旧快照）
+        try:
+            for _p in (await asyncio.to_thread(get_all_positions)):
+                if _p.get("pos_id") == pid:
+                    pos = _p
+                    break
+        except Exception as _e:
+            logger.warning(f"[pm] _handle_order_filled 重读最新 pos 失败，沿用传入快照: {_e}")
         symbol    = pos["symbol"]
         direction = pos["direction"].upper()
         sl_id     = pos.get("sl_order_id")
