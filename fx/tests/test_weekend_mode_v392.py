@@ -135,8 +135,8 @@ def test_T14_sunday_cutoff(run):
     assert not calls
 
 
-def test_T15_weekend_cap_3(run):
-    calls, _, res = run([_mk("AAAUSDT", strength="strong")], SAT_T, 80, n_pre=3)
+def test_T15_weekend_cap_10(run):
+    calls, _, res = run([_mk("AAAUSDT", strength="strong")], SAT_T, 80, n_pre=10)
     assert not calls
     assert any("周末开仓上限" in r["reason"] for r in res["rejected"])
 
