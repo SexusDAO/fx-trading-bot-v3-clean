@@ -461,13 +461,14 @@ class PositionManager:
         orig_entry = float(pos.get("orig_entry") or 0)
         orig_dist = float(pos.get("orig_tp_dist") or 0)
         if orig_entry <= 0 or orig_dist <= 0:
-            return
+            return None
         is_long = direction == "LONG"
         st = _phase_state.get(pid)
         if st is None:
             pk = float(pos.get("peak_price") or orig_entry)
             st = {"peak": pk, "wpeak": pk, "phase": int(pos.get("phase") or 1)}
             _phase_state[pid] = st
+        old_phase = st["phase"]
         favorable = (price - orig_entry) if is_long else (orig_entry - price)
         if favorable > 0:
             st["peak"] = max(st["peak"], price) if is_long else min(st["peak"], price)
@@ -500,6 +501,36 @@ class PositionManager:
                 st["wpeak"] = peak
         if updates:
             await asyncio.to_thread(update_position, pid, updates)
+        return old_phase, phase
+
+    async def _handle_phase_action(self, pos: dict, pid: str, transition, fav: float, price: float) -> bool:
+        """衰竭阶段(phase=4)动作:仅 reversal、仅在「非4→4」的那一刻、仅当前仍盈利(fav>0)时平仓。
+        亏损时不触发,交给原有 SL。返回 True 表示已发起平仓(调用方应结束本次价格处理)。
+        幂等:pos_state.phase_action_done 防重复;_force_close_static 内的 _closing_set 防并发。"""
+        if not transition:
+            return False
+        old_phase, new_phase = transition
+        if new_phase != 4 or old_phase == 4:
+            return False
+        if pos.get("mode") != "reversal":
+            return False
+        if pos.get("phase_action_done") == "exhaustion":
+            return False
+        symbol = pos.get("symbol", pid)
+        if fav <= 0:
+            logger.info(f"[phase] {symbol} 阶段4衰竭但当前未盈利(fav={fav:.2%}),不触发平仓,交给原SL")
+            return False
+        logger.info(f"[phase] {symbol} 阶段4衰竭,触发平仓 mark={price:.6g} 浮盈={fav:.2%}")
+        pos["phase_action_done"] = "exhaustion"
+        await asyncio.to_thread(update_position, pid, {"phase_action_done": "exhaustion"})
+        await _force_close_static(pos, "phase_exhaustion")
+        # 平仓未成功(仓位仍 open)→ 清标记,允许下次重试
+        if _pos_still_open(pos):
+            pos.pop("phase_action_done", None)
+            await asyncio.to_thread(update_position, pid, {"phase_action_done": None})
+            logger.warning(f"[phase] {symbol} 衰竭平仓后仓位仍为open,已清除标记以便重试")
+            return False
+        return True
 
     async def _on_price_update(self, pos: dict, price: float):
         """价格更新 → 检查动态止损"""
@@ -519,11 +550,20 @@ class PositionManager:
         _mfe[pid] = max(_mfe.get(pid, 0.0), fav)   # 最大有利偏移
         _mae[pid] = max(_mae.get(pid, 0.0), adv)   # 最大不利偏移
 
-        # ── 动态TP状态机数据层:只更新 peak_price/phase 并写日志,不触发任何平仓或改单 ──
+        # ── 动态TP状态机:更新 peak_price/phase 并写日志;phase=4 的平仓动作见 _handle_phase_action ──
+        _ph_trans = None
         try:
-            await self._update_phase_observe(pos, pid, direction, price)
+            _ph_trans = await self._update_phase_observe(pos, pid, direction, price)
         except Exception as _ph_e:
             logger.debug(f"[phase] 观测异常(忽略): {_ph_e}")
+        # 衰竭阶段动作(仅 reversal;已平仓则不再往下执行本秒其他检查)
+        try:
+            if await self._handle_phase_action(pos, pid, _ph_trans, fav, price):
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as _pa_e:
+            logger.warning(f"[phase] 衰竭动作异常(已隔离): {_pa_e}")
 
         # ── MFE 高水位回撤保护(v3.24)──────────────────────────────────────
         # 条件:1 曾盈利 > 0.5%(排除噪声)2 当前仍盈利 3 从峰值回撤超过 50%

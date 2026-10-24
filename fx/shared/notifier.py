@@ -626,6 +626,7 @@ _CLOSE_REASON_CN = {
     "funding_cost":      "资金费率过高，主动离场",
     "health_force_close": "健康评分不足，主动离场",
     "mfe_drawback_50pct": "浮盈回撤过大，主动锁利",
+    "phase_exhaustion":  "趋势衰竭，回撤过大，主动锁利",
     "soft_sl_fallback":  "止损保护触发",
 }
 
