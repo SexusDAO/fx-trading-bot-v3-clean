@@ -445,6 +445,67 @@ async def _loop_reset_circuit() -> None:
         await asyncio.sleep(60)  # 防止同秒多次触发
 
 
+_MAINT_TIMEOUT_SEC = 600   # 单个维护脚本最长运行时间
+
+
+def _seconds_until_next_utc_midnight(now=None) -> float:
+    """到下一个 UTC 00:00 的秒数（至少 1 秒）。"""
+    from datetime import datetime, timedelta, timezone
+    now = now or datetime.now(timezone.utc)
+    nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max((nxt - now).total_seconds(), 1.0)
+
+
+async def _run_maintenance_script(script: str, args: list, log_name: str) -> int:
+    """子进程运行 tools 下的维护脚本，标准输出/错误追加写入 logs/<log_name>。不阻塞主事件循环；
+    超时则杀掉子进程。返回退出码（超时/启动失败返回 -1）。永不抛异常。"""
+    from datetime import datetime, timezone
+    log_path = ROOT / "logs" / log_name
+    script_path = ROOT / "tools" / script
+    header = f"\n===== {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC  {script} {' '.join(args)} =====\n"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "ab") as lf:
+            lf.write(header.encode("utf-8"))
+            lf.flush()
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, str(script_path), *args,
+                stdout=lf, stderr=asyncio.subprocess.STDOUT, cwd=str(ROOT),
+            )
+            try:
+                rc = await asyncio.wait_for(proc.wait(), timeout=_MAINT_TIMEOUT_SEC)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                lf.write(f"[超时 {_MAINT_TIMEOUT_SEC}s，已终止]\n".encode("utf-8"))
+                logger.warning(f"[main] 维护脚本 {script} 超时被终止")
+                return -1
+        if rc != 0:
+            logger.warning(f"[main] 维护脚本 {script} 退出码={rc}，详见 logs/{log_name}")
+        return rc
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(f"[main] 维护脚本 {script} 运行失败: {e}")
+        return -1
+
+
+async def _loop_daily_maintenance() -> None:
+    """每天 UTC 00:00 运行维护脚本：触发对账（--dry-run，只查看不修改）+ rejected_log 清理（保留 7 天）。
+    用子进程执行，避免脚本里的网络请求/文件读写阻塞主事件循环；与 _loop_reset_circuit 相互独立。"""
+    while True:
+        await asyncio.sleep(_seconds_until_next_utc_midnight())
+        try:
+            await _run_maintenance_script("reconcile_triggers.py", ["--dry-run"], "trigger_reconcile_auto.log")
+            await _run_maintenance_script("cleanup_rejected_log.py", ["--days", "7"], "cleanup_rejected_log_auto.log")
+            logger.info("[main] 每日维护任务完成")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"[main] daily_maintenance 异常: {e}", exc_info=True)
+        await asyncio.sleep(60)  # 防止同秒多次触发
+
+
 async def _loop_track_outcomes(interval_sec: int = 3600) -> None:
     """每小时运行一次事后追踪，对已通过 judge 的信号填充 outcome。"""
     await asyncio.sleep(600)  # 启动偏移 10 分钟，错开主扫描
@@ -837,6 +898,7 @@ async def main() -> None:
         # ── 基础支撑 ─────────────────────────────────────────────────────────────
         asyncio.create_task(_loop_refresh_pool(1800),                          name="refresh_pool"),
         asyncio.create_task(_loop_reset_circuit(),                             name="reset_circuit"),
+        asyncio.create_task(_loop_daily_maintenance(),                         name="daily_maintenance"),
         asyncio.create_task(_loop_event_latency_monitor(),                     name="loop_latency"),
         asyncio.create_task(_loop_track_outcomes(3600),                        name="track_outcomes"),
     ]
