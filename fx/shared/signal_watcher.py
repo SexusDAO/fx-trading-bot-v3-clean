@@ -389,6 +389,23 @@ def _reorder_params_unchanged(entry: 'WatchEntry', new_entry_price: float,
         return False
 
 
+_BTC_1H_CRASH_PCT = -5.0   # BTC 1H 跌幅 <= -5% 时撤 LONG 监控(与 judges._btc_crash_reject 门槛一致)
+
+
+def _btc_1h_drop_pct(klines) -> float | None:
+    """BTC 1H 跌幅% = (最新一根收盘 - 上一根收盘) / 上一根收盘 × 100,与 scanner._update_btc_1h_drop 同一公式。
+    数据不足 / 异常返回 None(调用方不动作)。"""
+    try:
+        if not klines or len(klines) < 2:
+            return None
+        cur, prev = float(klines[-1][4]), float(klines[-2][4])
+        if prev <= 0:
+            return None
+        return (cur - prev) / prev * 100
+    except Exception:
+        return None
+
+
 # recheck 冷却：参数无变化跳过后 5 分钟内不再重算（mark 相对跳过时偏移 >=1ATR 则冷却失效）
 _RECHECK_SKIP_COOLDOWN_SEC = 300.0
 _RECHECK_SKIP_RESET_ATR = 1.0
@@ -1731,6 +1748,13 @@ class SignalWatcher:
         """
         loop = asyncio.get_running_loop()
 
+        # BTC 1H 急跌保护(独立于 btc_guard:guard 重启后需约 48 分钟攒样本,这段窗口内靠这里兜底)。
+        # 放在条目快照之前:被撤的条目不会进入下面的遍历。
+        try:
+            await self._btc_1h_crash_guard(loop)
+        except Exception as _bg_e:
+            logger.debug(f"[recheck] BTC 1H 急跌检查异常(忽略): {_bg_e}")
+
         # 快照当前 pending 列表（不持锁做 IO）
         async with self._lock:
             # [v3.89 #41] 快照只含正常条目：撤单进行中/结果未知的条目交给撤单与对账流程，recheck 不再碰
@@ -1759,6 +1783,26 @@ class SignalWatcher:
             except Exception as _e:
                 logger.warning(f"[recheck] {sym} 单个检查异常（跳过）: {_e}")
 
+
+    async def _btc_1h_crash_guard(self, loop) -> int:
+        """BTC 1H 跌幅 <= -5%:撤掉所有 triggered=False 且 is_reorder=False 的 LONG 监控条目并逐条发退出通知。
+        返回命中的条目数。幂等:_cancel_and_remove 对已变化的条目直接跳过,_notify_exit 仅在条目已移除时才发。"""
+        kb = await loop.run_in_executor(None, lambda: _get_hub_or_rest('BTCUSDT', 'klines', '1h', 3))
+        drop = _btc_1h_drop_pct(kb)
+        if drop is None or drop > _BTC_1H_CRASH_PCT:
+            return 0
+        async with self._lock:
+            victims = [(s_, e) for s_, e in list(self._watched.items())
+                       if not e.triggered and not e.is_reorder and e.cancel_state == "none"
+                       and e.signal.get("direction", "LONG").upper() == "LONG"]
+        if not victims:
+            return 0
+        logger.warning(f"[recheck] BTC 1H 跌幅 {drop:.1f}% <= {_BTC_1H_CRASH_PCT}%,撤 {len(victims)} 个 LONG 监控")
+        why = f"BTC 1H急跌 {drop:.1f}%，撤销LONG监控"
+        for s_, e in victims:
+            await self._cancel_and_remove(s_, e, f"BTC 1H急跌 {drop:.1f}%")
+            await self._notify_exit(s_, e, why)
+        return len(victims)
 
     @staticmethod
     def _validity_check(entry: 'WatchEntry', price: float, rsi_1h: float, atr: float,
