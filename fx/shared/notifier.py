@@ -468,6 +468,15 @@ def _dingtalk_send_bg(text: str) -> None:
         logger.debug(f"[notifier] 钉钉线程启动失败: {e}")
 
 
+def dingtalk_notify(text: str, wait: bool = False) -> None:
+    """只发钉钉（不走 Jarvis）。wait=True 同步发送（短命进程/脚本退出前用），默认后台线程 fire-and-forget。
+    未配置 DINGTALK_WEBHOOK 或 DINGTALK_ENABLED=false 时静默跳过；失败只记 debug 日志。"""
+    if wait:
+        _dingtalk_send(text)
+    else:
+        _dingtalk_send_bg(text)
+
+
 # 平仓时才发钉钉完整摘要的 close_reason（止盈 / 止损 / 主动锁利）；超时撤单、评分告警/评分平仓等不发
 DINGTALK_CLOSE_REASONS = frozenset({
     "tp1", "tp2", "tp1_hit", "tp2_hit",

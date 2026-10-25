@@ -93,6 +93,42 @@ def notify(msg: str):
     log(msg)
     notify_jarvis(msg)
 
+
+def _git_commit8() -> str:
+    """当前 HEAD commit 前 8 位；取不到返回 unknown。"""
+    try:
+        r = subprocess.run(["git", "rev-parse", "--short=8", "HEAD"], cwd=str(Path(__file__).parent),
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _startup_text(now: datetime | None = None, commit: str | None = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    return (f"🚀 FX 交易系统已启动\n时间：{now.strftime('%H:%M')} UTC\n"
+            f"版本：{commit if commit is not None else _git_commit8()}")
+
+
+def _is_abnormal_exit(exit_code, mem_restart: bool) -> bool:
+    """main.py 非正常退出（exit code != 0，含被信号杀死的负数）；内存守护主动重启不算。"""
+    return (not mem_restart) and exit_code != 0
+
+
+def notify_dingtalk(msg: str) -> None:
+    """钉钉额外通知（同步发送，daemon 里允许短暂阻塞）。失败/未配置都静默，不影响守护循环。
+    环境变量 DINGTALK_* 由 cmd_start 里的 _load_dot_env 注入，守护进程继承。"""
+    try:
+        fx = str(Path(__file__).parent)
+        if fx not in sys.path:
+            sys.path.insert(0, fx)
+        from shared.notifier import dingtalk_notify
+        dingtalk_notify(msg, wait=True)
+    except Exception as e:
+        log(f"钉钉通知失败（忽略）: {e}")
+
 def _read_pid(pid_file: Path) -> int | None:
     """读 PID 文件，失败返回 None。"""
     try:
@@ -359,6 +395,7 @@ def _daemon_loop():
         # 写 main.pid，供精确 kill 使用
         _write_pid_file(MAIN_PID, proc.pid, "main.py")
         log(f"main.py 已启动 (PID={proc.pid})")
+        notify_dingtalk(_startup_text())
 
         # v3.82: 内存守护 —— 每 60s 检查一次 RSS，超过阈值主动发 SIGTERM 优雅重启
         # 目的：避免内存耗尽被 OOM killer SIGKILL（-9），改为主动优雅重启（exit=0）
@@ -403,10 +440,14 @@ def _daemon_loop():
                 f"{RESTART_DELAY}s 后重启..."
             )
 
+        if _is_abnormal_exit(exit_code, mem_restart_triggered):
+            notify_dingtalk(f"⚠️ FX 系统异常退出，daemon 正在重启...\n退出码：{exit_code}  运行：{elapsed}s")
+
         time.sleep(RESTART_DELAY)
         restarts += 1
 
     notify(f"❌ 达到最大重启次数 {MAX_RESTARTS}，daemon 停止，需人工介入！")
+    notify_dingtalk(f"❌ FX 系统达到最大重启次数 {MAX_RESTARTS}，daemon 已停止，需人工介入！")
     DAEMON_PID.unlink(missing_ok=True)
 
 
