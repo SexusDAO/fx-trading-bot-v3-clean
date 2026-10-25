@@ -442,12 +442,15 @@ def _dingtalk_send(text: str) -> None:
     """钉钉额外副本。失败只记 debug 日志，不影响主流程。
     未配置 DINGTALK_WEBHOOK 或 DINGTALK_ENABLED=False 时静默跳过。"""
     try:
-        from config import DINGTALK_ENABLED, DINGTALK_WEBHOOK, DINGTALK_SECRET
-        if not DINGTALK_ENABLED or not DINGTALK_WEBHOOK:
+        import os as _os
+        _webhook = _os.environ.get("DINGTALK_WEBHOOK", "")
+        _secret  = _os.environ.get("DINGTALK_SECRET", "")
+        _enabled = _os.environ.get("DINGTALK_ENABLED", "true").lower() != "false"
+        if not _enabled or not _webhook:
             return
-        timestamp, sign = _dingtalk_sign(DINGTALK_SECRET)
-        sep = "&" if "?" in DINGTALK_WEBHOOK else "?"
-        url = f"{DINGTALK_WEBHOOK}{sep}timestamp={timestamp}&sign={sign}"
+        timestamp, sign = _dingtalk_sign(_secret)
+        sep = "&" if "?" in _webhook else "?"
+        url = f"{_webhook}{sep}timestamp={timestamp}&sign={sign}"
         import requests as _req
         _req.post(url, json={
             "msgtype": "text",
