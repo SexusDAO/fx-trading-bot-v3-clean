@@ -820,6 +820,15 @@ def _orderbook_tp(entry: float, atr: float, direction: str, symbol: str) -> floa
         return None
 
 
+def _tp1_liq_advance_atr() -> float:
+    """做空 TP1 相对清算区缓冲的减少量（ATR 倍数），读 config.TP1_LIQ_ADVANCE_ATR，缺失时 0.2。"""
+    try:
+        from config import TP1_LIQ_ADVANCE_ATR
+        return float(TP1_LIQ_ADVANCE_ATR)
+    except Exception:
+        return 0.2
+
+
 def _calc_tp(entry: float, sl: float, atr: float, direction: str,
               liq_long: list, liq_short: list,
               symbol: str = "", tier: str = "mid", vol24_usd: float = 0.0,
@@ -882,7 +891,8 @@ def _calc_tp(entry: float, sl: float, atr: float, direction: str,
                 if (candidate - entry) >= sl_dist * _liq_tp1_rr:
                     tp1 = candidate; break
             else:
-                candidate = z["price_high"] + atr * _tp1_buf(z)
+                # [TP1 调整] 做空方向缓冲 = _tp1_buf - TP1_LIQ_ADVANCE_ATR（默认 0.3→0.1ATR）；做多方向不变
+                candidate = z["price_high"] + atr * max(0.0, _tp1_buf(z) - _tp1_liq_advance_atr())
                 if (entry - candidate) >= sl_dist * _liq_tp1_rr:
                     tp1 = candidate; break
 

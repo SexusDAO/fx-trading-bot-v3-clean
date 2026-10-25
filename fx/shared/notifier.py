@@ -627,6 +627,7 @@ _CLOSE_REASON_CN = {
     "health_force_close": "健康评分不足，主动离场",
     "mfe_drawback_50pct": "浮盈回撤过大，主动锁利",
     "phase_exhaustion":  "趋势衰竭，回撤过大，主动锁利",
+    "trail_mfe_soft":    "1H收盘跌破MFE移动止损线，主动离场",
     "soft_sl_fallback":  "止损保护触发",
 }
 

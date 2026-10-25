@@ -109,6 +109,7 @@ def is_system_order_update(symbol: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # 内存状态(浮盈水位线、告警节流)
 # ─────────────────────────────────────────────────────────────────────────────
+_last_1h_close: dict[str, tuple] = {}   # pos_id → (最近已收盘1H收盘价, 该K线开盘时间ms, 检查时的小时桶)；仅内存，不落盘，重启后从下一根1H收盘起生效
 _peak: dict[str, float]    = {}   # pos_id → 持仓期间最高浮盈价格(做多高,做空低)
 _mfe:  dict[str, float]    = {}   # pos_id → 持仓期间最大有利偏移(MFE,始终≥0)
 _mae:  dict[str, float]    = {}   # pos_id → 持仓期间最大不利偏移(MAE,始终≥0)
@@ -172,6 +173,88 @@ def _trail_steps(mode: str) -> list:
     return TRAIL_STEPS_TREND
 
 
+_TRAIL_MFE_MIN_MOVE_ATR = 0.3   # MFE 硬止损最小移动幅度（ATR 倍数），不足则不改单
+
+
+def _trail_mfe_cfg() -> tuple:
+    """读取 MFE 锚点开关与倍数；config 缺失时默认关闭。"""
+    try:
+        from config import TRAIL_MFE_ANCHOR, TRAIL_MFE_ATR_MULT, TRAIL_MFE_HARD_MULT
+        return bool(TRAIL_MFE_ANCHOR), float(TRAIL_MFE_ATR_MULT), float(TRAIL_MFE_HARD_MULT)
+    except Exception:
+        return False, 2.5, 3.5
+
+
+def _calc_trail_sl_mfe(pos: dict, current_price: float, atr: float, old_sl: float,
+                       direction: str, hard_mult: float) -> float | None:
+    """MFE 锚点：交易所挂的盘中硬止损 = MFE价 ∓ hard_mult×ATR，只向有利方向移动，不宽于现有止损。
+    MFE 价取 _peak[pid]（做多=最高价，做空=最低价）。新止损若已越过现价（会被交易所立即触发/拒单）则不动，
+    交给 _mfe_soft_stop_hit 的 1H 收盘软止损处理。"""
+    pid = pos.get("pos_id", pos.get("symbol", "unknown"))
+    peak = _peak.get(pid)
+    if not peak or peak <= 0:
+        return None
+    if direction == "LONG":
+        new_sl = peak - hard_mult * atr
+        new_sl = max(old_sl, new_sl)                 # 只能上移，不比原止损更宽
+        if new_sl <= old_sl + 1e-9 or new_sl >= current_price:
+            return None
+        if abs(new_sl - old_sl) < _TRAIL_MFE_MIN_MOVE_ATR * atr:   # 移动不足 0.3ATR 不改单，避免频繁撤挂
+            return None
+    else:
+        new_sl = peak + hard_mult * atr
+        new_sl = min(old_sl, new_sl)                 # 只能下移，不比原止损更宽
+        if new_sl >= old_sl - 1e-9 or new_sl <= current_price:
+            return None
+        if abs(new_sl - old_sl) < _TRAIL_MFE_MIN_MOVE_ATR * atr:
+            return None
+    return new_sl
+
+
+def _mfe_soft_stop_hit(pos: dict) -> bool:
+    """MFE 软止损：最近一根已收盘 1H K线的收盘价触及 MFE价 ∓ TRAIL_MFE_ATR_MULT×ATR 才算触发（盘中不触发）。
+    收盘价记录在模块内存 _last_1h_close[pid]（由 _mfe_refresh_1h_close 写入，不持久化）。"""
+    anchor, soft_mult, _ = _trail_mfe_cfg()
+    if not anchor:
+        return False
+    try:
+        atr = float(pos.get("atr_at_entry", 0) or 0)
+        pid = pos.get("pos_id", pos.get("symbol", "unknown"))
+        close = float((_last_1h_close.get(pid) or (0.0,))[0] or 0)
+        peak = _peak.get(pid)
+        if atr <= 0 or close <= 0 or not peak:
+            return False
+        entry = float(pos.get("fill_price") or pos.get("entry_price") or 0)
+        if entry <= 0:
+            return False
+        direction = pos["direction"].upper()
+        fav = (close - entry) if direction == "LONG" else (entry - close)
+        if fav <= 0:
+            return False   # 收盘价没盈利不触发软止损，交给原始 SL
+        if direction == "LONG":
+            return close <= peak - soft_mult * atr
+        return close >= peak + soft_mult * atr
+    except Exception:
+        return False
+
+
+async def _mfe_refresh_1h_close(pos: dict, pid: str) -> None:
+    """每个新的 1H 收盘后刷新一次 last_1h_close（按 K 线开盘时间去重，一小时最多一次 K 线请求）。永不抛异常。"""
+    try:
+        now_ms = int(time.time() * 1000)
+        cur_bucket = now_ms // 3_600_000
+        _old = _last_1h_close.get(pid)
+        if _old and _old[2] == cur_bucket:
+            return
+        ks = await asyncio.to_thread(_pm_klines, pos["symbol"], "1h", 3)
+        closed = [k for k in (ks or []) if float(k[6]) < now_ms]
+        if not closed:
+            return
+        _last_1h_close[pid] = (float(closed[-1][4]), int(closed[-1][0]), cur_bucket)
+    except Exception as _e:
+        logger.debug(f"[pm] 刷新 1H 收盘价失败: {_e}")
+
+
 def _calc_trail_sl(pos: dict, current_price: float) -> float | None:
     """
     冲突四修复(v3.3):统一止损跟随逻辑。
@@ -188,6 +271,11 @@ def _calc_trail_sl(pos: dict, current_price: float) -> float | None:
 
     if atr <= 0:
         return None
+
+    # [MFE锚点] 开关打开时走 MFE 路径；关闭（默认）时完全沿用下面的入场价阶梯逻辑
+    _anchor, _soft_m, _hard_m = _trail_mfe_cfg()
+    if _anchor:
+        return _calc_trail_sl_mfe(pos, current_price, atr, old_sl, direction, _hard_m)
 
     if direction == "LONG":
         profit = current_price - entry
@@ -688,6 +776,14 @@ class PositionManager:
 
         # 仅当 trailing_stop_activated=True 时才执行(TP1已触发或已开仓超过一定时间)
         # 按规范:TP1触发后激活;但也可以在开仓后立即激活(此处立即激活)
+        if _trail_mfe_cfg()[0]:
+            # MFE锚点：先刷新 1H 收盘价，收盘价触及 MFE∓2.5ATR 才平仓（软止损）；盘中由交易所硬止损(MFE∓3.5ATR)兜底
+            await _mfe_refresh_1h_close(pos, pid)
+            if _mfe_soft_stop_hit(pos):
+                logger.info(f"[pm] {pos.get('symbol')} MFE锚点软止损触发: 1H收盘={(_last_1h_close.get(pid) or (None,))[0]} "
+                            f"peak={_peak.get(pid)}，平仓")
+                await _force_close_static(pos, "trail_mfe_soft")
+                return
         new_sl = _calc_trail_sl(pos, price)
         if new_sl is not None:
             await _execute_trail_sl(pos, new_sl)
@@ -2370,6 +2466,7 @@ async def _close_position_post_static(
         _peak.pop(pos_id, None)
         _mfe.pop(pos_id, None)
         _mae.pop(pos_id, None)
+        _last_1h_close.pop(pos_id, None)
         _phase_state.pop(pos_id, None)
         _vol_shadow_logged.pop(pos_id, None)
     except Exception as e:
@@ -4023,6 +4120,16 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
         elif sl_move < -1e-8:
             # v3.6: 禁止做空止损上移(向不利方向调整)
             pass  # SHORT 止损只允许下移,不允许上移
+
+    # ── [MFE锚点] SL 已由实时 trail（MFE 锚点）管理，30 分钟维护不再用清算区重算 SL，避免两套逻辑互相干扰；
+    #   TP1/TP2 的更新逻辑不受影响。放在上面的 SL 判断之后、fix #42 之前，保证 sl_changed 最终为 False。
+    try:
+        from config import TRAIL_MFE_ANCHOR as _mfe_anchor
+    except Exception:
+        _mfe_anchor = False
+    if _mfe_anchor:
+        sl_changed = False   # SL交给实时trail管理，维护不动SL
+        sl_reason  = "mfe_anchor: SL由实时trail管理"
 
     # ── [fix #42] 止损上限检查：调整后的止损距离不得超过开仓时的初始风险上限 RISK_PER_TRADE × 入场价。
     #   当前实现只允许 SL 向有利方向移动，天然不会外扩；这里是防御性硬上限，

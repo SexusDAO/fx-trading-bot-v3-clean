@@ -254,6 +254,7 @@ SL_MAX_PCT = 0.12       # 兼容旧代码（low tier 默认值）
 SL_MAX_PCT_LOW  = 0.12  # low tier 止损上限
 SL_MAX_PCT_MID  = 0.15  # mid tier 止损上限
 SL_MAX_PCT_HIGH = 0.20  # high tier 止损上限
+TP1_LIQ_ADVANCE_ATR = 0.2   # TP1比清算区上沿提前成交的距离（仅做空方向：缓冲 _tp1_buf - 0.2ATR，下限0）
 TP1_MAX_PCT = 0.15      # TP1 距入场价上限（low/mid tier）
 TP1_MAX_PCT_HIGH = 0.25 # TP1 距入场价上限（high tier，配合更宽止损保证 RR）
 
@@ -365,6 +366,10 @@ TRAIL_STEPS_TREND = [
     (4.0, 1.5),
     (6.0, 2.0),
 ] if OPT_TRAIL_BE_BUFFER else TRAIL_STEPS_TREND_LEGACY
+# Trail SL 的 MFE 锚点模式（默认关闭=沿用上面的入场价阶梯 TRAIL_STEPS_TREND/REVERSAL，逻辑完全不变）
+TRAIL_MFE_ANCHOR    = False   # True=MFE锚点，False=入场价锚点（原逻辑）
+TRAIL_MFE_ATR_MULT  = 2.5     # MFE锚点的ATR倍数（软止损：1H收盘价触及才平仓）
+TRAIL_MFE_HARD_MULT = 3.5     # 盘中硬止损的ATR倍数（交易所挂单，随 MFE 单向移动）
 TRAIL_STEPS_REVERSAL = [
     (0.5, 0.0),
     (1.0, 0.5),
