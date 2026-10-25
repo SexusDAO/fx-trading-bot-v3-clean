@@ -479,6 +479,40 @@ async def _loop_liq_snapshot() -> None:
         await asyncio.sleep(5)   # 防止同秒重复触发
 
 
+def _seconds_until_next_utc_hour(hour: int, now=None) -> float:
+    """到下一个 UTC hour:00 的秒数（至少 1 秒；正好整点则取明天）。"""
+    from datetime import datetime, timedelta, timezone
+    now = now or datetime.now(timezone.utc)
+    nxt = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if nxt <= now:
+        nxt += timedelta(days=1)
+    return max((nxt - now).total_seconds(), 1.0)
+
+
+async def _loop_trigger_report(det) -> None:
+    """每天 UTC 08:00 发触发器日报到钉钉。统计取 det.stats 与上次快照的差；
+    进程内计数器重启清零，所以重启后的第一条是「自启动以来」。失败只记日志。"""
+    import time as _t
+    prev = None
+    while True:
+        await asyncio.sleep(_seconds_until_next_utc_hour(8))
+        try:
+            from tools import daily_dingtalk as _dd
+            from shared.notifier import dingtalk_notify
+            from shared.trigger_detector import TRIGGER_LOG
+            now_ms = int(_t.time() * 1000)
+            cnt = await asyncio.to_thread(_dd.count_triggers, TRIGGER_LOG, now_ms - 86_400_000, now_ms)
+            snap = dict(det.stats)
+            dingtalk_notify(_dd.build_trigger_text(snap, prev, cnt))
+            prev = snap
+            logger.info("[main] 触发器日报已发送")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"[main] 触发器日报失败（非致命）: {e}")
+        await asyncio.sleep(60)   # 防止同一小时重复触发
+
+
 async def _run_maintenance_script(script: str, args: list, log_name: str) -> int:
     """子进程运行 tools 下的维护脚本，标准输出/错误追加写入 logs/<log_name>。不阻塞主事件循环；
     超时则杀掉子进程。返回退出码（超时/启动失败返回 -1）。永不抛异常。"""
@@ -523,6 +557,8 @@ async def _loop_daily_maintenance() -> None:
             await _run_maintenance_script("cleanup_rejected_log.py", ["--days", "7"], "cleanup_rejected_log_auto.log")
             # 影子信号离线补标签（只读；放在 cleanup 之后，读到的是清理后的 rejected_log；失败只记日志）
             await _run_maintenance_script("shadow_verify.py", [], "shadow_verify_auto.log")
+            # UTC 00:00 钉钉摘要（前一个 UTC 日）；只发钉钉，失败只记日志
+            await _run_maintenance_script("daily_dingtalk.py", [], "daily_dingtalk_auto.log")
             try:
                 from shared.notifier import cleanup_stale_cards
                 _closed = await asyncio.to_thread(cleanup_stale_cards, 48 * 3600)
@@ -951,6 +987,7 @@ async def main() -> None:
     if _trigger_det is not None:
         _trigger_det._watcher = signal_watcher
         tasks.append(asyncio.create_task(_trigger_det.run(), name="trigger_detector"))
+        tasks.append(asyncio.create_task(_loop_trigger_report(_trigger_det), name="trigger_report"))
         logger.info("[main] trigger_detector 已启动（影子模式，asyncio task）")
 
     # ── 5. 优雅退出 ─────────────────────────────────────────────────────────

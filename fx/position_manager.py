@@ -3431,7 +3431,8 @@ async def _generate_daily_report():
         f"熔断器状态:{circuit_status}\n\n"
         f"昨日各模式表现:\n{mode_section}"
     )
-    await _notify_async(report)
+    # 完整日报只发 Jarvis；钉钉收 UTC 00:00 的精简摘要（tools/daily_dingtalk.py），这里不重复发
+    await asyncio.get_running_loop().run_in_executor(None, lambda: notify(report, dingtalk=False))
     logger.info(f"[pm] 日报已发送 {yesterday}")
 
     # 日报发送后立即触发归档

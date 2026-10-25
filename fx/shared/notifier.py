@@ -517,21 +517,23 @@ def build_close_summary(symbol: str, direction: str, mode: str, entry: float, ex
     )
 
 
-def notify(text: str) -> None:
-    """发一条全局独立消息。失败只记日志，不抛异常。Jarvis 之外额外发一份钉钉（不接入卡片）。"""
+def notify(text: str, dingtalk: bool = True) -> None:
+    """发一条全局独立消息。失败只记日志，不抛异常。Jarvis 之外默认额外发一份钉钉（不接入卡片）；
+    dingtalk=False 时只发 Jarvis（如 UTC 02:00 完整日报，钉钉已有 00:00 摘要）。"""
     try:
         _send(text)
     except Exception as e:
         logger.info(f"[notify] 推送失败: {e} | 内容: {text[:80]}")
     # 额外推送钉钉（fire-and-forget，失败不影响）
-    _dingtalk_send_bg(text)
+    if dingtalk:
+        _dingtalk_send_bg(text)
 
 
-async def notify_async(text: str) -> None:
+async def notify_async(text: str, dingtalk: bool = True) -> None:
     """异步版 notify，不阻塞事件循环。钉钉副本由 notify() 内部发送（这里不重复发，否则同一条会发两遍）。"""
     import asyncio
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, lambda: notify(text))
+    await loop.run_in_executor(None, lambda: notify(text, dingtalk=dingtalk))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

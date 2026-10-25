@@ -326,7 +326,7 @@ sys.path.insert(0, str(_FX))
 sys.path.insert(0, str(_FX / 'shared'))
 import asyncio
 from shared.notifier import notify_async
-asyncio.run(notify_async(msg))
+asyncio.run(notify_async(msg, dingtalk=False))   # 完整复盘只发 Jarvis，钉钉收 00:00 精简摘要
 """],
                 check=True
             )

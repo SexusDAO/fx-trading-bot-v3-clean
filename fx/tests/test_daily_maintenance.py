@@ -58,7 +58,8 @@ def test_loop_runs_both_scripts_with_expected_args(monkeypatch):
         asyncio.run(main._loop_daily_maintenance())
     assert calls == [("reconcile_triggers.py", ("--dry-run",), "trigger_reconcile_auto.log"),
                      ("cleanup_rejected_log.py", ("--days", "7"), "cleanup_rejected_log_auto.log"),
-                     ("shadow_verify.py", (), "shadow_verify_auto.log")]
+                     ("shadow_verify.py", (), "shadow_verify_auto.log"),
+                     ("daily_dingtalk.py", (), "daily_dingtalk_auto.log")]
 
 
 def test_registered_in_main_tasks():
