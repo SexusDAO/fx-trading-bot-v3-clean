@@ -42,6 +42,7 @@ jobs:
           cd /home/ubuntu/bot && git clean -f fx/requirements_live.txt && git pull
           cd fx && source venv/bin/activate
           pip install -r requirements_live.txt -q
+          python3 -m compileall . -q 2>/dev/null || true
           python3 daemon_start.py restart
           REMOTE
 
