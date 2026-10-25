@@ -32,8 +32,10 @@ def isolated_logs(tmp_path, monkeypatch):
     # 重新创建锁（避免测试间锁状态残留）
     import threading
     monkeypatch.setattr(_st, "_locks", {k: threading.Lock() for k in _st._locks})
+    _st._oi_mem_reset()   # OI 内存快照：每个测试从干净状态开始（用例会直接写文件）
     _st._ensure_files()
     yield
+    _st._oi_mem_reset()
 
 
 from shared import state as st

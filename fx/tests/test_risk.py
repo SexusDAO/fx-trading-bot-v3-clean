@@ -25,6 +25,7 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(_st, "_PC_FILE",  tmp_path / "pending_confirm_state.json")
     monkeypatch.setattr(_st, "_OI_FILE",  tmp_path / "oi_cache.json")
     monkeypatch.setattr(_st, "_locks",    {k: threading.Lock() for k in _st._locks})
+    _st._oi_mem_reset()   # OI 内存快照：每个测试从干净状态开始
     _st._ensure_files()
     # 重置市场模式缓存
     import shared.risk_manager as _rm

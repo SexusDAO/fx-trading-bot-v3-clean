@@ -120,14 +120,17 @@ def _read_json(path: Path, default):
         return default
 
 
-def _write_json(path: Path, data) -> None:
-    """原子写入：先写唯一临时文件再替换。进程内线程安全，不保证跨进程。"""
+def _write_json(path: Path, data, compact: bool = False) -> None:
+    """原子写入：先写唯一临时文件再替换。进程内线程安全，不保证跨进程。
+    compact=True 时不缩进（体积大的缓存文件用，序列化更快、文件更小）。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     # [v3.89 #10] 原临时文件名固定为 .tmp，两个写者会互相覆盖临时文件。改为 pid+毫秒+随机串唯一命名，
     #   替换失败时删除临时文件，不留残留。
     tmp = path.with_suffix(f".tmp_{os.getpid()}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}")
     try:
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        _txt = (json.dumps(data, separators=(",", ":"), ensure_ascii=False) if compact
+                else json.dumps(data, indent=2, ensure_ascii=False))
+        tmp.write_text(_txt, encoding="utf-8")
         tmp.replace(path)
     except Exception:
         try:
@@ -644,12 +647,61 @@ _24H_SEC = 86_400
 _15M_SEC = 900
 
 
-def _load_oi_cache() -> dict:
+# ── OI 缓存内存快照 ──────────────────────────────────────────────────────────
+# 背景：scanner 并行分析每个标的都会调 get_oi_24h_ago / judges._get_oi_1h_ago / trigger_detector，
+#   原先每次调用都整文件 exists + read + json.loads（get_oi_24h_ago 还解析两遍）；
+#   多线程并发时 json.loads 长时间占用 GIL，事件循环被饿死。
+# 现在：读走内存快照，TTL 内完全不碰磁盘，过期时只允许一个线程读盘；
+#   写（update_oi / update_all_oi）读一份独占的磁盘副本、修改、落盘成功后整体替换快照（写穿）。
+# 约定：_load_oi_cache() 返回的是共享快照，调用方只能读、不得修改；要修改请用 _load_oi_cache_disk()。
+# 限制：只对单进程有效；其他进程改了文件，本进程最长 _OI_MEM_TTL 秒后才看到。
+_OI_MEM_TTL = 60.0
+_oi_mem: dict = {"path": None, "data": None, "ts": 0.0}
+_oi_mem_lock = threading.Lock()        # 只保护 _oi_mem 字典读写（极短临界区）
+_oi_refresh_lock = threading.Lock()    # 快照过期时只允许一个线程读盘，其余等待后复用
+
+
+def _oi_mem_get():
+    with _oi_mem_lock:
+        if (_oi_mem["data"] is not None and _oi_mem["path"] == str(_OI_FILE)
+                and time.monotonic() - _oi_mem["ts"] < _OI_MEM_TTL):
+            return _oi_mem["data"]
+    return None
+
+
+def _oi_mem_set(data: dict) -> None:
+    with _oi_mem_lock:
+        _oi_mem["path"], _oi_mem["data"], _oi_mem["ts"] = str(_OI_FILE), data, time.monotonic()
+
+
+def _oi_mem_reset() -> None:
+    """清空内存快照（测试直接改文件后、或需要强制重读时使用）。"""
+    with _oi_mem_lock:
+        _oi_mem["path"], _oi_mem["data"], _oi_mem["ts"] = None, None, 0.0
+
+
+def _load_oi_cache_disk() -> dict:
+    """直接读盘，返回调用方独占的新对象（写路径用）。"""
     return _read_json(_OI_FILE, {})
 
 
+def _load_oi_cache() -> dict:
+    """读路径：返回内存快照（只读，调用方不得修改）。快照过期才读盘。"""
+    d = _oi_mem_get()
+    if d is not None:
+        return d
+    with _oi_refresh_lock:
+        d = _oi_mem_get()              # 等锁期间别的线程可能已刷新
+        if d is not None:
+            return d
+        d = _load_oi_cache_disk()
+        _oi_mem_set(d)
+        return d
+
+
 def _save_oi(d: dict) -> None:
-    _write_json(_OI_FILE, d)
+    _write_json(_OI_FILE, d, compact=True)
+    _oi_mem_set(d)                     # 写穿：落盘成功后才发布为新快照（写盘抛异常则不更新）
 
 
 # [v3.89 #99] OI 历史按时间窗口保留（最近 25 小时），不再按固定条数截断：
@@ -675,7 +727,7 @@ def _prune_oi_series(series: list, now_ms: int) -> list:
 def update_oi(symbol: str, oi: float) -> None:
     now = int(time.time() * 1000)
     with _locks["oi"]:
-        d = _load_oi_cache()
+        d = _load_oi_cache_disk()   # 写路径：独占副本，不改已发布的快照
         series = d.get(symbol, [])
         series.append({"timestamp": now, "oi": float(oi)})
         d[symbol] = _prune_oi_series(series, now)
@@ -686,7 +738,7 @@ def update_all_oi(oi_data: dict) -> None:
     """批量更新所有标的 OI"""
     now = int(time.time() * 1000)
     with _locks["oi"]:
-        d = _load_oi_cache()
+        d = _load_oi_cache_disk()   # 写路径：独占副本，不改已发布的快照
         for symbol, oi_val in oi_data.items():
             if oi_val is None or oi_val <= 0:
                 continue

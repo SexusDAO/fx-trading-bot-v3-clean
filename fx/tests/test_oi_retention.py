@@ -13,6 +13,7 @@ class TestOiRetention(unittest.TestCase):
     def setUp(self):
         self.f = Path(tempfile.mkdtemp()) / "oi_cache.json"
         p = mock.patch.object(S, "_OI_FILE", self.f); p.start(); self.addCleanup(p.stop)
+        S._oi_mem_reset(); self.addCleanup(S._oi_mem_reset)   # OI 内存快照隔离
 
     def _seed(self, d):
         S._save_oi(d)
