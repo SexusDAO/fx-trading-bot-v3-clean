@@ -514,13 +514,15 @@ async def _run_maintenance_script(script: str, args: list, log_name: str) -> int
 
 
 async def _loop_daily_maintenance() -> None:
-    """每天 UTC 00:00 运行维护脚本：触发对账（--dry-run，只查看不修改）+ rejected_log 清理（保留 7 天）。
+    """每天 UTC 00:00 运行维护脚本：触发对账（--dry-run，只查看不修改）+ rejected_log 清理（保留 7 天）+ shadow_verify 影子信号补标签。
     用子进程执行，避免脚本里的网络请求/文件读写阻塞主事件循环；与 _loop_reset_circuit 相互独立。"""
     while True:
         await asyncio.sleep(_seconds_until_next_utc_midnight())
         try:
             await _run_maintenance_script("reconcile_triggers.py", ["--dry-run"], "trigger_reconcile_auto.log")
             await _run_maintenance_script("cleanup_rejected_log.py", ["--days", "7"], "cleanup_rejected_log_auto.log")
+            # 影子信号离线补标签（只读；放在 cleanup 之后，读到的是清理后的 rejected_log；失败只记日志）
+            await _run_maintenance_script("shadow_verify.py", [], "shadow_verify_auto.log")
             try:
                 from shared.notifier import cleanup_stale_cards
                 _closed = await asyncio.to_thread(cleanup_stale_cards, 48 * 3600)
