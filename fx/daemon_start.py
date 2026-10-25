@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 
 def _load_dot_env() -> None:
     """启动前将 fx/.env（或上级 .env）注入 os.environ。
-    优先级：已有系统环境变量 > .env 文件（不覆盖已设置的值）。
+    优先级：.env 文件 > 系统环境变量（.env 覆盖系统环境变量，确保配置一致）。
     不依赖任何第三方库，与 shared/binance_api.py 中的实现保持一致。
     """
     _fx_root = Path(__file__).parent
@@ -43,8 +43,8 @@ def _load_dot_env() -> None:
                         _k, _, _v = _line.partition("=")
                         _k = _k.strip()
                         _v = _v.strip().strip('"').strip("'")
-                        if _k and _k not in os.environ:
-                            os.environ[_k] = _v
+                        if _k:
+                            os.environ[_k] = _v  # .env 文件优先（覆盖系统环境变量）
             except Exception:
                 pass
     # 仅在第一个可读的 .env 文件处停止
