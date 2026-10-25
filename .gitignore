@@ -18,3 +18,6 @@ liq_cache_snapshot.json
 
 # 运行时快照目录（已从 git 追踪移除）
 fx/snapshots/
+
+# 回测数据目录（K线/费率/清算区快照，体积大，不入库）
+fx/data/

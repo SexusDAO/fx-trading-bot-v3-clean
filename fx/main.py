@@ -456,6 +456,29 @@ def _seconds_until_next_utc_midnight(now=None) -> float:
     return max((nxt - now).total_seconds(), 1.0)
 
 
+def _seconds_until_next_hour(now=None) -> float:
+    """到下一个整点（UTC，整点对所有时区一致）的秒数（至少 1 秒）。"""
+    from datetime import datetime, timedelta, timezone
+    now = now or datetime.now(timezone.utc)
+    nxt = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    return max((nxt - now).total_seconds(), 1.0)
+
+
+async def _loop_liq_snapshot() -> None:
+    """每整点保存一次候选池的清算区快照（回测数据积累）。失败只记日志，不影响主流程。"""
+    while True:
+        await asyncio.sleep(_seconds_until_next_hour())
+        try:
+            from tools import liq_snapshot
+            _r = await asyncio.to_thread(liq_snapshot.run)
+            logger.info(f"[main] 清算区快照: {_r}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"[main] 清算区快照失败（非致命）: {e}")
+        await asyncio.sleep(5)   # 防止同秒重复触发
+
+
 async def _run_maintenance_script(script: str, args: list, log_name: str) -> int:
     """子进程运行 tools 下的维护脚本，标准输出/错误追加写入 logs/<log_name>。不阻塞主事件循环；
     超时则杀掉子进程。返回退出码（超时/启动失败返回 -1）。永不抛异常。"""
@@ -919,6 +942,7 @@ async def main() -> None:
         asyncio.create_task(_loop_refresh_pool(1800),                          name="refresh_pool"),
         asyncio.create_task(_loop_reset_circuit(),                             name="reset_circuit"),
         asyncio.create_task(_loop_daily_maintenance(),                         name="daily_maintenance"),
+        asyncio.create_task(_loop_liq_snapshot(),                              name="liq_snapshot"),
         asyncio.create_task(_loop_event_latency_monitor(),                     name="loop_latency"),
         asyncio.create_task(_loop_track_outcomes(3600),                        name="track_outcomes"),
     ]
