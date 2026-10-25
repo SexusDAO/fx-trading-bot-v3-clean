@@ -339,7 +339,7 @@ LIQ_PRESCAN_PREFETCH_TIMEOUT_SEC = 20.0   # 扫描前预热的最长等待（秒
 KLINE_LOAD_BATCH_SIZE = 200  # hub 每次对账最多新建的历史K线加载任务数（超出留到下一轮，每 2s 一轮）
 KLINE_GAP_RELOAD_COOLDOWN_SEC = 60  # 同一 series 因K线缺口触发重拉的冷却时间（秒）
 HUB_WS_PROXY = ""  # hub WebSocket 代理，空字符串=直连，"__env__"=跟随环境变量 PROXY_URL
-KLINE_HUB_SYMBOLS_MAX = 220  # 120 → 220，覆盖全部候选池+动态注入余量
+KLINE_HUB_SYMBOLS_MAX = 165  # 对应候选池上限 SCAN_POOL_MAX=165；连接数=ceil(165/60)=3 条，共 495 个 stream（单连接上限 KLINE_STREAM_PER_CONN=180）
 KLINE_REQUEST_TOTAL_SEC = 8.0     # 单次 get_klines 调用总时限（秒，含重试、重试间隔、直连失败后改走代理）
 API_REQUEST_TIMEOUT     = (3, 5)    # 全局 REST 接口超时 (connect_s, read_s)：公开行情 _get 与签名查询/撤单/杠杆等
 API_REQUEST_MAX_RETRY   = 1         # 全局 REST 接口最多重试次数（_retry 总尝试 = 1 + 此值）

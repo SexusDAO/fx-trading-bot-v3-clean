@@ -2137,6 +2137,13 @@ def refresh_pool() -> list:
             "updated_at": datetime.now(timezone.utc).isoformat()
         }, ensure_ascii=False))
         logger.info(f"[scanner] 候选池刷新完成: {len(pool)} 个")
+        # 候选池刷新后立即让 hub 订阅全部候选池 + 持仓标的 + BTC（持仓/BTC 放最前，超出 KLINE_HUB_SYMBOLS_MAX 时截断池尾），
+        # 触发器触发的标的大概率已有 hub K 线，分析时不必临时拉 REST。只扩大订阅范围，不改触发器逻辑。
+        try:
+            _held = sorted({p["symbol"] for p in get_all_positions() if p.get("symbol")})
+        except Exception:
+            _held = []
+        _hub_subscribe_klines(["BTCUSDT"] + _held + list(pool))
         return pool
 
     except Exception as e:

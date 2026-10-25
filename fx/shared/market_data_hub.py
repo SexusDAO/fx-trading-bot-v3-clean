@@ -51,7 +51,7 @@ TICKER_STREAM = "!miniTicker@arr"
 TICKER_MAX_AGE_SEC = 10.0
 KLINE_INTERVALS = ("15m", "1h", "4h")
 _INTERVAL_MS = {"15m": 900_000, "1h": 3_600_000, "4h": 14_400_000}
-KLINE_HISTORY = 100                            # 每个 (标的, 周期) 保留/初始化拉取的 K 线根数
+KLINE_HISTORY = 120                            # 每个 (标的, 周期) 保留/初始化拉取的 K 线根数（120：risk_manager 的 BTC 4h 需要 120 根）
 # 按周期动态 grace：最后一根 K 线的结束时间已过去这么久仍无新推送 → 视为过旧，读取返回 None
 _KLINE_STALE_GRACE_MS = {"15m": 60_000, "1h": 300_000, "4h": 600_000}
 # 历史 K 线拉取专用线程池：不占用 asyncio 默认线程池，避免与扫描等线程竞争

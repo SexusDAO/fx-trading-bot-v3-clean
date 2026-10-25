@@ -43,6 +43,6 @@ def test_mark_price_hub_hit_and_fallbacks(monkeypatch):
     assert R._btc_mark_price() is rest_md      # hub 缺资金费率字段 → 回退 REST
 
 
-def test_hub_keeps_only_100_rows_so_120_requests_miss():
-    """已知限制：hub 每个周期只保留 KLINE_HISTORY 根，请求 120 根的 4h 永远回退 REST。"""
-    assert H.KLINE_HISTORY < 120
+def test_hub_history_covers_120_rows_for_btc_4h():
+    """risk_manager 请求 BTC 4h 120 根，hub 保留根数必须 >= 120 才能命中。"""
+    assert H.KLINE_HISTORY >= 120

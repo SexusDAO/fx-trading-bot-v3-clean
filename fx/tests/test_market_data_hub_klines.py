@@ -139,7 +139,7 @@ def test_sync_subscribes_in_batches_loads_history_and_merges_pending():
         h._handle_market_frame(kf("BTCUSDT", "1h", T0 + 200 * HMS, c="7.7"))
         await h._sync_once()
         await asyncio.gather(*list(h._load_tasks))
-        assert sorted(calls) == sorted((s, iv, 100) for s in ("BTCUSDT", "ETHUSDT") for iv in H.KLINE_INTERVALS)
+        assert sorted(calls) == sorted((s, iv, H.KLINE_HISTORY) for s in ("BTCUSDT", "ETHUSDT") for iv in H.KLINE_INTERVALS)
         subs = [m for m in ws.sent if m["method"] == "SUBSCRIBE"]
         assert {p for m in subs for p in m["params"]} == {f"{s}@kline_{iv}" for s in ("btcusdt", "ethusdt") for iv in H.KLINE_INTERVALS}
         assert h.get_klines("BTCUSDT", "1h", 100)[-1][4] == "7.7"        # pending 已合并
