@@ -330,11 +330,22 @@ def _daemon_loop():
         _child_env = os.environ.copy()
         _child_env.setdefault("OPENAI_API_KEY",  os.environ.get("OPENAI_API_KEY", ""))
         # [fix #50] LLM 中转站地址从 .env 读取（OPENAI_BASE_URL），不再写在脚本里
-        # Binance API Key + 代理 — 从父进程环境变量继承，不在代码里硬编码
-        # 启动前请确保已 export BINANCE_API_KEY / BINANCE_API_SECRET / BINANCE_PROXY
-        for _k in ("BINANCE_API_KEY", "BINANCE_API_SECRET", "BINANCE_PROXY", "PROXY_URL"):
-            if _k not in _child_env and os.environ.get(_k):
-                _child_env[_k] = os.environ[_k]
+        # [fix] 直接从 .env 文件读取关键配置，确保不被系统环境变量覆盖
+        _env_file = FX_DIR / ".env"
+        if _env_file.exists():
+            try:
+                with open(_env_file) as _f:
+                    for _line in _f:
+                        _line = _line.strip()
+                        if not _line or _line.startswith("#") or "=" not in _line:
+                            continue
+                        _k, _, _v = _line.partition("=")
+                        _k = _k.strip()
+                        _v = _v.strip().strip('"').strip("'")
+                        if _k in ("BINANCE_API_KEY", "BINANCE_API_SECRET", "BINANCE_PROXY", "PROXY_URL"):
+                            _child_env[_k] = _v
+            except Exception:
+                pass
         with open(SYSTEM_LOG, "a") as out:
             proc = subprocess.Popen(
                 [sys.executable, str(MAIN_PY)],
