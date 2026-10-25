@@ -62,7 +62,7 @@ from shared.state import (
 )
 from shared.notifier import (
     notify, card_append, card_append_async, card_remove,
-    _hhmm, _CLOSE_REASON_CN, fmt_hold_time,
+    _hhmm, _CLOSE_REASON_CN, fmt_hold_time, card_is_open,
     fmt_node_tp1, fmt_node_close, fmt_node_sl_lost,
 )
 
@@ -162,6 +162,22 @@ def _get_precision(symbol: str) -> dict:
 
 async def _notify_async(text: str) -> None:
     await asyncio.get_running_loop().run_in_executor(None, lambda: notify(text))
+
+
+async def _alert_card_or_notify(pos: dict, text: str) -> None:
+    """告警：pos 有 _sig_id 且卡片未关闭 → card_append_async 追加到信号卡片；否则 _notify_async 保持现状。"""
+    sig_id = (pos or {}).get("_sig_id", "") or ""
+    try:
+        if sig_id and card_is_open(sig_id):
+            await card_append_async(sig_id, "\n" + text)
+            return
+    except Exception as _e:
+        logger.debug(f"[pm] 告警追加卡片失败，回落独立消息: {_e}")
+    await _notify_async(text)
+
+
+_trail_fail_alert_ts: dict[str, float] = {}   # pos_id → 上次 SL 挂单失败告警时间（节流）
+_TRAIL_FAIL_ALERT_COOLDOWN = 1800.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -379,6 +395,14 @@ async def _execute_trail_sl_inner(pos: dict, new_sl: float,
     except Exception as e:
         logger.error(f"[pm] {symbol} 新止损单提交失败: {e}")
         (await asyncio.to_thread(update_position, pos_id, {"sl_target_price": new_sl, "sl_sync_status": "failed"}))
+        # 告警（30 分钟节流，trail 在价格更新里会反复尝试）：优先追加到信号卡片
+        _now_f = time.time()
+        if _now_f - _trail_fail_alert_ts.get(pos_id, 0.0) >= _TRAIL_FAIL_ALERT_COOLDOWN:
+            _trail_fail_alert_ts[pos_id] = _now_f
+            try:
+                await _alert_card_or_notify(pos, f"⚠️ {symbol} 移动止损挂单失败，目标 {new_sl:.6g}，旧止损仍有效\n错误:{e}")
+            except Exception:
+                pass
         return False
 
     # 2. 新单确认成功后,撤旧SL(确保新保护已就位再撤旧的,零裸仓窗口)
@@ -2933,7 +2957,8 @@ async def _pyramid_replace_tp(pos: dict, new_avg_entry: float, new_remaining: fl
                 except Exception as _pe:
                     results.append((label, price, qty, False))
                     logger.error(f"[pm] {symbol} 加仓后 {label} 重挂失败: {_pe}")
-                    await _notify_async(
+                    await _alert_card_or_notify(
+                        pos,
                         f"🚨 {symbol} 加仓后 {label} 重挂失败\n"
                         f"目标价={price:.6g} 数量={qty}\n错误:{_pe}\n"
                         f"旧{label}已撤、新单未挂，该部分仓位暂无止盈保护，请立即检查。"
@@ -2956,7 +2981,8 @@ async def _pyramid_replace_tp(pos: dict, new_avg_entry: float, new_remaining: fl
     except Exception as e:
         logger.warning(f"[pm] {symbol} 加仓后 TP 重挂未完成: {e}")
         try:
-            await _notify_async(
+            await _alert_card_or_notify(
+                pos,
                 f"⚠️ {symbol} 加仓后 TP 重挂未完成\n原因:{e}\n"
                 f"旧 TP 保持不变（只覆盖原仓位数量），加仓部分暂无止盈保护，请人工确认。"
             )
@@ -3160,7 +3186,8 @@ async def _maybe_pyramid(pos: dict) -> None:
                     logger.warning(f"[pm] {symbol} 加仓后 Algo SL 尚未同步，保留旧保护字段，目标价={new_sl:.6g}")
             except Exception as _sl_sync_e:
                 logger.warning(f"[pm] {symbol} 加仓后 Algo SL 同步失败(非致命,trail_sl 下轮会修复): {_sl_sync_e}")
-            await _notify_async(
+            await _alert_card_or_notify(
+                pos,
                 f"📈 {symbol} 顺势加仓\n"
                 f"方向:{'多' if direction=='LONG' else '空'} 浮盈 {pnl_pct*100:.1f}%\n"
                 f"加仓量:{addup_qty}(原仓位50%)均价→{new_avg_entry:.6g}"
@@ -3616,7 +3643,7 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
         guard = await _place_guards_async(
             symbol, direction, fill_qty,
             sl_price, tp1_price, tp2_price,
-            precision, skip_sl=_skip_sl,
+            precision, skip_sl=_skip_sl, sig_id=pos.get("_sig_id", ""),
         )
 
         # 更新 pos_state:pending → open,写入保护单 id
@@ -3648,7 +3675,7 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
         if _missing:
             logger.error(f"[pm] {symbol} 保护单不完整，状态置为 pending_guard，缺失: {_missing}")
             try:
-                await _notify_async(f"⚠️ {symbol} 保护单不完整（缺失: {', '.join(_missing)}），已标记 pending_guard，patrol 将重试")
+                await _alert_card_or_notify(pos, f"⚠️ {symbol} 保护单不完整（缺失: {', '.join(_missing)}），已标记 pending_guard，patrol 将重试")
             except Exception:
                 pass
         logger.info(

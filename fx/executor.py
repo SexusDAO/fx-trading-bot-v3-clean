@@ -965,11 +965,24 @@ async def _entry_recheck(
 
 # 步骤9：成交后并发提交止损止盈单
 # ─────────────────────────────────────────────────────────────────────────────
+async def _guard_alert(sig_id: str, text: str) -> None:
+    """保护单告警：有 sig_id 且卡片未关闭 → 追加到信号卡片；否则保持原样发独立消息。"""
+    try:
+        from shared.notifier import card_is_open
+        if sig_id and card_is_open(sig_id):
+            await card_append_async(sig_id, "\n" + text)
+            return
+    except Exception as _e:
+        logger.debug(f"[executor] 告警追加卡片失败，回落独立消息: {_e}")
+    await notify_async(text)
+
+
 async def _place_guards_async(
     symbol: str, direction: str,
     fill_qty: float, sl_price: float, tp1_price: float, tp2_price: float | None,
     precision: dict,
     skip_sl: bool = False,
+    sig_id: str = "",
 ) -> dict:
     """
     提交保护单：SL + TP1（必选）+ TP2（可选，tp2_price=None 时不挂）。
@@ -1021,7 +1034,7 @@ async def _place_guards_async(
     async def _place(tag: str, kwargs: dict):
         if kwargs.get("quantity", 0) <= 0:
             results[tag] = None
-            await notify_async(f"⚠️ {symbol} {tag} 取整后数量为零，未提交；仓位处于部分保护状态")
+            await _guard_alert(sig_id, f"⚠️ {symbol} {tag} 取整后数量为零，未提交；仓位处于部分保护状态")
             return
         try:
             resp = await asyncio.get_event_loop().run_in_executor(
@@ -1035,7 +1048,8 @@ async def _place_guards_async(
         except Exception as e:
             logger.error(f"[executor] {symbol} {tag} 提交失败: {e}")
             results[tag] = None
-            await notify_async(
+            await _guard_alert(
+                sig_id,
                 f"⚠️ {symbol} {tag} 保护单提交失败！\n"
                 f"仓位处于部分保护状态，请人工介入。\n"
                 f"错误：{e}"
@@ -1062,7 +1076,8 @@ async def _place_guards_async(
         except Exception as e:
             logger.error(f"[executor] {symbol} SL 提交失败: {e}")
             results["sl"] = None
-            await notify_async(
+            await _guard_alert(
+                sig_id,
                 f"⚠️ {symbol} 止损单提交失败！\n"
                 f"请立即人工设置止损，当前价格接近止损位。\n"
                 f"错误：{e}"
@@ -2079,7 +2094,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     guard = await _place_guards_async(
         symbol, direction, fill_qty,
         sl_price, tp1_price, tp2_price,
-        precision,
+        precision, sig_id=signal.get("_sig_id", ""),
     )
 
     # ── 步骤11：写入持仓状态 ──────────────────────────────────────────────────

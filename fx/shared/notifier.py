@@ -537,6 +537,16 @@ async def card_append_async(sig_id: str, line: str) -> bool:
     return await loop.run_in_executor(None, lambda: card_append(sig_id, line))
 
 
+def card_is_open(sig_id: str) -> bool:
+    """卡片是否仍未关闭：还在待发缓冲区，或已发出且缓存里还在（card_remove 之后为 False）。"""
+    if not sig_id:
+        return False
+    try:
+        return bool(_signal_buffer.has(sig_id) or sig_id in _card_cache)
+    except Exception:
+        return False
+
+
 def card_remove(sig_id: str) -> None:
     """信号结束后清理卡片缓存。"""
     _wait_inflight_flush(sig_id)   # [v3.97] 避免在途 flush 稍后又把已移除的卡片登记回来
