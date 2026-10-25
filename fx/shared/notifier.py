@@ -16,19 +16,27 @@ shared/notifier.py — 推送通知（Jarvis）
   card_append_async(sig_id, line) → 异步版 card_append
   card_remove(sig_id)             → 信号结束后清理缓存
 """
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
 import subprocess
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("fx.notifier")
 
 # ── Jarvis 推送目标（userId:thread:threadId）──────────────────────────────────
-_JARVIS_TARGET = "432401404:thread:01a157e7-5c36-76fa-9e3f-70de22a64c3a"
+# 环境变量 JARVIS_TARGET 可覆盖；不设置则用下面的固定 thread（所有消息固定发到同一个 thread）
+_JARVIS_TARGET = os.environ.get(
+    "JARVIS_TARGET",
+    "432401404:thread:01a157e7-5c36-76fa-9e3f-70de22a64c3a",
+)
 
 # ── Gateway HTTP API ────────────────────────────────────────────────────────
 _GW_PORT  = os.environ.get("OPENCLAW_GATEWAY_PORT", "18789")
@@ -417,16 +425,58 @@ def tick_signal_buffer() -> int:
 # 公共 API
 # =============================================================================
 
+def _dingtalk_sign(secret: str) -> tuple:
+    """钉钉加签机器人签名：返回 (timestamp_ms, sign)。"""
+    timestamp = str(round(time.time() * 1000))
+    string_to_sign = f"{timestamp}\n{secret}"
+    hmac_code = hmac.new(
+        secret.encode("utf-8"),
+        string_to_sign.encode("utf-8"),
+        digestmod=hashlib.sha256,
+    ).digest()
+    sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+    return timestamp, sign
+
+
+def _dingtalk_send(text: str) -> None:
+    """钉钉额外副本。失败只记 debug 日志，不影响主流程。
+    未配置 DINGTALK_WEBHOOK 或 DINGTALK_ENABLED=False 时静默跳过。"""
+    try:
+        from config import DINGTALK_ENABLED, DINGTALK_WEBHOOK, DINGTALK_SECRET
+        if not DINGTALK_ENABLED or not DINGTALK_WEBHOOK:
+            return
+        timestamp, sign = _dingtalk_sign(DINGTALK_SECRET)
+        sep = "&" if "?" in DINGTALK_WEBHOOK else "?"
+        url = f"{DINGTALK_WEBHOOK}{sep}timestamp={timestamp}&sign={sign}"
+        import requests as _req
+        _req.post(url, json={
+            "msgtype": "text",
+            "text": {"content": text},
+        }, timeout=6)
+    except Exception as e:
+        logger.debug(f"[notifier] 钉钉发送失败: {e}")
+
+
+def _dingtalk_send_bg(text: str) -> None:
+    """后台线程发钉钉：notify 在事件循环线程里被同步调用时，不被钉钉的网络超时（最长6s）拖住。"""
+    try:
+        threading.Thread(target=_dingtalk_send, args=(text,), daemon=True).start()
+    except Exception as e:
+        logger.debug(f"[notifier] 钉钉线程启动失败: {e}")
+
+
 def notify(text: str) -> None:
-    """发一条全局独立消息。失败只记日志，不抛异常。"""
+    """发一条全局独立消息。失败只记日志，不抛异常。Jarvis 之外额外发一份钉钉（不接入卡片）。"""
     try:
         _send(text)
     except Exception as e:
         logger.info(f"[notify] 推送失败: {e} | 内容: {text[:80]}")
+    # 额外推送钉钉（fire-and-forget，失败不影响）
+    _dingtalk_send_bg(text)
 
 
 async def notify_async(text: str) -> None:
-    """异步版 notify，不阻塞事件循环。"""
+    """异步版 notify，不阻塞事件循环。钉钉副本由 notify() 内部发送（这里不重复发，否则同一条会发两遍）。"""
     import asyncio
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, lambda: notify(text))

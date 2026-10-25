@@ -464,6 +464,12 @@ PRICE_DEBOUNCE_SEC = 1.0
 POS_STATE_FILE        = _FX_ROOT / "logs" / "pos_state.json"
 PENDING_CONFIRM_FILE  = _FX_ROOT / "logs" / "pending_confirm_state.json"
 TRADE_LOG_FILE        = _FX_ROOT / "logs" / "trade_log.jsonl"
+
+# ── 钉钉推送（加签机器人；Jarvis 之外的额外副本，只 notify/notify_async 发，卡片不发）──
+# 服务器需设置环境变量 DINGTALK_WEBHOOK / DINGTALK_SECRET；未设置则静默跳过
+DINGTALK_ENABLED = True
+DINGTALK_WEBHOOK = os.environ.get("DINGTALK_WEBHOOK", "")
+DINGTALK_SECRET  = os.environ.get("DINGTALK_SECRET", "")
 SCANNER_LOG_FILE      = _FX_ROOT / "logs" / "scanner.log"
 
 # 日报时间（UTC 小时）
