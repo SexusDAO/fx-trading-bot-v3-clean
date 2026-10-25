@@ -25,6 +25,13 @@ import threading
 import io
 from pathlib import Path
 
+# ── 事件循环：可用时启用 uvloop（未安装则静默跳过，不影响启动）──────────────
+try:
+    import uvloop
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+except ImportError:
+    pass
+
 # ── 启动依赖检查 ─────────────────────────────────────────────────────────────
 def _check_dependencies():
     """验证关键依赖包是否可用，缺失时立即报错退出。"""
