@@ -468,6 +468,55 @@ def _write_signal_analytics(
 from shared.indicators import ema as _ema, rsi as _rsi, atr as _atr, vol_ma as _vol_ma, bollinger as _bollinger
 
 
+def _is_stock_token_tradeable(symbol: str) -> bool:
+    """
+    判断股票类代币当前是否在允许开仓的交易时段（UTC 小时，左闭右开；周六日全天不允许）。
+    非股票类代币直接返回 True；开关 STOCK_TOKEN_FILTER_ENABLED=False 或读配置失败时一律返回 True。
+    只用于开仓扫描候选池过滤，不影响持仓维护。
+    """
+    try:
+        from config import (
+            STOCK_TOKEN_FILTER_ENABLED,
+            STOCK_TOKENS_US, STOCK_TOKENS_US_HOURS_UTC,
+            STOCK_TOKENS_HK, STOCK_TOKENS_HK_HOURS_UTC,
+            STOCK_TOKENS_KR, STOCK_TOKENS_KR_HOURS_UTC,
+            STOCK_TOKENS_CN, STOCK_TOKENS_CN_HOURS_UTC,
+        )
+        if not STOCK_TOKEN_FILTER_ENABLED:
+            return True
+    except Exception:
+        return True
+
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc)
+    now_hour = now_utc.hour
+    now_weekday = now_utc.weekday()  # 0=周一, 5=周六, 6=周日（UTC）
+
+    # 美/港/韩/A 股周末均不开市：周六日全天不允许开仓
+    if symbol in STOCK_TOKENS_US:
+        if now_weekday >= 5:
+            return False
+        start, end = STOCK_TOKENS_US_HOURS_UTC
+        return start <= now_hour < end
+    if symbol in STOCK_TOKENS_HK:
+        if now_weekday >= 5:
+            return False
+        start, end = STOCK_TOKENS_HK_HOURS_UTC
+        return start <= now_hour < end
+    if symbol in STOCK_TOKENS_KR:
+        if now_weekday >= 5:
+            return False
+        start, end = STOCK_TOKENS_KR_HOURS_UTC
+        return start <= now_hour < end
+    if symbol in STOCK_TOKENS_CN:
+        if now_weekday >= 5:
+            return False
+        start, end = STOCK_TOKENS_CN_HOURS_UTC
+        return start <= now_hour < end
+
+    return True  # 非股票类代币，不过滤
+
+
 def _is_weekend_period(now: datetime) -> bool:
     """
     周末低流动性时段（v3.42）：
@@ -3595,6 +3644,18 @@ def run_scan(dry_run: bool = False, signal_watcher=None) -> dict:
     # 同标的同方向冲突由 analyze_symbol 内部的 active_syms 精细过滤
     # pending_syms 仍用于 analyze_symbol 内部判断，不在此处整体排除
     scan_pool = [s for s in pool if s not in active_sym_set]   # 只排除 open 持仓标的
+    # 股票类代币交易时段过滤：非交易时段不进入本轮开仓扫描（只影响候选池，持仓维护不经过这里）
+    _stock_skipped = []
+    _tradeable_pool = []
+    for _s in scan_pool:
+        if _is_stock_token_tradeable(_s):
+            _tradeable_pool.append(_s)
+        else:
+            _stock_skipped.append(_s)
+            logger.debug(f"[scanner] {_s} 非交易时段，跳过")
+    if _stock_skipped:
+        logger.info(f"[scanner] 股票类代币非交易时段，本轮跳过 {len(_stock_skipped)} 个")
+    scan_pool = _tradeable_pool
     result["scanned"] = len(scan_pool)
     # 持仓标的和 BTCUSDT 也订阅（patrol / 挂单维护读它们的 K 线），放最前：hub 对重复标的去重，超出 KLINE_HUB_SYMBOLS_MAX 时按顺序截断
     _hub_subscribe_klines(["BTCUSDT"] + sorted(active_sym_set) + list(scan_pool))
