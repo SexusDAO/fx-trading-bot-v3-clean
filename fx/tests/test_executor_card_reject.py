@@ -3,12 +3,19 @@ import executor as X
 import shared.signal_watcher as SW
 
 
-def test_delta_limit_includes_max_leverage():
+def test_delta_limit_uses_max_total_nominal():
     src = inspect.getsource(X._precheck)
-    assert "_max_lev_delta = _get_max_leverage(symbol)" in src
-    assert "_delta_limit = _equity * _max_lev_delta * NET_DELTA_MAX_PCT" in src
-    assert "×{_max_lev_delta}x×" in src
-    assert "_delta_limit = _equity * NET_DELTA_MAX_PCT" not in src
+    assert "MAX_TOTAL_NOMINAL as _MAX_NOM" in src
+    assert "_delta_limit = _equity * _MAX_NOM * NET_DELTA_MAX_PCT" in src
+    assert "_get_max_leverage" not in src[src.index("净 Delta"):src.index("净Delta检查失败")]
+    assert "× {_MAX_NOM}倍 × {NET_DELTA_MAX_PCT*100:.0f}%" in src
+    assert "_max_lev_delta" not in src
+
+
+def test_delta_config_values_and_example():
+    import config
+    assert config.NET_DELTA_MAX_PCT == 0.70 and config.MAX_TOTAL_NOMINAL == 5.0
+    assert abs(271 * config.MAX_TOTAL_NOMINAL * config.NET_DELTA_MAX_PCT - 948.5) < 1e-9
 
 
 def test_sl_dist_and_qty_rejects_append_card():

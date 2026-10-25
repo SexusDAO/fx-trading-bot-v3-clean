@@ -276,9 +276,10 @@ def _precheck(signal: dict) -> tuple[bool, str]:
     # 防止同方向暴露过高：净 Delta = 多头名义 - 空头名义
     # 超过账户权益 × NET_DELTA_MAX_PCT 时限制新增同向信号
     try:
-        from config import NET_DELTA_MAX_PCT
+        from config import NET_DELTA_MAX_PCT, MAX_TOTAL_NOMINAL as _MAX_NOM
     except ImportError:
-        NET_DELTA_MAX_PCT = 0.30  # 净 Delta 不超过账户权益30%
+        NET_DELTA_MAX_PCT = 0.70
+        _MAX_NOM = 5.0
 
     try:
         _all_pos = get_all_positions()
@@ -295,16 +296,15 @@ def _precheck(signal: dict) -> tuple[bool, str]:
             for p in _all_pos if p.get("status") in _nom_statuses and p.get("direction","").upper() == "SHORT"
         )
         _net_delta   = _long_nom - _short_nom
-        _max_lev_delta = _get_max_leverage(symbol)
-        _delta_limit = _equity * _max_lev_delta * NET_DELTA_MAX_PCT
+        _delta_limit = _equity * _MAX_NOM * NET_DELTA_MAX_PCT
         if direction == "LONG" and _net_delta > _delta_limit:
             return False, (
-                f"净多头 Delta 过高: {_net_delta:.0f}U > {_delta_limit:.0f}U（权益{_equity:.0f}U×{_max_lev_delta}x×{NET_DELTA_MAX_PCT*100:.0f}%），"
+                f"净多头 Delta 过高: {_net_delta:.0f}U > {_delta_limit:.0f}U（权益{_equity:.0f}U × {_MAX_NOM}倍 × {NET_DELTA_MAX_PCT*100:.0f}%），"
                 f"限制新增多头（已计入 open+pending）"
             )
         elif direction == "SHORT" and (-_net_delta) > _delta_limit:
             return False, (
-                f"净空头 Delta 过高: {-_net_delta:.0f}U > {_delta_limit:.0f}U（权益{_equity:.0f}U×{_max_lev_delta}x×{NET_DELTA_MAX_PCT*100:.0f}%），"
+                f"净空头 Delta 过高: {-_net_delta:.0f}U > {_delta_limit:.0f}U（权益{_equity:.0f}U × {_MAX_NOM}倍 × {NET_DELTA_MAX_PCT*100:.0f}%），"
                 f"限制新增空头（已计入 open+pending）"
             )
     except Exception as _de:
