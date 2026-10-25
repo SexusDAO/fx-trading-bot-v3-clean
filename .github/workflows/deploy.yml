@@ -39,7 +39,7 @@ jobs:
               -o BatchMode=yes -o ServerAliveInterval=30 -o ConnectTimeout=15 \
               "$DEPLOY_USER@$DEPLOY_HOST" 'bash -se' <<'REMOTE'
           set -euo pipefail
-          cd /home/ubuntu/bot && git pull
+          cd /home/ubuntu/bot && git clean -f fx/requirements_live.txt && git pull
           cd fx && source venv/bin/activate
           pip install -r requirements_live.txt -q
           python3 daemon_start.py restart
