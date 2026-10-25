@@ -1,0 +1,82 @@
+name: Deploy FX
+
+on:
+  push:
+    branches: [main]
+
+# 同一时刻只部署一次，后到的排队，不取消正在进行的部署
+concurrency:
+  group: deploy-fx
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+      COMMIT_SHA: ${{ github.sha }}
+      ACTOR: ${{ github.actor }}
+    steps:
+      - name: Prepare SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -T 10 -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to server
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key \
+              -o BatchMode=yes -o ServerAliveInterval=30 -o ConnectTimeout=15 \
+              "$DEPLOY_USER@$DEPLOY_HOST" 'bash -se' <<'REMOTE'
+          set -euo pipefail
+          cd /home/ubuntu/bot && git pull
+          cd fx && source venv/bin/activate
+          pip install -r requirements.txt -q
+          python3 daemon_start.py restart
+          REMOTE
+
+      - name: Notify DingTalk (success)
+        if: success()
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, hmac, json, os, time, urllib.parse, urllib.request
+          sha8 = os.environ["COMMIT_SHA"][:8]
+          text = f"✅ FX 系统部署成功\nCommit：{sha8}\n触发者：{os.environ['ACTOR']}"
+          ts = str(round(time.time() * 1000))
+          secret = os.environ["DINGTALK_SECRET"]
+          sign = urllib.parse.quote_plus(base64.b64encode(
+              hmac.new(secret.encode(), f"{ts}\n{secret}".encode(), hashlib.sha256).digest()))
+          url = f"{os.environ['DINGTALK_WEBHOOK']}&timestamp={ts}&sign={sign}"
+          req = urllib.request.Request(
+              url, data=json.dumps({"msgtype": "text", "text": {"content": text}}).encode(),
+              headers={"Content-Type": "application/json"})
+          print(urllib.request.urlopen(req, timeout=15).read().decode())
+          PY
+
+      - name: Notify DingTalk (failure)
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, hmac, json, os, time, urllib.parse, urllib.request
+          sha8 = os.environ["COMMIT_SHA"][:8]
+          text = f"❌ FX 系统部署失败\nCommit：{sha8}\n请检查 GitHub Actions 日志"
+          ts = str(round(time.time() * 1000))
+          secret = os.environ["DINGTALK_SECRET"]
+          sign = urllib.parse.quote_plus(base64.b64encode(
+              hmac.new(secret.encode(), f"{ts}\n{secret}".encode(), hashlib.sha256).digest()))
+          url = f"{os.environ['DINGTALK_WEBHOOK']}&timestamp={ts}&sign={sign}"
+          req = urllib.request.Request(
+              url, data=json.dumps({"msgtype": "text", "text": {"content": text}}).encode(),
+              headers={"Content-Type": "application/json"})
+          print(urllib.request.urlopen(req, timeout=15).read().decode())
+          PY
