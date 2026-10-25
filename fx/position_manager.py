@@ -1946,13 +1946,18 @@ class PositionManager:
                     f"(持仓{holding_hours:.1f}H, 门槛×{threshold_mult}, "
                     f"有效阈值={effective_loss_threshold:.2f}%),触发强制平仓"
                 )
+                # 强制平仓：只在信号卡片追加一行（卡片已关闭才回落为独立消息）；平仓前追加，平仓后卡片会被移除
+                try:
+                    await _alert_card_or_notify(pos, "🔴 健康评分不足，强制平仓")
+                except Exception as _hce:
+                    logger.debug(f"[pm] {symbol} 健康评分平仓卡片追加失败: {_hce}")
                 await self._force_close(pos, "health_force_close")
                 return
             else:
                 logger.info(f"[pm] {symbol} 健康评分 {score}/100 低但浮盈{pnl_pct:.2f}%,仅告警不平仓")
 
         if score < PM_HEALTH_WARN_SCORE:
-            # 告警节流:内存 + 持久化到 pos_state(重启不丢失),每30分钟最多一次
+            # 告警只写日志，不发任何通知（节流：内存 + 持久化到 pos_state，每30分钟最多记一次）
             last_warn = max(
                 _health_warned.get(pid, 0),
                 float(pos.get("health_last_warn_ts", 0))
@@ -1963,11 +1968,11 @@ class PositionManager:
                 dim = _health_score_detail(direction, ema20_1h, ema50_1h,
                                             ema20_4h, ema50_4h, rsi_1h, funding,
                                             mode=mode)
-                await _notify_async(
-                    f"⚠️ {symbol} 健康评分 {score}/100"
-                    + (f"(reversal模式,EMA逆势正常)" if mode == "reversal" else "")
-                    + f"\n方向: {direction}  浮盈: {pnl_pct:+.2f}%\n"
-                    f"EMA: {dim['ema']}分  RSI: {dim['rsi']}分  资金费率: {dim['fr']}分"
+                logger.warning(
+                    f"[pm] {symbol} 健康评分告警 {score}/100 方向={direction} 浮盈={pnl_pct:+.2f}% "
+                    f"EMA={dim['ema']} RSI={dim['rsi']} 资金费率={dim['fr']}"
+                    + (" (reversal模式,EMA逆势正常)" if mode == "reversal" else "")
+                    + "（仅日志，不通知）"
                 )
 
 
@@ -3599,14 +3604,25 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                 )
                 _new_sl = await _repair_sl_only()
                 _sl_ok = (sl_alive is True) or bool(_new_sl)
-                (await asyncio.to_thread(update_position, pid, {
-                    "status":       "open" if _sl_ok else "pending_guard",
-                    "fill_price":   fill_price,
-                    "quantity":     fill_qty,
-                    "tp1_order_id": tp1_id,
-                    "tp2_order_id": tp2_id,
+                import time as _time_skip
+                # open_order_id 清除：入场单已成交，不再让后续巡检把它识别为「FILLED 但未处理」；
+                # fill_time 补写（时间止损用真实成交时间，原先该分支漏写）。
+                # status 仍按 SL 是否确认存活决定：SL 缺失时保持 pending_guard 由 patrol 重试，不能固定写 open。
+                _skip_ok = (await asyncio.to_thread(update_position, pid, {
+                    "status":        "open" if _sl_ok else "pending_guard",
+                    "fill_price":    fill_price,
+                    "fill_time":     int(_time_skip.time()),
+                    "quantity":      fill_qty,
+                    "open_order_id": None,
+                    "tp1_order_id":  tp1_id,
+                    "tp2_order_id":  tp2_id,
                     **({} if _sl_ok else {"missing_guards": ["sl"]}),
                 }))
+                if _skip_ok is False:
+                    logger.warning(
+                        f"[pm] {symbol} 跳过补挂分支 update_position 返回 False，pos_state 未写入"
+                        f"（pos_id={pid} 不存在或持仓文件被拒写），下一轮巡检可能重复触发，请人工核查"
+                    )
                 return
         except Exception as chk_err:
             logger.warning(f"[pm] {symbol} 检查已有挂单失败(继续补挂): {chk_err}")
@@ -3660,6 +3676,7 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
             _missing.append("tp2")
         _upd = {
             "status":      "open" if not _missing else "pending_guard",
+            "open_order_id": None,   # 入场单已成交，清除，避免被识别为「FILLED 但未处理」
             "fill_price":  fill_price,
             "fill_time":   int(_time_fill.time()),  # v3.39: 补挂路径补写 fill_time,时间止损用真实成交时间
             "quantity":    fill_qty,
