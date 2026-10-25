@@ -25,13 +25,6 @@ import threading
 import io
 from pathlib import Path
 
-# ── 事件循环：可用时启用 uvloop（未安装则静默跳过，不影响启动）──────────────
-try:
-    import uvloop
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-except ImportError:
-    pass
-
 # ── 启动依赖检查 ─────────────────────────────────────────────────────────────
 def _check_dependencies():
     """验证关键依赖包是否可用，缺失时立即报错退出。"""
@@ -847,6 +840,8 @@ async def _verify_hedge_mode_or_exit() -> None:
 
 async def main() -> None:
     logger.info("[main] fx 交易系统 V3.0 启动")
+    logger.info(f"[main] 事件循环: {type(asyncio.get_event_loop_policy()).__name__} / "
+                f"loop={type(asyncio.get_running_loop()).__name__}")
     import config as _cfg_req
     _cfg_req.require_env()   # [fix #39] 必填项缺失直接报错退出
     await _verify_hedge_mode_or_exit()
@@ -1123,6 +1118,15 @@ async def main() -> None:
 
 if __name__ == "__main__":
     import sys, traceback as _tb
+    # ── 事件循环：可用时启用 uvloop。必须在 asyncio.run() 之前、logger 定义之后设置；
+    #    不可用时明确告警（原先静默跳过，无法判断是否生效）──────────────────────
+    try:
+        import uvloop
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    except ImportError:
+        logger.warning("[main] uvloop 不可用（未安装），使用默认事件循环")
+    except Exception as _ue:
+        logger.warning(f"[main] uvloop 启用失败，使用默认事件循环: {_ue}")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
