@@ -41,7 +41,7 @@ jobs:
           set -euo pipefail
           cd /home/ubuntu/bot && git pull
           cd fx && source venv/bin/activate
-          pip install -r requirements.txt -q
+          pip install -r requirements_live.txt -q
           python3 daemon_start.py restart
           REMOTE
 
