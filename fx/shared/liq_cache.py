@@ -23,6 +23,11 @@ try:
 except ImportError:   # config 缺这两项时的兜底（与 config.py 默认值一致）
     LIQ_PREFETCH_MAX_WORKERS, LIQ_PREFETCH_SLEEP_SEC = 2, 1.0
 
+try:
+    from config import LIQ_BG_REFRESH_INTERVAL_SEC, LIQ_SCAN_STALE_MAX_SEC
+except ImportError:   # 与 config.py 默认值一致
+    LIQ_BG_REFRESH_INTERVAL_SEC, LIQ_SCAN_STALE_MAX_SEC = 600.0, 2400.0
+
 # ── 缓存存储 ───────────────────────────────────────────────────────────────
 _CACHE: dict[str, dict] = {}
 _CACHE_TTL = 15 * 60   # 15 分钟
@@ -284,6 +289,47 @@ def get_liq_zones_cached(symbol: str, direction: str,
     return (entry or {}).get(direction.upper(), [])
 
 
+# 扫描路径「只读缓存」未命中/过期的标的：登记给后台刷新线程，下一轮优先预热
+_WANT: set = set()
+_WANT_LOCK = threading.Lock()
+_WANT_MAX = 200
+
+
+def get_liq_zones_nowait(symbol: str, direction: str,
+                         current_price: float = 0.0,
+                         range_: str = "3d") -> list:
+    """扫描路径专用：只读缓存，**永不发网络请求、不读写共享缓存文件**。
+
+    - 缓存年龄 <= LIQ_SCAN_STALE_MAX_SEC（默认 40 分钟，约两个预热周期）→ 直接返回（即使已过 15 分钟 TTL，
+      允许用上一轮预热的旧数据，缓存最多滞后一个预热周期）；
+    - 无缓存或超过上限 → 返回 []（调用方按「无清算区」降级），同时把该标的登记给后台刷新线程优先预热。
+    持仓维护、下单等需要最新数据的路径仍用 get_liq_zones_cached（缓存过期会实时拉取）。
+    """
+    key = f"{symbol}:{range_}"
+    with _CACHE_LOCK:
+        entry = _CACHE.get(key)
+        age = (time.time() - entry.get("ts", 0)) if entry else None
+    if entry is not None and age is not None and age <= LIQ_SCAN_STALE_MAX_SEC:
+        if age > _CACHE_TTL:
+            _want_symbol(symbol)   # 数据可用但已过 TTL，顺手排队刷新
+        return entry.get(direction.upper(), [])
+    _want_symbol(symbol)
+    return []
+
+
+def _want_symbol(symbol: str) -> None:
+    with _WANT_LOCK:
+        if len(_WANT) < _WANT_MAX:
+            _WANT.add(symbol)
+
+
+def _drain_wanted() -> list:
+    with _WANT_LOCK:
+        out = list(_WANT)
+        _WANT.clear()
+    return out
+
+
 def _needs_refresh(sym: str, ranges=_PREFETCH_RANGES) -> bool:
     """任一 range 的缓存年龄 >= TTL*0.8 即需要刷新（与 _prefetch_one 原判断一致）。"""
     for r in ranges:
@@ -398,12 +444,13 @@ def start_bg_refresh(symbols_fn) -> None:
             try:
                 while not _bg_stop.is_set():
                     try:
-                        syms = symbols_fn() or []
+                        # 扫描路径漏掉的标的排最前，其后是候选池；过期的才会真正请求（_needs_refresh）
+                        syms = list(dict.fromkeys(_drain_wanted() + list(symbols_fn() or [])))
                         if syms and not _bg_stop.is_set():
                             prefetch_liq_cache(syms)
                     except Exception as e:
                         logger.warning(f"[liq_cache] bg_refresh 异常: {e}")
-                    if _bg_stop.wait(_CACHE_TTL):
+                    if _bg_stop.wait(max(30.0, float(LIQ_BG_REFRESH_INTERVAL_SEC))):
                         break
             finally:
                 with _bg_lock:

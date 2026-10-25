@@ -1637,10 +1637,13 @@ def _analyze_symbol_impl(symbol: str, ticker: dict,
 
 
 def _prefetch_liq(symbol: str, price: float) -> dict:
-    """进程池路径：主进程读一次清算区（缓存命中直接用，未命中才实时拉取），随 prefetch 序列化给 worker。"""
+    """进程池路径：主进程读一次清算区，随 prefetch 序列化给 worker。LIQ_SCAN_CACHE_ONLY=True 时只读缓存不发网络。"""
     out: dict = {}
     try:
         from shared.liq_cache import get_liq_zones_cached as _g
+        # 扫描只读缓存：Clawby 响应差时不在分析线程里等网络（缺失按无清算区降级，后台线程优先补）
+        if getattr(__import__("config"), "LIQ_SCAN_CACHE_ONLY", True):
+            from shared.liq_cache import get_liq_zones_nowait as _g
     except Exception:
         return out
     for key, (d, r) in (("long", ("LONG", "3d")), ("short", ("SHORT", "3d")),

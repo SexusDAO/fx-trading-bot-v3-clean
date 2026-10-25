@@ -331,7 +331,10 @@ HUB_NO_MSG_TIMEOUT = 180  # 120→180：给历史加载留余量，减少阻塞�
 KLINE_FETCH_CONCURRENCY = 4  # hub历史K线REST拉取并发上限
 LIQ_PREFETCH_MAX_WORKERS = 4   # 预热线程数；8 线程实测加剧 GIL 竞争，事件循环反复阻塞 2~4s，回退到 4
 LIQ_PREFETCH_SLEEP_SEC   = 0.05 # 每个标的预热后的节流间隔（秒），50ms 防止 API 429 限速
-LIQ_PRESCAN_PREFETCH_ENABLED     = True   # 每轮扫描前先有界预热本轮候选池里过期的 liq_cache（False=回到分析时实时查询）
+LIQ_PRESCAN_PREFETCH_ENABLED     = False  # 扫描前同步预热（已改为后台持续预热，扫描只读缓存；True=恢复旧行为，扫描会等 Clawby）
+LIQ_SCAN_CACHE_ONLY              = True   # 扫描分析阶段的清算区只读缓存、不发网络请求（缓存缺失按无清算区降级，并登记后台优先预热）
+LIQ_SCAN_STALE_MAX_SEC           = 2400.0 # 扫描允许使用的缓存最大年龄（秒，约两个预热周期）；超过按缺失处理
+LIQ_BG_REFRESH_INTERVAL_SEC      = 600.0  # 后台预热线程每轮间隔（秒），只请求已过 12 分钟的标的
 LIQ_PRESCAN_PREFETCH_TIMEOUT_SEC = 20.0   # 扫描前预热的最长等待（秒），超时直接进入分析（直连后 8 线程足以跑完）
 KLINE_LOAD_BATCH_SIZE = 200  # hub 每次对账最多新建的历史K线加载任务数（超出留到下一轮，每 2s 一轮）
 KLINE_GAP_RELOAD_COOLDOWN_SEC = 60  # 同一 series 因K线缺口触发重拉的冷却时间（秒）
