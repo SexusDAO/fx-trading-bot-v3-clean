@@ -5190,8 +5190,12 @@ async def _check_pending_health_static(pos: dict) -> None:
     try:
         from executor import _normalize_liq_zones
         _phc_range = "24h" if pos.get("sig_type") in ("reversal", "funding_arb", "oi_divergence") else "3d"
-        liq_long  = _normalize_liq_zones(get_liq_zones_cached(symbol, "LONG",  mark_price, range_=_phc_range))
-        liq_short = _normalize_liq_zones(get_liq_zones_cached(symbol, "SHORT", mark_price, range_=_phc_range))
+        # 缓存未命中时 get_liq_zones_cached 会发 Clawby/CG 网络请求并读写共享缓存文件（flock），
+        # 放线程里执行，避免阻塞事件循环
+        liq_long  = _normalize_liq_zones(await asyncio.to_thread(
+            get_liq_zones_cached, symbol, "LONG",  mark_price, range_=_phc_range))
+        liq_short = _normalize_liq_zones(await asyncio.to_thread(
+            get_liq_zones_cached, symbol, "SHORT", mark_price, range_=_phc_range))
         liq_zones = {"long": liq_long, "short": liq_short}
     except Exception:
         liq_zones = {}
