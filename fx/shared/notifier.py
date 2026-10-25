@@ -468,6 +468,46 @@ def _dingtalk_send_bg(text: str) -> None:
         logger.debug(f"[notifier] 钉钉线程启动失败: {e}")
 
 
+# 平仓时才发钉钉完整摘要的 close_reason（止盈 / 止损 / 主动锁利）；超时撤单、评分告警/评分平仓等不发
+DINGTALK_CLOSE_REASONS = frozenset({
+    "tp1", "tp2", "tp1_hit", "tp2_hit",
+    "sl", "sl_triggered", "sl_hit",
+    "mfe_drawback_50pct", "phase_exhaustion", "trail_mfe_soft", "rr_below_threshold",
+})
+
+
+def card_get_text(sig_id: str) -> Optional[str]:
+    """读取信号卡片当前完整文本（只读）。卡片不存在/已清理/还在待发缓冲区 → None。"""
+    if not sig_id:
+        return None
+    try:
+        with _card_lock_for(sig_id):
+            entry = _card_cache.get(sig_id)
+            return str(entry.get("text") or "") or None if entry else None
+    except Exception:
+        return None
+
+
+def dingtalk_trade_result(text: str) -> None:
+    """只在平仓（止盈/止损/主动锁利）时调用，fire-and-forget；失败不影响主流程。"""
+    _dingtalk_send_bg(text)
+
+
+def build_close_summary(symbol: str, direction: str, mode: str, entry: float, exit_price: float,
+                        pnl_usdt: float, pnl_pct: float, close_reason: str, hold_minutes: float) -> str:
+    """卡片缓存已清理时的简洁平仓摘要。"""
+    d_cn = "做多" if str(direction).upper() == "LONG" else "做空"
+    reason_cn = _CLOSE_REASON_CN.get(close_reason, close_reason)
+    return (
+        f"📋 {symbol} {d_cn} 平仓\n"
+        f"策略：{mode}\n"
+        f"入场：{entry:.6g}  出场：{exit_price:.6g}\n"
+        f"盈亏：{pnl_usdt:+.2f}U（{pnl_pct:+.2f}%）\n"
+        f"原因：{reason_cn}\n"
+        f"持仓：{hold_minutes:.0f}分钟"
+    )
+
+
 def notify(text: str) -> None:
     """发一条全局独立消息。失败只记日志，不抛异常。Jarvis 之外额外发一份钉钉（不接入卡片）。"""
     try:
@@ -681,6 +721,7 @@ _MODE_DIR_CN: dict = {
 _STRENGTH_CN = {"strong": "强信号", "medium": "中等信号", "weak": "弱信号"}
 
 _CLOSE_REASON_CN = {
+    "tp1":               "止盈1触发",
     "tp2":               "TP2止盈",
     "sl":                "止损",
     "sl_triggered":      "止损",

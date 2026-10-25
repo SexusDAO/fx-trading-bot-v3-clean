@@ -64,6 +64,7 @@ from shared.notifier import (
     notify, card_append, card_append_async, card_remove,
     _hhmm, _CLOSE_REASON_CN, fmt_hold_time, card_is_open,
     fmt_node_tp1, fmt_node_close, fmt_node_sl_lost,
+    card_get_text, dingtalk_trade_result, build_close_summary, DINGTALK_CLOSE_REASONS,
 )
 
 logger = logging.getLogger("fx.position_manager")
@@ -2631,8 +2632,24 @@ async def _close_position_post_static(
         )
         if _sig_id_cls:
             await card_append_async(_sig_id_cls, _close_line)
+            # 钉钉：仅止盈/止损/主动锁利平仓才发；必须在 card_remove 之前取完整卡片文本
+            _dt_text = None
+            if close_reason in DINGTALK_CLOSE_REASONS:
+                try:
+                    _dt_text = card_get_text(_sig_id_cls)
+                    if _dt_text is None:     # 卡片缓存已清理 → 构造简洁摘要
+                        _dt_text = build_close_summary(symbol, direction, mode, entry, exit_price,
+                                                       pnl_usdt, pnl_pct, close_reason, hold_minutes)
+                    elif _close_line not in _dt_text:   # 卡片编辑失败时缓存文本不含平仓行，补上
+                        _dt_text = _dt_text + "\n" + _close_line
+                except Exception as _dte:
+                    logger.debug(f"[pm] {symbol} 钉钉平仓文本构造失败: {_dte}")
+                    _dt_text = None
             (await asyncio.to_thread(card_remove, _sig_id_cls))
+            if _dt_text:
+                dingtalk_trade_result(_dt_text)
         else:
+            # 无信号卡片：_notify_async 已把这条平仓行同步发了一份钉钉，不重复发摘要
             await _notify_async(_close_line)
     except Exception as e:
         logger.error(f"[pm] 平仓通知发送失败: {e}")
