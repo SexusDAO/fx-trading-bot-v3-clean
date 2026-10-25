@@ -1297,6 +1297,14 @@ class PositionManager:
             _nominal   = _entry * _qty
             _pnl_pct   = _real_pnl / (_nominal + 1e-9) * 100
             _hold_min  = (_close_ms - _open_ms) / 60000
+            # [fix] _manual_fees 必须在构造 _record 之前取得（原先在 _record 之后才赋值，
+            #   导致本分支每次 UnboundLocalError：trade_log 补写失败、熔断器记账被跳过）。
+            #   取实际手续费；拉取失败回落 0.0，不影响 trade_log 写入。
+            _manual_fees = 0.0
+            try:
+                _manual_fees = float(_fetch_actual_fees(symbol, _open_ms, _qty * float(_exit_price or 0)) or 0.0)
+            except Exception as _fe:
+                logger.warning(f"[pm] {symbol} 手动平仓手续费查询失败，按 0 记: {_fe}")
             _record = {
                 "trade_id":          f"{_close_ms}_{symbol}",
                 "symbol":            symbol,
@@ -1334,9 +1342,7 @@ class PositionManager:
                 f"[pm] {symbol} {_inferred_close_reason} trade_log 已补写: "
                 f"exit={_exit_price:.6g} pnl={_real_pnl:+.4f}U close_reason={_inferred_close_reason}"
             )
-            # 补写熔断器盘口（[fix #44] 带实际手续费）
-            _manual_fees = _fetch_actual_fees(symbol, int(pos.get("open_time", 0) or 0),
-                                              float(pos.get("quantity", 0) or 0) * float(_exit_price or 0))
+            # 补写熔断器盘口（[fix #44] 带实际手续费，上面已取得）
             try:
                 _record_pnl(_real_pnl, symbol=symbol, fee=_manual_fees)
             except Exception:
