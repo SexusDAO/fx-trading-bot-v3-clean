@@ -1062,7 +1062,7 @@ def place_sl(symbol: str, side: str, position_side: str,
         #   现要求 symbol/side/positionSide(Hedge)/type/触发价(±0.1%)/数量(±1%) 全部匹配且唯一才认领；
         #   多个匹配或字段缺失无法核对 → 不认领，返回 {}（未确认），由调用方重新处理。
         try:
-            existing = _signed_get("/fapi/v1/algo/orders/open", {"symbol": symbol}) or {}
+            existing = _signed_get("/fapi/v1/openAlgoOrders", {"symbol": symbol}) or {}
             orders   = existing.get("orders", []) if isinstance(existing, dict) else []
             matched  = []
             for o in orders:
