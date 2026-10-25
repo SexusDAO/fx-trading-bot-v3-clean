@@ -789,6 +789,17 @@ def _ensure_files() -> None:
 _ensure_files()
 
 
+def list_orphan_patching() -> list:
+    """只读：返回孤儿 patching 记录（定义与 cleanup_orphan_patching 相同），供清理前关闭对应信号卡片。"""
+    with _locks["pos"]:
+        data = _load_pos()
+        return [
+            dict(p) for p in data
+            if p.get("status") == "patching"
+            and not any(q.get("symbol") == p.get("symbol") and q.get("status") == "open" for q in data)
+        ]
+
+
 def cleanup_orphan_patching() -> list:
     """
     清理孤儿 patching 记录。

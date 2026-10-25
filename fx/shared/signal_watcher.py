@@ -87,6 +87,25 @@ logger = logging.getLogger("fx.signal_watcher")
 # 数据结构
 # ─────────────────────────────────────────────────────────────────────────────
 
+_REORDER_KEEP_CARD_REASONS = ("清算区位移重新挂单",)   # 这类撤单随后会用同一 sig_id 重挂，卡片要保留供复用
+
+
+def _close_entry_card(entry, reason: str = "") -> None:
+    """撤单并删除 WatchEntry 后关闭对应信号卡片（卡片未发出则静默丢弃缓冲；已发出则清理缓存）。
+    重挂类撤单（_REORDER_KEEP_CARD_REASONS）跳过，避免新条目复用不到原卡片。永不抛异常。"""
+    try:
+        if any(k in (reason or "") for k in _REORDER_KEEP_CARD_REASONS):
+            return
+        sig_id = (getattr(entry, "signal", None) or {}).get("_sig_id", "") or ""
+        if not sig_id:
+            return
+        from shared.notifier import card_remove, discard_signal
+        discard_signal(sig_id)
+        card_remove(sig_id)
+    except Exception as _e:
+        logger.debug(f"[signal_watcher] 关闭信号卡片失败（非致命）: {_e}")
+
+
 @dataclass
 class WatchEntry:
     signal:      dict
@@ -2413,6 +2432,7 @@ class SignalWatcher:
                 return
             if not oid:
                 self._watched.pop(sym, None)   # 没有交易所订单，无需确认
+                _close_entry_card(entry, reason)
             else:
                 entry.cancel_state = "cancelling"
         if not oid:
@@ -2432,6 +2452,7 @@ class SignalWatcher:
                 entry.cancel_state = "cancel_unknown"
                 self._register_orphan(sym, oid, reason, entry, on_confirmed="remove")
         if outcome == "confirmed":
+            _close_entry_card(entry, reason)
             if self._ws_listener:
                 self._ws_listener.unsubscribe(sym)
             logger.info(f'[signal_watcher] {sym} 已撤单并移除: {reason}')

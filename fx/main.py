@@ -498,6 +498,12 @@ async def _loop_daily_maintenance() -> None:
         try:
             await _run_maintenance_script("reconcile_triggers.py", ["--dry-run"], "trigger_reconcile_auto.log")
             await _run_maintenance_script("cleanup_rejected_log.py", ["--days", "7"], "cleanup_rejected_log_auto.log")
+            try:
+                from shared.notifier import cleanup_stale_cards
+                _closed = await asyncio.to_thread(cleanup_stale_cards, 48 * 3600)
+                logger.info(f"[main] 孤儿卡片清理: 关闭 {len(_closed)} 张")
+            except Exception as _sce:
+                logger.warning(f"[main] 孤儿卡片清理失败（非致命）: {_sce}")
             logger.info("[main] 每日维护任务完成")
         except asyncio.CancelledError:
             raise
@@ -549,6 +555,20 @@ async def _sync_positions_on_startup() -> None:
     # ── 圆山 孤儿 patching 清理（问题34）——进程崩溃/网络异常可能导致 patching 永远不恢复，
     # 造成该标的无法再开仓。开机时一次性强制清理。
     try:
+        # 删除记录之前先关闭对应信号卡片（否则卡片永远悬在“补挂中”）
+        try:
+            from shared.state import list_orphan_patching
+            from shared.notifier import card_append as _ca, card_remove as _cr, _hhmm as _hm
+            for _op in list_orphan_patching():
+                _sid = _op.get("_sig_id", "")
+                if _sid:
+                    try:
+                        await asyncio.to_thread(_ca, _sid, f"\n⚠️ {_hm()} 开机自检：清除孤儿记录，监控结束")
+                    except Exception:
+                        pass
+                    _cr(_sid)
+        except Exception as _ce:
+            logger.warning(f"[startup_sync] 孤儿记录关闭卡片失败（非致命）: {_ce}")
         orphans = cleanup_orphan_patching()
         if orphans:
             logger.warning(f"[startup_sync] 广清孤儿 patching: {orphans}")

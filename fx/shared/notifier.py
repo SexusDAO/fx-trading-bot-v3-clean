@@ -547,6 +547,26 @@ def card_is_open(sig_id: str) -> bool:
         return False
 
 
+def cleanup_stale_cards(max_age_sec: float = 48 * 3600) -> list:
+    """关闭超过 max_age_sec 未更新的孤儿卡片：逐个追加一行说明后 card_remove。返回被清理的 sig_id 列表。
+    只处理内存缓存（它与 card_state.json 同步落盘；落盘文件里的过期条目会在下次保存时一并消失）。
+    单个卡片失败只记日志，不影响其余。同步函数（含网络调用），在事件循环里请用 to_thread 调用。"""
+    now = time.time()
+    stale = [sid for sid, v in _card_snapshot().items() if now - float((v or {}).get("ts", now)) > max_age_sec]
+    done = []
+    for sid in stale:
+        try:
+            card_append(sid, f"\n🗑️ {_hhmm()} 定时清理：卡片超过48小时，自动关闭")
+        except Exception as e:
+            logger.warning(f"[card] 定时清理追加失败 sig_id={sid}: {e}")
+        try:
+            card_remove(sid)
+            done.append(sid)
+        except Exception as e:
+            logger.warning(f"[card] 定时清理移除失败 sig_id={sid}: {e}")
+    return done
+
+
 def card_remove(sig_id: str) -> None:
     """信号结束后清理卡片缓存。"""
     _wait_inflight_flush(sig_id)   # [v3.97] 避免在途 flush 稍后又把已移除的卡片登记回来
