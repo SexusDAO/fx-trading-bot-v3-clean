@@ -843,6 +843,13 @@ class SignalWatcher:
                     (await asyncio.to_thread(card_append, _sig_id, _monitor_line))
             except Exception as _ne:
                 logger.debug(f"[signal_watcher] 信号卡片创建失败（非致命）: {_ne}")
+                # 卡片创建失败也要保证 signal 携带 _sig_id：下游预检/拒绝/告警按它追加卡片，
+                # 卡片不存在时 card_append 会降级为独立消息，不会丢通知
+                try:
+                    entry.signal.setdefault(
+                        "_sig_id", f"{symbol}_{entry.signal.get('_scan_ts') or int(time.time())}")
+                except Exception:
+                    pass
 
         # [v3.89 撤单检查] 锁外撤被驱逐条目的交易所挂单：确认终态，结果未知登记对账
         for _esy, _eoid, _eentry in _evict_cancel:

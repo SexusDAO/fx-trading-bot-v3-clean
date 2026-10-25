@@ -295,15 +295,16 @@ def _precheck(signal: dict) -> tuple[bool, str]:
             for p in _all_pos if p.get("status") in _nom_statuses and p.get("direction","").upper() == "SHORT"
         )
         _net_delta   = _long_nom - _short_nom
-        _delta_limit = _equity * NET_DELTA_MAX_PCT
+        _max_lev_delta = _get_max_leverage(symbol)
+        _delta_limit = _equity * _max_lev_delta * NET_DELTA_MAX_PCT
         if direction == "LONG" and _net_delta > _delta_limit:
             return False, (
-                f"净多头 Delta 过高: {_net_delta:.0f}U > {_delta_limit:.0f}U（权益{_equity:.0f}U×{NET_DELTA_MAX_PCT*100:.0f}%），"
+                f"净多头 Delta 过高: {_net_delta:.0f}U > {_delta_limit:.0f}U（权益{_equity:.0f}U×{_max_lev_delta}x×{NET_DELTA_MAX_PCT*100:.0f}%），"
                 f"限制新增多头（已计入 open+pending）"
             )
         elif direction == "SHORT" and (-_net_delta) > _delta_limit:
             return False, (
-                f"净空头 Delta 过高: {-_net_delta:.0f}U > {_delta_limit:.0f}U（权益{_equity:.0f}U×{NET_DELTA_MAX_PCT*100:.0f}%），"
+                f"净空头 Delta 过高: {-_net_delta:.0f}U > {_delta_limit:.0f}U（权益{_equity:.0f}U×{_max_lev_delta}x×{NET_DELTA_MAX_PCT*100:.0f}%），"
                 f"限制新增空头（已计入 open+pending）"
             )
     except Exception as _de:
@@ -1729,6 +1730,9 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
                 f"[executor] {symbol} 止损距离过小: {_sl_dist_pct*100:.3f}% < {_SL_DIST_MIN_PCT*100:.1f}%，"
                 f"拒绝开仓（防止名义仓位被反推至危险水平）"
             )
+            await _reject_card(signal, "止损距离过小，拒绝开仓",
+                               f"止损距离{_sl_dist_pct*100:.3f}% < {_SL_DIST_MIN_PCT*100:.1f}%",
+                               reason_key="sl_dist_too_small")
             return False
     if _sl_dist_pct > 0:
         _risk_notional = (total_bal * _RISK_PCT) / _sl_dist_pct
@@ -1903,6 +1907,8 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     quantity  = _round_qty(notional / entry_price, precision["step"])
     if quantity <= 0:
         logger.warning(f"[executor] {symbol} 计算数量异常: {quantity}")
+        await _reject_card(signal, "数量计算异常，拒绝开仓",
+                           f"quantity={quantity}", reason_key="qty_zero")
         return False
 
     # ── 步骤7：提交开仓限价单 ─────────────────────────────────────────────────
