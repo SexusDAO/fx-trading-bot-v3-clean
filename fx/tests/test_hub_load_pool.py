@@ -15,7 +15,7 @@ def test_config_scan_workers_is_4():
 
 
 def test_load_pool_definition():
-    assert H._LOAD_POOL._max_workers == 2 and H._LOAD_POOL._thread_name_prefix == "hub-load"
+    assert H._LOAD_POOL._max_workers == config.HUB_LOAD_MAX_WORKERS and H._LOAD_POOL._thread_name_prefix == "hub-load"
 
 
 def test_load_history_runs_in_load_pool_not_default_executor():

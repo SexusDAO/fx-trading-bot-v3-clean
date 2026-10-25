@@ -60,11 +60,12 @@ def test_trigger_flushes_monitor_and_trigger_lines_into_one_card(tg):
     async def go():
         w, sig, sid = await _register()
         await w._trigger("XUSDT", 100.0, w._watched["XUSDT"])
+        await asyncio.sleep(0.3)   # 触发卡片追加/flush 现为后台线程任务（2s 超时），等其完成
         return sid
     sid = asyncio.run(go())
     assert len(tg["sent"]) == 1                                                 # 只发出一条消息（一张卡片）
     assert tg["notify"] == []                                                   # 没有降级成独立消息
-    final = tg["edits"][-1]                                                     # 卡片最终文本
+    final = tg["sent"][0]                                                       # 卡片最终文本（flush 现为合并成一条消息一次发出，不再先发标题再编辑追加）
     assert "进入监控" in final and "价格触发" in final
     assert final.index("进入监控") < final.index("价格触发")
     assert sid not in N._signal_buffer._buf                                     # 缓冲区已清空
@@ -83,7 +84,8 @@ def test_signal_watcher_no_direct_card_create():
     src = (_fx / "shared" / "signal_watcher.py").read_text()
     assert not re.search(r"\bcard_create\b", src)
     assert "buffer_signal(_sig_id, _header)" in src
-    assert re.search(r"card_append\(_sig_id_t,[^\n]*\)\n(?:\s*#[^\n]*\n)*\s+flush_signal\(_sig_id_t\)", src)
+    # 触发卡片追加+flush 现封装在后台线程任务 _card_job 内：先 card_append 再 flush_signal
+    assert re.search(r"card_append\(_sid, _ln\)\n(?:\s*#[^\n]*\n)*\s+flush_signal\(_sid\)", src)
 
 
 def test_precheck_reject_appends_line_to_flushed_card(tg, monkeypatch):

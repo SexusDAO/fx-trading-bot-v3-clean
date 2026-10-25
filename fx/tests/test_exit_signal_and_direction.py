@@ -61,6 +61,12 @@ shared_notifier._hhmm = MagicMock(return_value="00:00")
 shared_notifier._CLOSE_REASON_CN = {}
 shared_notifier.fmt_hold_time = MagicMock(return_value="0min")
 shared_notifier.make_card_header = MagicMock(return_value="")
+# position_manager 后续新增导入的卡片/钉钉相关名字，桩里缺失会 ImportError
+shared_notifier.card_is_open = MagicMock(return_value=False)
+shared_notifier.card_get_text = MagicMock(return_value="")
+shared_notifier.dingtalk_trade_result = MagicMock()
+shared_notifier.build_close_summary = MagicMock(return_value="")
+shared_notifier.DINGTALK_CLOSE_REASONS = set()
 # [v3.89 TEST-2] position_manager / executor 新增导入的卡片格式化函数，桩里缺失会导致导入失败，
 #   且失败发生在 _restore_modules() 之前，空桩残留在 sys.modules，连带后续 4 个测试文件收集失败
 for _fn in ("fmt_node_tp1", "fmt_node_close", "fmt_node_sl_lost", "fmt_node_open",
@@ -112,7 +118,7 @@ def _make_pm():
     return pm
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)   # 全量运行时主线程可能已无当前事件循环，get_event_loop 会抛 RuntimeError
 
 def _make_pos(direction="SHORT", entry=2.0, tp1=1.6, fill_time_ago_min=60):
     import time

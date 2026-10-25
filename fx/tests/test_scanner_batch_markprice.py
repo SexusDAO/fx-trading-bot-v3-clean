@@ -32,7 +32,7 @@ def env(monkeypatch):
     monkeypatch.setattr(sc.api, "get_klines", lambda *a, **k: calls.__setitem__("klines", calls["klines"] + 1) or _klines())
     monkeypatch.setattr(sc.api, "get_mark_price",
                         lambda s: calls["mp"].append(s) or {"symbol": s, "markPrice": "100", "lastFundingRate": "0.0009"})
-    def fake_classify(symbol, chg24, funding, ind):
+    def fake_classify(symbol, chg24, funding, ind, **_kw):   # classify 现带 stock_closed 等关键字参数
         raise _Stop(funding)
     monkeypatch.setattr(sc, "classify", fake_classify)
     return calls
@@ -73,7 +73,7 @@ def test_run_scan_builds_map_once_and_passes_it():
     assert "_mark_price_map[_ms] = _m" in src
     assert "partial(analyze_symbol, mark_price_map=_mark_price_map)" in src
     assert "_mkt_mode, _mark_price_map)" not in src   # 不能再位置传 map（会与 deadline 冲突）
-    assert src.count("(mark_price_map or {}).get(symbol)") == 1
+    assert src.count("(mark_price_map or {}).get(symbol)") == 3   # scanner.py 现有 3 处读取点
 
 
 def test_run_scan_call_pattern_no_deadline_conflict(env):

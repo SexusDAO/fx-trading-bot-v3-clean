@@ -55,8 +55,8 @@ class TestFreshness(unittest.TestCase):
 
     def test_future_tolerance(self):
         w = self._w()
-        self.assertTrue(w._event_acceptable("A", _ms(+1)))        # 容差 2s 内
-        self.assertFalse(w._event_acceptable("B", _ms(+5)))
+        self.assertTrue(w._event_acceptable("A", _ms(+1)))        # 容差内（_EVT_FUTURE_TOL_MS=15s，Binance 服务器时间可比本机快约 13s）
+        self.assertFalse(w._event_acceptable("B", _ms(+20)))
         self.assertEqual(w._evt_drop.get("future"), 1)
 
     def test_out_of_order_dropped_but_equal_ts_ok(self):

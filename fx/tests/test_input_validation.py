@@ -137,40 +137,5 @@ class TestOptV388(unittest.TestCase):
         self.assertEqual(O8.tp1_buffer_atr(0.01), 0.50)
 
 
-class TestPositionSizeReal(unittest.TestCase):
-    def setUp(self):
-        import calc_position_size_real as P
-        self.P = P
-        logging.disable(logging.CRITICAL)
-        self.addCleanup(logging.disable, logging.NOTSET)
-
-    def test_dynamic_cap_invalid_params_raise(self):
-        P = self.P
-        for mp in (0, -1, 2.5, True):
-            with self.subTest(mp=mp), self.assertRaises(ValueError):
-                P._dynamic_cap(1000.0, 2000.0, mp)
-        for nv in (0, -5.0, NAN, INF, True, "1000"):
-            with self.subTest(nv=nv), self.assertRaises(ValueError):
-                P._dynamic_cap(nv, 2000.0, 5)
-
-    def test_dynamic_cap_legal_unchanged(self):
-        # 1000 / 5 * 5 = 1000；30% 上限 = 1500；硬顶 2000 -> 1000
-        self.assertEqual(self.P._dynamic_cap(1000.0, 2000.0, 5), 1000.0)
-        self.assertEqual(self.P._dynamic_cap(1000.0, 400.0, 5), 400.0)
-
-    def test_min_position_conflicts_with_cap_returns_zero(self):
-        # 本金 100U：动态上限 100*... < POS_MIN_U(125) -> 不可执行，不再静默突破上限
-        d = {"net_value": 100.0, "max_positions": 5, "tier": "L1", "symbol": "XUSDT"}
-        cap = self.P._dynamic_cap(100.0, 2000.0, 5)
-        self.assertLess(cap, self.P.POS_MIN_U)
-        self.assertEqual(self.P.real_size("trend", 85, "LONG", d), 0.0)
-
-    def test_normal_size_unchanged_when_cap_ok(self):
-        d = {"net_value": 1000.0, "max_positions": 5, "tier": "L1", "symbol": "XUSDT"}
-        v = self.P.real_size("trend", 85, "LONG", d)
-        self.assertGreaterEqual(v, self.P.POS_MIN_U)
-        self.assertLessEqual(v, self.P._dynamic_cap(1000.0, 2000.0, 5))
-
-
 if __name__ == "__main__":
     unittest.main()

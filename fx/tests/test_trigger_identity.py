@@ -36,8 +36,11 @@ class TestTriggerPopIdentity(unittest.TestCase):
 
         async def run():
             async def on_trig(sig):
-                # 执行期间同品种被替换成新条目
-                await w.add_signal(_sig("new"), replace=True, **_kw(is_reorder=True))
+                # 执行期间同品种被替换成新条目。
+                # _trigger 现在持有品种锁调用 on_trigger，回调里再走 add_signal 会等同一把锁，
+                # 这里直接替换 _watched 中的条目来模拟「被重挂/淘汰替换」。
+                import dataclasses
+                w._watched["XUSDT"] = dataclasses.replace(w._watched["XUSDT"], signal=_sig("new"))
             await w.add_signal(_sig("old"), **_kw(on_trigger=on_trig))
             old = w._watched["XUSDT"]
             await w._trigger("XUSDT", 100.0, old)
