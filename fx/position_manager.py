@@ -1426,13 +1426,34 @@ class PositionManager:
                     algo_ids = {int(o.get("algoId", 0)) for o in (algo_orders or [])}
                     sl_exists = int(sl_order_id) in algo_ids
                     if not sl_exists:
-                        # 先检查实际持仓,再决定是重挂还是标记已平仓
-                        live_pos = await asyncio.get_running_loop().run_in_executor(
-                            None, lambda: api.get_position(symbol)
-                        )
-                        live_qty = sum(abs(float(p.get("positionAmt", 0)))
-                                      for p in (live_pos or [])
-                                      if p.get("symbol") == symbol)
+                        # SL 不在交易所：先确认持仓是否真的清零，再决定是重挂还是标记已平仓。
+                        # 持仓查询失败（网络超时等）或返回空，不能当作「持仓为零」，
+                        # 否则会在网络故障时误判 SL 已触发而强制平仓；跳过本次判定，等下一轮巡检。
+                        try:
+                            live_pos = await asyncio.get_running_loop().run_in_executor(
+                                None, lambda: api.get_position(symbol)
+                            )
+                        except Exception as _lp_e:
+                            logger.warning(
+                                f"[pm] {symbol} SL 不在交易所且持仓查询失败({_lp_e})，"
+                                f"跳过本次判定，等下一轮巡检确认"
+                            )
+                            return
+                        if live_pos is None or live_pos == []:
+                            logger.warning(
+                                f"[pm] {symbol} SL 不在交易所但持仓查询返回空，"
+                                f"跳过本次判定，等下一轮巡检确认"
+                            )
+                            return
+                        _sym_rows = [p for p in live_pos if p.get("symbol") == symbol]
+                        if not _sym_rows:
+                            # 返回了数据但没有该标的的条目：同样无法证明持仓为零
+                            logger.warning(
+                                f"[pm] {symbol} SL 不在交易所，持仓查询结果中无该标的条目，"
+                                f"跳过本次判定，等下一轮巡检确认"
+                            )
+                            return
+                        live_qty = sum(abs(float(p.get("positionAmt", 0))) for p in _sym_rows)
                         if live_qty == 0:
                             logger.info(f"[pm] {symbol} SL 已触发成交(实际持仓为零),标记已平仓")
                             await self._force_close(pos, "sl_triggered")
