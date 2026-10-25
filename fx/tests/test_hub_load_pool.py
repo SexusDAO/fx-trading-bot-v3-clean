@@ -1,4 +1,4 @@
-"""hub 历史拉取使用专用线程池；SCAN_MAX_WORKERS=4（mock）。"""
+"""hub 历史拉取使用专用线程池；SCAN_MAX_WORKERS=6（mock）。"""
 import asyncio
 import sys
 import threading
@@ -11,7 +11,7 @@ from shared import market_data_hub as H
 
 
 def test_config_scan_workers_is_4():
-    assert config.SCAN_MAX_WORKERS == 4
+    assert config.SCAN_MAX_WORKERS == 6
 
 
 def test_load_pool_definition():

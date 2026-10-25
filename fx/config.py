@@ -316,8 +316,8 @@ ORDER_EXPIRE_PULLBACK_MIN = 240   # 回踩/反转挂单超时，分钟
 
 # 扫描超时保护
 SCAN_SYMBOL_TIMEOUT_SEC   = 10    # 单标的分析超时（秒），超时跳过
-SCAN_TOTAL_TIMEOUT_SEC    = 120   # 整轮扫描总超时（秒）；v3.26: 240→120，并发25线程理论8~12s
-SCAN_MAX_WORKERS          = 4     # 并行分析线程数（10→4：降低 GIL 竞争导致事件循环阻塞）；v3.82: 25→10，控制并发内存峰值（25线程×11MB=275MB峰值，pymalloc不归还导致水位积累至3.5GB）
+SCAN_TOTAL_TIMEOUT_SEC    = 180   # 整轮扫描总超时（秒）；v3.26: 240→120，并发25线程理论8~12s
+SCAN_MAX_WORKERS          = 6     # 并行分析线程数（10→4：降低 GIL 竞争导致事件循环阻塞）；v3.82: 25→10，控制并发内存峰值（25线程×11MB=275MB峰值，pymalloc不归还导致水位积累至3.5GB）
 FUNDING_ARB_SCAN_WORKERS = 8  # funding_arb并发扫描线程数，降低SSL并发防止阻塞事件循环
 SCAN_USE_PROCESS_POOL     = False  # True：并行分析走 spawn 进程池（shared/analysis_worker.py）；False：保持线程池（默认）
 SCAN_KLINE_TIMING       = True  # 是否统计 K 线请求耗时（每轮 info 一条汇总），生产环境建议开启

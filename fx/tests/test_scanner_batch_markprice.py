@@ -35,6 +35,10 @@ def env(monkeypatch):
     def fake_classify(symbol, chg24, funding, ind, **_kw):   # classify 现带 stock_closed 等关键字参数
         raise _Stop(funding)
     monkeypatch.setattr(sc, "classify", fake_classify)
+    # 逐标的资金费结算窗口（UTC 23:40~00:00 等）会让 analyze_symbol 提前返回 None，导致测试随运行时刻波动；
+    # 本文件只测标记价格复用，关闭该窗口检查
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "OPT_FUNDING_WINDOW_PER_SYMBOL", False, raising=False)
     return calls
 
 

@@ -35,6 +35,32 @@ _MODE_CONFIRM_ROUNDS = 2  # bear→range/bull 需连续几轮才切换
 # ═══════════════════════════════════════════════════════════════════════════════
 # 市场模式判断（BTC 4H EMA20 / EMA50 / MA99）
 # ═══════════════════════════════════════════════════════════════════════════════
+def _btc_klines(interval: str, limit: int) -> list:
+    """BTC K线：优先读 hub 缓存（无网络、不占线程），hub 未就绪/未订阅/历史不足 limit/数据过旧返回 None 时回退 REST。"""
+    try:
+        from shared.market_data_hub import get_klines as hub_get_klines
+        k = hub_get_klines("BTCUSDT", interval, limit)
+        if k:
+            return k
+    except Exception:
+        pass
+    from shared import binance_api as api
+    return api.get_klines("BTCUSDT", interval, limit=limit)
+
+
+def _btc_mark_price() -> dict:
+    """BTC 标记价（含 lastFundingRate）：优先读 hub；hub 返回 None 或缺资金费率字段时回退 REST。"""
+    try:
+        from shared.market_data_hub import get_mark_price as hub_get_mark_price
+        md = hub_get_mark_price("BTCUSDT")
+        if md and md.get("lastFundingRate") is not None:
+            return md
+    except Exception:
+        pass
+    from shared import binance_api as api
+    return api.get_mark_price("BTCUSDT")
+
+
 def get_market_mode() -> str:
     """
     返回当前市场模式：bull / bear / range
@@ -48,7 +74,7 @@ def get_market_mode() -> str:
     try:
         from shared import binance_api as api
         from config import MARKET_MODE_EMA_FAST, MARKET_MODE_EMA_MID, MARKET_MODE_EMA_SLOW
-        k4h = api.get_klines("BTCUSDT", "4h", limit=120)
+        k4h = _btc_klines("4h", 120)
         closes = [float(k[4]) for k in k4h]
         if not closes:
             raise ValueError("empty klines")
@@ -556,7 +582,7 @@ def get_market_cycle_phase() -> str:
     try:
         from shared import binance_api as api
 
-        k4h    = api.get_klines("BTCUSDT", "4h", 120)
+        k4h    = _btc_klines("4h", 120)
         closes = [float(k[4]) for k in k4h]
         if len(closes) < 50:
             return "range"
@@ -574,7 +600,7 @@ def get_market_cycle_phase() -> str:
         rsi    = 100 - 100 / (1 + ag / al) if al > 0 else 100
 
         # 资金费率
-        md      = api.get_mark_price("BTCUSDT")
+        md      = _btc_mark_price()
         funding = float(md.get("lastFundingRate", 0))
 
         # 判断阶段
@@ -1049,7 +1075,7 @@ def check_market_shock(notifier_fn=None) -> bool:
     # 赋予未闭合K线较低阈值（默认为3%），减少熔断最多落后0~60分钟的延迟
     try:
         from shared import binance_api as _api
-        klines = _api.get_klines("BTCUSDT", "1h", limit=3)
+        klines = _btc_klines("1h", 3)
         if len(klines) >= 2:
             # 已闭合K线：默认阈值
             k = klines[-2]
