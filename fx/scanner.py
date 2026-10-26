@@ -208,9 +208,21 @@ def _get_all_mark_prices_list() -> list:
     return api.get_all_mark_prices()
 
 
+_HUB_SUBSCRIBE_HOLD = False   # 启动分批：P4 之前为 True，暂缓首次 K 线订阅（订阅会触发历史 K 线 REST 加载）
+
+
+def set_hub_subscribe_hold(hold: bool) -> None:
+    """main 启动分批用：True=暂缓 hub K 线订阅，False=放开。默认放开（run_once/回测等不受影响）。"""
+    global _HUB_SUBSCRIBE_HOLD
+    _HUB_SUBSCRIBE_HOLD = bool(hold)
+
+
 def _hub_subscribe_klines(symbols) -> None:
     """把本轮候选池交给 hub 订阅 K 线（hub 关闭时不做任何事）。"""
     if not _hub_enabled():
+        return
+    if _HUB_SUBSCRIBE_HOLD:
+        logger.debug("[hub] 启动分批 P4 前暂缓 K 线订阅")
         return
     try:
         from shared import market_data_hub as _hub

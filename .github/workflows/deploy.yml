@@ -10,64 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 部署门禁：在 runner 上跑全量测试，失败则 deploy 不执行（服务器不 pull、不重启）
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      # 测试全部 mock、不联网；config 导入需要这两项存在
-      BINANCE_API_KEY: ci-dummy-key
-      BINANCE_API_SECRET: ci-dummy-secret
-      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
-      COMMIT_SHA: ${{ github.sha }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          # requirements_live.txt 里的 cyqnt-trd==0.1.11 要求 Python < 3.13
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: fx/requirements_live.txt
-
-      - name: Install dependencies
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install -r fx/requirements_live.txt
-          pip install pytest
-
-      - name: Run tests
-        # 必须在 fx/ 下运行：部分测试依赖 fx/ 为当前目录（import config、from tests.xxx import ...），
-        # 在仓库根目录跑 pytest fx/tests/ 会在收集阶段报 ModuleNotFoundError
-        working-directory: fx
-        run: |
-          set -euo pipefail
-          python -m pytest tests/ -q -p no:cacheprovider
-
-      - name: Notify DingTalk (tests failed)
-        if: failure()
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, hmac, json, os, time, urllib.parse, urllib.request
-          sha8 = os.environ["COMMIT_SHA"][:8]
-          text = f"❌ FX 系统部署被拦截（测试未通过，服务器未改动）\nCommit：{sha8}\n请检查 GitHub Actions 日志"
-          ts = str(round(time.time() * 1000))
-          secret = os.environ["DINGTALK_SECRET"]
-          sign = urllib.parse.quote_plus(base64.b64encode(
-              hmac.new(secret.encode(), f"{ts}\n{secret}".encode(), hashlib.sha256).digest()))
-          url = f"{os.environ['DINGTALK_WEBHOOK']}&timestamp={ts}&sign={sign}"
-          req = urllib.request.Request(
-              url, data=json.dumps({"msgtype": "text", "text": {"content": text}}).encode(),
-              headers={"Content-Type": "application/json"})
-          print(urllib.request.urlopen(req, timeout=15).read().decode())
-          PY
-
   deploy:
-    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:

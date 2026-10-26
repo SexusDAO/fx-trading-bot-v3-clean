@@ -327,6 +327,11 @@ KLINE_REQUEST_TIMEOUT   = (3, 5)  # (connect_s, read_s)：K 线单次 HTTP 请�
 KLINE_REQUEST_MAX_RETRY = 1       # K 线请求最多重试次数（总尝试 = 1 + 此值）
 MARKET_DATA_HUB_ENABLED = True   # 公共市场数据 WS 中心（阶段一：全市场标记价/资金费率）；False 时行为与未引入 hub 前完全一致；hub 未就绪/过旧时 scanner 自动回落 REST
 HUB_LOAD_MAX_WORKERS = 4  # hub历史K线加载并发上限
+# ── 启动分批初始化（避免重启瞬间并发大量 REST 触发 Binance -1003 限频/IP 封禁）──
+# P1 立即：get_account 校验 + 持仓模式；P2：持仓/挂单对齐；P3：OI 缓存 + 系统性风险；P4：hub K 线订阅/清算区预热/扫描等非关键初始化
+STARTUP_BATCH_DELAY_P2 = 5    # P1 → P2 等待秒数
+STARTUP_BATCH_DELAY_P3 = 8    # P2 → P3 等待秒数
+STARTUP_BATCH_DELAY_P4 = 12   # P3 → P4 等待秒数
 HUB_NO_MSG_TIMEOUT = 180  # 120→180：给历史加载留余量，减少阻塞引发的假断线； WebSocket 无消息超时（秒），过短会因GIL饿死误触发重连
 KLINE_FETCH_CONCURRENCY = 4  # hub历史K线REST拉取并发上限
 HUB_KLINE_FETCH_TIMEOUT = 8.0  # hub 单次历史K线拉取总时限（秒），超时按空结果处理、30s 后重试

@@ -649,8 +649,8 @@ async def _sync_positions_on_startup() -> None:
         # ── 拉取真实持仓 ──────────────────────────────────────────────────────
         # [fix #2] 查询失败（ApiQueryError）≠ 交易所无持仓：直接中止对齐，不做任何清理
         try:
-            pos_risk = _bapi.get_position()  # 走 binance_api 封装：_retry + Session + key 轮询
-            open_orders = _bapi.get_open_orders()
+            pos_risk = await asyncio.to_thread(_bapi.get_position)  # 走 binance_api 封装：_retry + Session + key 轮询
+            open_orders = await asyncio.to_thread(_bapi.get_open_orders)
         except Exception as _qe:
             logger.error(f"[startup_sync] 查询交易所持仓/挂单失败，本次对齐中止（不清理、不补挂）: {_qe}")
             try:
@@ -673,7 +673,7 @@ async def _sync_positions_on_startup() -> None:
 
         # ── v3.56: 拉取 Algo 止损单（SL），检查 SL 是否仍在交易所 ──────────────
         try:
-            _algo_orders = _bapi.get_algo_open_orders() or []
+            _algo_orders = (await asyncio.to_thread(_bapi.get_algo_open_orders)) or []
         except Exception as _ae:
             logger.warning(f"[startup_sync] 拉取 algo 止损单失败: {_ae}")
             _algo_orders = []
@@ -838,6 +838,55 @@ async def _verify_hedge_mode_or_exit() -> None:
     logger.info("[main] 持仓模式校验通过：对冲模式")
 
 
+async def _startup_p1_validate_account() -> None:
+    """[启动分批 P1] 校验 API key：get_account 只调用一次。
+    失败（含限频/网络抖动/返回空）只告警并继续，不阻断启动（持仓模式检查另有独立策略）。"""
+    from shared import binance_api as _b
+    loop = asyncio.get_running_loop()
+    try:
+        acc = await loop.run_in_executor(None, _b.get_account)
+    except Exception as e:
+        logger.warning(f"[main] P1 API key 校验异常（告警后继续）: {str(e)[:120]}")
+        return
+    if not acc:
+        logger.warning("[main] P1 API key 校验：get_account 返回空（可能限频/网络/key 无权限），告警后继续")
+        return
+    logger.info("[main] P1 API key 校验通过")
+
+
+async def _startup_wait(batch: str, cfg_name: str, default: float) -> float:
+    """[启动分批] 批次间等待；返回实际等待秒数。配置缺失/非法时用默认值，<=0 不等待。"""
+    try:
+        import config as _c
+        sec = float(getattr(_c, cfg_name, default))
+    except Exception:
+        sec = float(default)
+    if sec > 0:
+        logger.info(f"[main] 启动分批：等待 {sec:g}s 后进入 {batch}（{cfg_name}）")
+        await asyncio.sleep(sec)
+    return max(sec, 0.0)
+
+
+def _startup_p3_warm() -> None:
+    """[启动分批 P3] 预热 OI 缓存（读盘建立内存快照，不额外发 REST）并做首次系统性风险检查。
+    任何异常只记日志，不影响启动（扫描阶段仍会再次检查）。"""
+    try:
+        from shared import state as _st
+        _oi = _st._load_oi_cache()
+        logger.info(f"[main] P3 OI 缓存已加载: {len(_oi or {})} 个标的")
+    except Exception as e:
+        logger.warning(f"[main] P3 OI 缓存预热失败（忽略）: {e}")
+    try:
+        from shared.risk_manager import check_systemic_risk
+        ok, reason = check_systemic_risk()
+        if ok:
+            logger.info("[main] P3 系统性风险检查通过")
+        else:
+            logger.warning(f"[main] P3 系统性风险检查未通过：{reason}（扫描阶段将跳过开仓）")
+    except Exception as e:
+        logger.warning(f"[main] P3 系统性风险检查异常（忽略）: {e}")
+
+
 async def main() -> None:
     logger.info("[main] fx 交易系统 V3.0 启动")
     logger.info(f"CPU核心数: {os.cpu_count()}")
@@ -845,7 +894,16 @@ async def main() -> None:
                 f"loop={type(asyncio.get_running_loop()).__name__}")
     import config as _cfg_req
     _cfg_req.require_env()   # [fix #39] 必填项缺失直接报错退出
+    # ── 启动分批 P1（立即）：API key 校验 + 持仓模式 ────────────────────────
+    #   P2/P3/P4 见下文；批次间延迟见 config.STARTUP_BATCH_DELAY_P2/P3/P4
+    await _startup_p1_validate_account()
     await _verify_hedge_mode_or_exit()
+    # hub 先启动（建 WS 连接），但推迟首次 K 线订阅（订阅即触发历史 K 线 REST 加载），P4 再放开
+    try:
+        import scanner as _scn_hold
+        _scn_hold.set_hub_subscribe_hold(True)
+    except Exception as _he:
+        logger.warning(f"[main] 设置 hub 订阅延迟失败（忽略）: {_he}")
 
     # ── 临时诊断（定位后删除）────────────────────────────────────────────────
     # 启动事件循环看门狗线程：检测阻塞 > 2s 时 dump 所有线程堆栈
@@ -905,6 +963,8 @@ async def main() -> None:
     except Exception as e:
         logger.warning(f"[main] 分析进程池预热异常（忽略）: {e}")
 
+    # ── 启动分批 P2（P1 之后等待 STARTUP_BATCH_DELAY_P2）：持仓/挂单对齐 ───────
+    await _startup_wait("P2", "STARTUP_BATCH_DELAY_P2", 5)
     # ── 1.5 启动时对齐持仓状态 ─────────────────────────────────────────────
     await _sync_positions_on_startup()
 
@@ -949,12 +1009,32 @@ async def main() -> None:
     await signal_watcher.start_btc_guard(300) # 每5min 检查 BTC 大跌护卫
     logger.info("[main] SignalWatcher 初始化完成（WS + REST + recheck + btc_guard）")
 
-    # ── 4. 启动定时任务 ────────────────────────────────────────────────────
+    # ── 持仓维护任务（P2 内启动：止损/止盈/巡检；自带首次 sleep）──
+    tasks = [
+        # ── 临时诊断（定位后删除）────────────────────────────────────────────
+        asyncio.create_task(_loop_heartbeat(),                                  name="heartbeat"),
+        # ── 优先级 1：持仓维护（止损/止盈/巡检） ───────────────────────────────
+        asyncio.create_task(_adjust_sl_tp_loop_static(),                       name="adjust_sl_tp"),
+        asyncio.create_task(_loop_patrol(300, 30),                             name="patrol"),
+    ]
+
+    # ── 启动分批 P3（P2 之后等待 STARTUP_BATCH_DELAY_P3）：OI 缓存 + 系统性风险 ──
+    await _startup_wait("P3", "STARTUP_BATCH_DELAY_P3", 8)
+    await asyncio.get_running_loop().run_in_executor(None, _startup_p3_warm)
+
+    # ── 启动分批 P4（P3 之后等待 STARTUP_BATCH_DELAY_P4）：hub K 线订阅 / 清算区预热 / 扫描等 ──
+    await _startup_wait("P4", "STARTUP_BATCH_DELAY_P4", 12)
+    try:
+        import scanner as _scn_rel
+        _scn_rel.set_hub_subscribe_hold(False)
+        logger.info("[main] P4 已放开 hub K 线订阅（历史 K 线开始加载）")
+    except Exception as _he:
+        logger.warning(f"[main] 放开 hub 订阅失败（忽略）: {_he}")
+
     # ── 3.5 启动 liq_cache 后台刷新线程（每15分钟批量预热清算区缓存）──────────────
     try:
         from shared.liq_cache import start_bg_refresh
         import scanner as _scanner_mod
-        # 从 candidate_pool.json 读取当前候选池列表
         import json as _json
         from pathlib import Path as _Path
         _pool_file = _Path(__file__).parent / "logs" / "candidate_pool.json"
@@ -968,14 +1048,7 @@ async def main() -> None:
     except Exception as _lce:
         logger.warning(f"[main] liq_cache 启动失败（非致命）: {_lce}")
 
-    tasks = [
-        # ── 临时诊断（定位后删除）────────────────────────────────────────────
-        asyncio.create_task(_loop_heartbeat(),                                  name="heartbeat"),
-        # ── 优先级 1：持仓维护（止损/止盈/巡检） ───────────────────────────────
-        asyncio.create_task(_adjust_sl_tp_loop_static(),                       name="adjust_sl_tp"),
-        asyncio.create_task(_loop_patrol(300, 30),                             name="patrol"),
-        # ── 优先级 2：挂单维护（recheck/btc_guard 已在 signal_watcher 内部 task） ─
-        # （signal_watcher.start_recheck / start_btc_guard 已在上方启动）
+    tasks += [
         # ── 优先级 3：市场信号扫描 ────────────────────────────────────────────────
         asyncio.create_task(_loop_scan(300, signal_watcher=signal_watcher, ws_listener=ws), name="scan"),
         asyncio.create_task(_loop_funding_arb(1800, signal_watcher=signal_watcher), name="funding_arb"),

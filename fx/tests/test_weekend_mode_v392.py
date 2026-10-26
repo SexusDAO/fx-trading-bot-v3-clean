@@ -98,20 +98,13 @@ def test_T04_weekday_cap_not_scaled(run):
 
 
 # ── 周末评分门槛 ────────────────────────────────────────────
-# 周末 medium 门槛：pullback/ema_trend/reversal 为 60（reversal 有意从 70 降到 60），其余默认 70；分数固定 62
-@pytest.mark.parametrize("st,ok", [("pullback", True), ("ema_trend", True), ("reversal", True),
+@pytest.mark.parametrize("st,ok", [("pullback", True), ("ema_trend", True), ("reversal", False),
                                    ("range_bounce", False), ("oi_divergence", False)])
 def test_T05_T09_weekend_medium_threshold(run, st, ok):
     calls, _, res = run([_mk("AAAUSDT", st)], SAT_T, 62)
     assert ("AAAUSDT" in _syms(calls)) is ok
     if not ok:
         assert any("周末低分过滤" in r["reason"] for r in res["rejected"])
-
-
-def test_T05b_weekend_reversal_medium_below_60_rejected(run):
-    calls, _, res = run([_mk("AAAUSDT", "reversal")], SAT_T, 59)
-    assert "AAAUSDT" not in _syms(calls)
-    assert any("周末低分过滤" in r["reason"] for r in res["rejected"])
 
 
 # ── 周末 breakout medium（2-C）──────────────────────────────

@@ -109,8 +109,7 @@ def _git_commit8() -> str:
 def _startup_text(now: datetime | None = None, commit: str | None = None) -> str:
     now = now or datetime.now(timezone.utc)
     return (f"🚀 FX 交易系统已启动\n时间：{now.strftime('%H:%M')} UTC\n"
-            f"版本：{commit if commit is not None else _git_commit8()}\n"
-            f"CPU核数：{os.cpu_count()}")
+            f"版本：{commit if commit is not None else _git_commit8()}")
 
 
 def _is_abnormal_exit(exit_code, mem_restart: bool) -> bool:

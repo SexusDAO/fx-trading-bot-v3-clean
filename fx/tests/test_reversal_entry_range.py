@@ -1,4 +1,4 @@
-"""reversal 触发区间改用 ATR 维度 + 存活检查反向阈值 0.6ATR（SHORT 涨破 / LONG 跌破触发价才撤单）。
+"""reversal 触发区间改用 ATR 维度 + 存活检查反向阈值 1ATR。
 运行：cd fx && BINANCE_API_KEY=x BINANCE_API_SECRET=y python3 -m pytest -q tests/test_reversal_entry_range.py
 """
 import os, sys, time
@@ -91,44 +91,35 @@ def test_old_pct_range_would_have_instant_triggered():
     assert not _entry("SHORT").price_in_range(mark)
 
 
-# ── _survival_check 反向阈值 0.6ATR（[v2-9]：SHORT 涨破触发价+0.6ATR、LONG 跌破触发价-0.6ATR 才撤单）──────
+# ── _survival_check 反向阈值 1ATR ────────────────────────────────────────────
 def _surv(entry, price, rsi):
     return sw.SignalWatcher._survival_check(entry, price, rsi, ATR)
 
 
-def test_short_up_0_5atr_keeps_order():
-    cancel, _ = _surv(_entry("SHORT"), ENTRY + 0.5 * ATR, rsi=70)
+def test_short_reverse_0_9atr_keeps_order():
+    cancel, _ = _surv(_entry("SHORT"), ENTRY - 0.9 * ATR, rsi=70)
     assert cancel is False
 
 
-def test_short_up_0_7atr_cancels():
-    cancel, reason = _surv(_entry("SHORT"), ENTRY + 0.7 * ATR, rsi=70)
-    assert cancel is True and "0.6ATR" in reason and "1ATR" not in reason.replace("0.6ATR", "")
+def test_short_reverse_1_1atr_cancels():
+    cancel, reason = _surv(_entry("SHORT"), ENTRY - 1.1 * ATR, rsi=70)
+    assert cancel is True and "1ATR" in reason and "0.5ATR" not in reason
 
 
-def test_short_down_move_does_not_cancel():
-    """SHORT 价格往有利方向（下跌）走不会被存活检查撤单（RSI 仍高于门槛时）。"""
-    assert _surv(_entry("SHORT"), ENTRY - 1.1 * ATR, rsi=70)[0] is False
-
-
-def test_long_down_0_5atr_keeps_order():
-    cancel, _ = _surv(_entry("LONG"), ENTRY - 0.5 * ATR, rsi=30)
+def test_long_reverse_0_9atr_keeps_order():
+    cancel, _ = _surv(_entry("LONG"), ENTRY + 0.9 * ATR, rsi=30)
     assert cancel is False
 
 
-def test_long_down_0_7atr_cancels():
-    cancel, reason = _surv(_entry("LONG"), ENTRY - 0.7 * ATR, rsi=30)
-    assert cancel is True and "0.6ATR" in reason and "1ATR" not in reason.replace("0.6ATR", "")
-
-
-def test_long_up_move_does_not_cancel():
-    assert _surv(_entry("LONG"), ENTRY + 1.1 * ATR, rsi=30)[0] is False
+def test_long_reverse_1_1atr_cancels():
+    cancel, reason = _surv(_entry("LONG"), ENTRY + 1.1 * ATR, rsi=30)
+    assert cancel is True and "1ATR" in reason and "0.5ATR" not in reason
 
 
 def test_survival_uses_trigger_atr_not_current():
-    e = _entry("SHORT", atr_at_trigger=20.0)       # 触发时 ATR=20 → 阈值 ENTRY+12
-    assert _surv(e, ENTRY + 10, rsi=70)[0] is False
-    assert _surv(e, ENTRY + 13, rsi=70)[0] is True
+    e = _entry("SHORT", atr_at_trigger=20.0)       # 触发时 ATR=20 → 阈值 ENTRY-20
+    assert _surv(e, ENTRY - 15, rsi=70)[0] is False
+    assert _surv(e, ENTRY - 21, rsi=70)[0] is True
 
 
 def test_default_half_width_below_degraded_offset():
