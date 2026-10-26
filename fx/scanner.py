@@ -2017,6 +2017,27 @@ _POOL_OI_WORKERS = 6
 _POOL_OI_TOTAL_TIMEOUT_SEC = 90.0
 
 
+# ── 大户持仓多空比影子记录（只写日志，不影响评分、不影响信号是否发出）─────────────
+def _log_top_trader_shadow(signals: list) -> int:
+    """对最终通过的信号逐个拉大户持仓比并写一行 info 日志；任何异常都吞掉。返回成功写日志的条数。"""
+    n = 0
+    for sig in signals or []:
+        try:
+            from shared.clawby_adapter import get_top_trader_ratio
+            sym = sig.get("symbol", "")
+            r = get_top_trader_ratio(sym)
+            if not r:
+                continue
+            logger.info(f"[top_trader] {sym} {sig.get('direction', '')} "
+                        f"大户多头={r['top_position_long_percent']:.1f}% "
+                        f"空头={r['top_position_short_percent']:.1f}% "
+                        f"比值={r['top_position_long_short_ratio']:.2f}")
+            n += 1
+        except Exception as e:
+            logger.debug(f"[top_trader] 影子记录异常（忽略）: {e}")
+    return n
+
+
 # ── 代币解锁风险过滤（只影响 LONG）─────────────────────────────────────────────
 def _check_unlock_risk(symbol: str, direction: str, now_ms: float = None):
     """返回 (命中?, 说明)。窗口按 UTC 日历天（今天起 UNLOCK_FILTER_DAYS 天内，含今天）；
@@ -3171,6 +3192,9 @@ def _filter_and_register_signals(
     ))
 
     result["signals_final"] = len(avail_signals)
+
+    # 大户持仓多空比影子记录：评分、槽位筛选都已完成，只写日志（失败不影响信号）
+    _log_top_trader_shadow(avail_signals)
 
     # ── 市场环境快照：注入所有信号（用于 trade_log 标注）─────────────────────
     try:

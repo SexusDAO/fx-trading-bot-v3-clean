@@ -926,6 +926,35 @@ def get_liq_orders(symbol: str, exchange: str = "Binance",
         _cache_set(key, result)
     return result
 
+# ── 大户持仓多空比（影子记录用，不参与评分）──────────────────────────────────
+def get_top_trader_ratio(symbol: str, exchange: str = "Binance",
+                         interval: str = "1h", limit: int = 5):
+    """大户持仓多空比最新一条：{top_position_long_percent, top_position_short_percent, top_position_long_short_ratio, time}。
+    数据源 Clawby futures_top_long_short_position_ratio_history（串行、不重试，无 CG 兜底）；
+    失败/空/字段异常返回 None（不缓存失败）；成功缓存 15 分钟。"""
+    sym = _sym_full(symbol)
+    key = f"top_trader:{sym}:{interval}"
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+    try:
+        raw = clawby_relay("futures_top_long_short_position_ratio_history",
+                           {"exchange": exchange, "symbol": sym, "interval": interval, "limit": limit},
+                           timeout=8, _max_retries=0)
+        if not isinstance(raw, list) or not raw or not isinstance(raw[-1], dict):
+            return None
+        last = max((r for r in raw if isinstance(r, dict)), key=lambda r: float(r.get("time") or 0))
+        out = {"top_position_long_percent": float(last["top_position_long_percent"]),
+               "top_position_short_percent": float(last["top_position_short_percent"]),
+               "top_position_long_short_ratio": float(last["top_position_long_short_ratio"]),
+               "time": last.get("time")}
+    except Exception as e:
+        logger.debug(f"[top_trader] {sym} 取数失败: {type(e).__name__}: {str(e)[:100]}")
+        return None
+    _cache_set(key, out)
+    return out
+
+
 # ── 代币解锁日程（coin_unlock_list）──────────────────────────────────────────
 # 接口不支持按币过滤（symbol 参数会被忽略），只能翻页拉全表：每页 100 条，约 5 页；精度为 UTC 天。
 # 解锁日程按天变化，用独立 6 小时缓存（通用 _cache_get 的 TTL 固定 15 分钟，不适用）。
