@@ -964,6 +964,37 @@ def _calc_tp(entry: float, sl: float, atr: float, direction: str,
 # ─────────────────────────────────────────────────────────────────────────────
 # 主入口
 # ─────────────────────────────────────────────────────────────────────────────
+def _enforce_tp2_rr(entry: float, sl: float, tp1: float, tp2, direction: str,
+                    liq_long: list, liq_short: list, symbol: str = ""):
+    """TP2 盈亏比兜底（RR_MIN_TP2）：最终出口统一校验，不动 TP1。
+    - rr_tp2 达标 / tp2 为 None → 原样返回；
+    - 不达标 → 调整到刚好满足 RR_MIN_TP2 的最近价格；若调整后的价格不在 TP1 远侧，
+      或超出同方向最远清算区（无清算区同样视为超出合理范围）→ 退化为单 TP（返回 None）。
+    """
+    if tp2 is None:
+        return None
+    sl_dist = abs(entry - sl) + 1e-9
+    rr = abs(tp2 - entry) / sl_dist
+    if rr >= _TP2_MIN_RR - 1e-6:
+        return tp2
+    is_long = direction == "LONG"
+    need = entry + sl_dist * _TP2_MIN_RR if is_long else entry - sl_dist * _TP2_MIN_RR
+    zones = liq_short if is_long else liq_long
+    try:
+        limit = (max(float(z["price_high"]) for z in zones) if is_long
+                 else min(float(z["price_low"]) for z in zones)) if zones else None
+    except Exception:
+        limit = None
+    beyond_tp1 = need > tp1 if is_long else need < tp1
+    within = limit is not None and (need <= limit if is_long else need >= limit)
+    if beyond_tp1 and within:
+        logger.debug(f"[calc_sl_tp] {symbol} TP2 RR={rr:.2f}<{_TP2_MIN_RR}，调整到 {need:.6g}（RR={_TP2_MIN_RR}）")
+        return need
+    logger.debug(f"[calc_sl_tp] {symbol} TP2 RR={rr:.2f}<{_TP2_MIN_RR}，"
+                 f"{'调整价未在TP1远侧' if not beyond_tp1 else '调整价超出最远清算区/无清算区'}，退化为单TP")
+    return None
+
+
 def calc_sl_tp(
     signal: dict,
     mark_price: float,
@@ -1309,6 +1340,7 @@ def calc_sl_tp(
                 _tp2_far = (tp2 > tp1) if direction == "LONG" else (tp2 < tp1)
                 if not _tp2_far or _rr2 < 1.5:
                     tp2 = None
+            tp2 = _enforce_tp2_rr(entry, sl, tp1, tp2, direction, liq_long, liq_short, signal.get("symbol", ""))
 
             logger.info(
                 f"[calc_sl_tp] {signal.get('symbol','')} stop_hunt TP1=ref_level: "
@@ -1329,6 +1361,7 @@ def calc_sl_tp(
                 "sl_degraded":        False,
                 "tp_degraded":        tp_degraded,
                 "entry_mode":         "limit",
+                "tp_mode":            "single" if tp2 is None else "dual",
             }
         else:
             # 降级：无 ref_level/sweep_extreme 时用旧逻辑
@@ -1479,6 +1512,8 @@ def calc_sl_tp(
         else:
             logger.debug(f"TP1 收窄至 {_tp1_cap*100:.0f}%（tier={tier}）: {tp1_pct*100:.1f}% → {_tp1_cap*100:.0f}%，RR={_rr_after_cap:.2f}")
 
+    # TP2 盈亏比兜底（RR_MIN_TP2）：TP1 增强/收窄之后统一校验一次，不达标则调整或退化为单 TP
+    tp2 = _enforce_tp2_rr(entry, sl, tp1, tp2, direction, liq_long, liq_short, symbol_hint)
     sl_dist = abs(entry - sl) + 1e-9
     rr1 = abs(tp1 - entry) / sl_dist
     rr2 = abs(tp2 - entry) / sl_dist if tp2 is not None else None
@@ -1529,6 +1564,7 @@ def calc_sl_tp(
         "sl_degraded":        sl_degraded,
         "tp_degraded":        tp_degraded,
         "entry_mode":         e_mode,
+        "tp_mode":            "single" if tp2 is None else "dual",
         # ── 观测层字段（不影响执行逻辑） ──────────────────────────────────────
         "momentum_coeff":     momentum_data.get("momentum_coeff"),
         "dynamic_target":     momentum_data.get("dynamic_target"),
