@@ -317,8 +317,8 @@ ORDER_EXPIRE_PULLBACK_MIN = 240   # 回踩/反转挂单超时，分钟
 # 扫描超时保护
 SCAN_SYMBOL_TIMEOUT_SEC   = 10    # 单标的分析超时（秒），超时跳过
 SCAN_TOTAL_TIMEOUT_SEC    = 180   # 整轮扫描总超时（秒）；v3.26: 240→120，并发25线程理论8~12s
-SCAN_MAX_WORKERS          = 4     # 并行分析线程数（10→4：降低 GIL 竞争导致事件循环阻塞）；v3.82: 25→10，控制并发内存峰值（25线程×11MB=275MB峰值，pymalloc不归还导致水位积累至3.5GB）
-FUNDING_ARB_SCAN_WORKERS = 8  # funding_arb并发扫描线程数，降低SSL并发防止阻塞事件循环
+SCAN_MAX_WORKERS          = 2     # [2核服务器收紧 4→2] 并行分析线程数（10→4：降低 GIL 竞争导致事件循环阻塞）；v3.82: 25→10，控制并发内存峰值（25线程×11MB=275MB峰值，pymalloc不归还导致水位积累至3.5GB）
+FUNDING_ARB_SCAN_WORKERS = 2  # funding_arb并发扫描线程数，降低SSL并发防止阻塞事件循环
 SCAN_USE_PROCESS_POOL     = False  # True：并行分析走 spawn 进程池（shared/analysis_worker.py）；False：保持线程池（默认）
 SCAN_KLINE_TIMING       = True  # 是否统计 K 线请求耗时（每轮 info 一条汇总），生产环境建议开启
 KLINE_CACHE_ENABLED     = True  # 是否启用 K 线 REST 缓存（按收盘时间失效；False 时每轮直接 REST）
@@ -326,16 +326,16 @@ KLINE_CACHE_INTERVALS   = ["1h", "4h", "15m"]  # 缓存哪些周期
 KLINE_REQUEST_TIMEOUT   = (3, 5)  # (connect_s, read_s)：K 线单次 HTTP 请求超时
 KLINE_REQUEST_MAX_RETRY = 1       # K 线请求最多重试次数（总尝试 = 1 + 此值）
 MARKET_DATA_HUB_ENABLED = True   # 公共市场数据 WS 中心（阶段一：全市场标记价/资金费率）；False 时行为与未引入 hub 前完全一致；hub 未就绪/过旧时 scanner 自动回落 REST
-HUB_LOAD_MAX_WORKERS = 4  # hub历史K线加载并发上限
+HUB_LOAD_MAX_WORKERS = 2  # hub历史K线加载并发上限
 # ── 启动分批初始化（避免重启瞬间并发大量 REST 触发 Binance -1003 限频/IP 封禁）──
 # P1 立即：get_account 校验 + 持仓模式；P2：持仓/挂单对齐；P3：OI 缓存 + 系统性风险；P4：hub K 线订阅/清算区预热/扫描等非关键初始化
 STARTUP_BATCH_DELAY_P2 = 5    # P1 → P2 等待秒数
 STARTUP_BATCH_DELAY_P3 = 8    # P2 → P3 等待秒数
 STARTUP_BATCH_DELAY_P4 = 12   # P3 → P4 等待秒数
 HUB_NO_MSG_TIMEOUT = 180  # 120→180：给历史加载留余量，减少阻塞引发的假断线； WebSocket 无消息超时（秒），过短会因GIL饿死误触发重连
-KLINE_FETCH_CONCURRENCY = 4  # hub历史K线REST拉取并发上限
+KLINE_FETCH_CONCURRENCY = 2  # hub历史K线REST拉取并发上限
 HUB_KLINE_FETCH_TIMEOUT = 8.0  # hub 单次历史K线拉取总时限（秒），超时按空结果处理、30s 后重试
-LIQ_PREFETCH_MAX_WORKERS = 4   # 预热线程数；8 线程实测加剧 GIL 竞争，事件循环反复阻塞 2~4s，回退到 4
+LIQ_PREFETCH_MAX_WORKERS = 2   # 预热线程数；8 线程实测加剧 GIL 竞争，事件循环反复阻塞 2~4s，回退到 4
 LIQ_PREFETCH_SLEEP_SEC   = 0.05 # 每个标的预热后的节流间隔（秒），50ms 防止 API 429 限速
 LIQ_PRESCAN_PREFETCH_ENABLED     = False  # 扫描前同步预热（已改为后台持续预热，扫描只读缓存；True=恢复旧行为，扫描会等 Clawby）
 LIQ_SCAN_CACHE_ONLY              = True   # 扫描分析阶段的清算区只读缓存、不发网络请求（缓存缺失按无清算区降级，并登记后台优先预热）
@@ -1045,10 +1045,10 @@ TRIGGER_TOKEN_STRATEGY_MAX_PCT = 0.40
 TRIGGER_DISPATCH_ENABLED = True  # 需同时 TRIGGER_DETECTOR_ENABLED=True；True 时触发 → 预取 → analyze_one → 第四步 → 注册下单
 SCAN_INTERVAL_PASSIVE    = 900   # 两个开关都为 True 时的兜底扫描间隔（秒）；否则保持 300s / 周末 900s
 TRIGGER_DISPATCH_TIMEOUT = 30     # 单个分析任务超时（预取 + analyze_one + 第四步）
-TRIGGER_DISPATCH_WORKERS = 2      # 分析协程数
+TRIGGER_DISPATCH_WORKERS = 1      # 分析协程数
 TRIGGER_HUB_WAIT_SEC = 30         # hub 快照未就绪（K线/ticker 缺失）时，触发分析最多等待的秒数；到点仍未就绪则单次 REST 补拉后再分析（0=不等待，直接按旧逻辑报 hub_snapshot_incomplete）
 TRIGGER_HUB_WAIT_POLL_SEC = 2.0   # 等待期间检查 hub 是否就绪的间隔（秒）
-TRIGGER_DISPATCH_MAX_WORKERS = 2  # 触发器派发并发上限，过高会GIL争抢饿死事件循环
+TRIGGER_DISPATCH_MAX_WORKERS = 1  # 触发器派发并发上限，过高会GIL争抢饿死事件循环
 
 # [fix #48] 已删除的失效常量（代码从未引用，保留名单便于追溯）：
 #   UNIVERSE_REFRESH_INTERVAL, SCANNER_INTERVAL, KLINE_LIMIT_15M, KLINE_LIMIT_1H

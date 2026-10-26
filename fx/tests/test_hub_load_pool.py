@@ -1,4 +1,4 @@
-"""hub 历史拉取使用专用线程池；SCAN_MAX_WORKERS=6（mock）。"""
+"""hub 历史拉取使用专用线程池；SCAN_MAX_WORKERS=2（2核服务器，mock）。"""
 import asyncio
 import sys
 import threading
@@ -10,8 +10,8 @@ import config
 from shared import market_data_hub as H
 
 
-def test_config_scan_workers_is_4():
-    assert config.SCAN_MAX_WORKERS == 6
+def test_config_scan_workers_is_2():
+    assert config.SCAN_MAX_WORKERS == 2
 
 
 def test_load_pool_definition():
@@ -63,3 +63,13 @@ def test_load_history_gives_up_after_fetch_timeout(monkeypatch):
 
 def test_fetch_timeout_config_default_8s():
     assert config.HUB_KLINE_FETCH_TIMEOUT == 8.0 and H.KLINE_FETCH_TIMEOUT == 8.0
+
+
+def test_thread_pool_caps_for_2_core_server():
+    """2核服务器：各线程池上限收紧，避免 GIL 竞争阻塞事件循环。"""
+    assert config.HUB_LOAD_MAX_WORKERS == 2
+    assert config.KLINE_FETCH_CONCURRENCY == 2
+    assert config.LIQ_PREFETCH_MAX_WORKERS == 2
+    assert config.TRIGGER_DISPATCH_MAX_WORKERS == 1
+    assert config.TRIGGER_DISPATCH_WORKERS == 1
+    assert config.FUNDING_ARB_SCAN_WORKERS == 2
