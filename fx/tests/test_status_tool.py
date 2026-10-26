@@ -134,3 +134,53 @@ def test_main_runs_with_root_arg(root, capsys, monkeypatch):
     assert S.main(["--root", str(root)]) == 0
     out = capsys.readouterr().out
     assert "═══ 系统状态" in out and "═══ 持仓（1笔）" in out and "═══ 告警" in out
+
+
+# ── v2：5 秒容差去重 / 2000 行窗口 / --sync ──
+def test_today_closes_tolerance_dedup_same_symbol_direction(root):
+    rows = [
+        {"trade_id": "a", "symbol": "ETHUSDT", "direction": "LONG", "close_time": ms(2, 30), "pnl_usdt": 1},
+        {"trade_id": "b", "symbol": "ETHUSDT", "direction": "long", "close_time": ms(2, 30) + 4000, "pnl_usdt": 1},   # 4 秒内 → 重复
+        {"trade_id": "c", "symbol": "ETHUSDT", "direction": "LONG", "close_time": ms(2, 30) + 6000, "pnl_usdt": 2},   # 6 秒 → 另一笔
+        {"trade_id": "d", "symbol": "ETHUSDT", "direction": "SHORT", "close_time": ms(2, 30), "pnl_usdt": 3},         # 方向不同 → 另一笔
+        {"trade_id": "e", "symbol": "SOLUSDT", "direction": "LONG", "close_time": ms(2, 30), "pnl_usdt": 4},          # 标的不同
+    ]
+    kept, dups = S.today_closes(rows, "2026-10-26")
+    assert [r["trade_id"] for r in kept] == ["a", "d", "e", "c"] or len(kept) == 4
+    assert dups == 1 and "b" not in [r["trade_id"] for r in kept]
+
+
+def test_scan_window_is_2000_lines(root):
+    assert S.TAIL_LINES == 2000
+    filler = "\n".join(f"2026-10-26 15:00:00 INFO x filler{i}" for i in range(1500))
+    scan = ("2026-10-26 15:01:00 INFO x [scan-perf] 候选池加载=1.00s 批量标记价=1.00s 并行分析=1.00s 信号后处理=1.00s\n"
+            "2026-10-26 15:01:01 INFO x [liq-stats] 本轮清算区: 命中10个/扫描20个(50%)\n")
+    (root / "logs" / "system.log").write_text(scan + filler + "\n")           # 扫描行在 1500 行之前，旧的 500 行窗口读不到
+    assert "清算区命中50%" in render(root)
+
+
+def test_sync_flag_calls_sync_then_renders(root, capsys, monkeypatch):
+    import tools.sync_trades as T
+    called = {}
+    monkeypatch.setattr(T, "sync", lambda r, **k: called.setdefault("root", r))
+    monkeypatch.setattr(S, "run_daemon_status", lambda r: "")
+    assert S.main(["--sync", "--root", str(root)]) == 0
+    assert called["root"] == root and "═══ 系统状态" in capsys.readouterr().out
+
+
+def test_sync_failure_does_not_break_status(root, capsys, monkeypatch):
+    import tools.sync_trades as T
+    def boom(r, **k):
+        raise RuntimeError("net down")
+    monkeypatch.setattr(T, "sync", boom)
+    monkeypatch.setattr(S, "run_daemon_status", lambda r: "")
+    assert S.main(["--sync", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "交易所同步失败" in out and "═══ 持仓" in out
+
+
+def test_without_sync_flag_never_imports_sync(root, monkeypatch):
+    import tools.sync_trades as T
+    monkeypatch.setattr(T, "sync", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not sync")))
+    monkeypatch.setattr(S, "run_daemon_status", lambda r: "")
+    assert S.main(["--root", str(root)]) == 0

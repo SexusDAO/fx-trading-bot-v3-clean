@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """tools/status.py — 一键查询系统状态（只读本地文件，不连接交易所）。
 
-用法：python3 tools/status.py [--root <fx目录>]
+用法：python3 tools/status.py [--sync] [--root <fx目录>]
+  --sync  先调 tools/sync_trades.py 从交易所补全本地缺失的平仓记录（此时才会联网），再显示；不加则只读本地文件
 数据来源：
   · logs/pos_state.json          持仓
-  · logs/trade_log.jsonl         今日平仓（UTC 日期过滤，按 trade_id 去重）
-  · logs/system.log              最后 500 行：事件循环阻塞次数、最近一轮 scan-perf / liq-stats
+  · logs/trade_log.jsonl         今日平仓（UTC 日期过滤；trade_id 优先 + 同标的同方向 close_time 相差 ≤5 秒视为同一笔）
+  · logs/system.log              最后 2000 行：事件循环阻塞次数、最近一轮 scan-perf / liq-stats
   · daemon_start.py status 输出   daemon 是否运行 + PID（uptime 用 ps 取）
 说明：持仓盈亏需要实时价格，本脚本不联网，pnl 一律显示 ?。
 """
@@ -19,7 +20,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent
-TAIL_LINES = 500
+if str(DEFAULT_ROOT) not in sys.path:
+    sys.path.insert(0, str(DEFAULT_ROOT))
+from shared.trade_dedup import same_trade  # noqa: E402  纯函数，不联网
+TAIL_LINES = 2000
 LIVE_STATUSES = ("open", "pending_guard", "patching")
 _LOG_TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 
@@ -112,16 +116,16 @@ def _utc_date(ms) -> str | None:
 
 
 def today_closes(records: list, today_utc: str) -> tuple:
-    """返回 (去重后的今日记录, 重复条数)。去重键 trade_id，缺失时用 symbol+close_time。"""
-    seen, out, dups = set(), [], 0
+    """返回 (去重后的今日记录, 重复条数)。同一笔 = trade_id 相同，或同标的同方向 close_time 相差 ≤5 秒。"""
+    out, dups = [], 0
+    by_sym: dict = {}
     for r in records:
         if _utc_date(r.get("close_time")) != today_utc:
             continue
-        key = r.get("trade_id") or (r.get("symbol"), r.get("close_time"))
-        if key in seen:
+        if any(same_trade(r, k) for k in by_sym.get(r.get("symbol"), ())):
             dups += 1
             continue
-        seen.add(key)
+        by_sym.setdefault(r.get("symbol"), []).append(r)
         out.append(r)
     out.sort(key=lambda r: _num(r.get("close_time")))
     return out, dups
@@ -148,7 +152,7 @@ def _parse_ts(line: str):
 
 def count_loop_blocks(lines: list, now: datetime, hours: float = 1.0) -> int:
     """最近 hours 小时内事件循环阻塞/延迟告警条数（日志时间为服务器本地时间，now 须同口径的本地 naive 时间）。
-    只在 system.log 最后 500 行内统计——日志刷得快时，实际覆盖的时间窗可能短于 1 小时。"""
+    只在 system.log 最后 2000 行内统计——日志刷得快时，实际覆盖的时间窗可能短于 1 小时。"""
     since = now - timedelta(hours=hours)
     n = 0
     for ln in lines:
@@ -246,7 +250,7 @@ def render(root: Path, now_utc: datetime, now_local: datetime, daemon_text: str,
 
     out += ["", bar("扫描状态")]
     if scan["elapsed"] is None and scan["liq_pct"] is None:
-        out.append("最近一轮: ?（system.log 最后500行里没有 scan-perf / liq-stats）")
+        out.append("最近一轮: ?（system.log 最后2000行里没有 scan-perf / liq-stats）")
     else:
         liq = f"{scan['liq_pct']}%（{scan['liq_hit']}/{scan['liq_total']}）" if scan["liq_pct"] is not None else "?"
         el = f"{scan['elapsed']:.0f}s" if scan["elapsed"] is not None else "?"
@@ -259,7 +263,7 @@ def render(root: Path, now_utc: datetime, now_local: datetime, daemon_text: str,
         alerts.append(f"⚠️ {len(no_sl)}个持仓 sl=0 或无止损单id（其中pending_guard {pg}个）: "
                       + ", ".join(f"{p.get('symbol')}({str(p.get('direction', '?')).upper()})" for p in no_sl))
     if dups:
-        alerts.append(f"⚠️ trade_log 有重复记录（今日 {dups} 条重复 trade_id，已在上表去重）")
+        alerts.append(f"⚠️ trade_log 有重复记录（今日 {dups} 条重复记录，已在上表去重）")
     out += ["", bar("告警")] + (alerts or ["✅ 无告警"])
     return "\n".join(out)
 
@@ -269,6 +273,13 @@ def main(argv=None) -> int:
     root = DEFAULT_ROOT
     if "--root" in argv:
         root = Path(argv[argv.index("--root") + 1])
+    if "--sync" in argv:
+        try:
+            from tools.sync_trades import sync
+            sync(root)
+        except Exception as e:      # 同步失败不影响状态显示
+            print(f"⚠️ 交易所同步失败，以下仅显示本地记录: {type(e).__name__}: {str(e)[:160]}")
+        print()
     ds_text = run_daemon_status(root)
     print(render(root, datetime.now(timezone.utc), datetime.now(), ds_text, uptime_str(parse_daemon_status(ds_text)["pid"])))
     return 0
