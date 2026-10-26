@@ -187,9 +187,78 @@ def _track_one(rec: dict) -> dict:
     return rec
 
 
+PATCH_WINDOW_MS = 30 * 60 * 1000   # patch 行在判定记录之后多久内算同一条信号
+
+
+def _has_prices(rec: dict) -> bool:
+    ep = rec.get("entry_params") or {}
+    return bool(ep.get("entry_price") and ep.get("sl_price"))
+
+
+def _merge_patches(records: list) -> int:
+    """把 entry_params_patch 行里的价格并进对应的通过记录（symbol+mode 相同，patch 在记录之后 PATCH_WINDOW_MS 内、取最近的一条）。
+    只补缺：记录自己已有价格则不动。返回合并条数。"""
+    patches = [r for r in records if r.get("type") == "entry_params_patch" and isinstance(r.get("entry_params"), dict)]
+    if not patches:
+        return 0
+    n = 0
+    for rec in records:
+        if not rec.get("judge_passed") or _has_prices(rec):
+            continue
+        ts = rec.get("ts") or 0
+        cands = [p for p in patches
+                 if p.get("symbol") == rec.get("symbol") and p.get("mode") == rec.get("mode")
+                 and 0 <= (p.get("ts") or 0) - ts <= PATCH_WINDOW_MS]
+        if not cands:
+            continue
+        best = min(cands, key=lambda p: p["ts"] - ts)
+        rec["entry_params"] = dict(best["entry_params"])
+        rec["entry_params_ok"] = best.get("entry_params_ok", rec.get("entry_params_ok"))
+        n += 1
+    return n
+
+
+def _rec_key(rec: dict) -> tuple:
+    return (rec.get("ts"), rec.get("symbol"), rec.get("mode"), str(rec.get("direction") or "").upper())
+
+
+def _write_back(fp: Path, outcomes: dict, entry_params: dict) -> int:
+    """把本次算出的 outcome（及合并来的价格）写回 fp：重新读取当前文件内容后按 key 套用，再 临时文件+os.replace 原子替换。
+    这样 scanner 在追踪期间追加的新行不会被覆盖；读到替换之间文件又变了则重试（最多 3 次）。返回写回条数。"""
+    for _ in range(3):
+        st0 = (fp.stat().st_size, fp.stat().st_mtime_ns)
+        lines = fp.read_text(encoding="utf-8").splitlines()
+        out_lines, applied = [], 0
+        for ln in lines:
+            try:
+                r = json.loads(ln)
+            except Exception:
+                out_lines.append(ln)
+                continue
+            if isinstance(r, dict) and r.get("judge_passed"):
+                k = _rec_key(r)
+                oc = outcomes.get(k)
+                if oc is not None and (r.get("outcome") or {}).get("checked_at") is None:
+                    r["outcome"] = oc
+                    if k in entry_params:
+                        r["entry_params"] = entry_params[k]
+                    ln = json.dumps(r, ensure_ascii=False)
+                    applied += 1
+            out_lines.append(ln)
+        tmp = fp.with_name(fp.name + ".track.tmp")
+        tmp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+        if (fp.stat().st_size, fp.stat().st_mtime_ns) != st0:   # 读之后被追加了：放弃这次，重读重算
+            tmp.unlink(missing_ok=True)
+            continue
+        os.replace(tmp, fp)
+        return applied
+    logger.warning("[track_outcomes] signal_analytics 在回写期间持续被追加，本轮放弃回写（下轮重试）")
+    return 0
+
+
 def run(analytics_file: Path | None = None) -> dict:
     """
-    主入口：遍历 signal_analytics.jsonl，填充未追踪记录的 outcome。
+    主入口：遍历 signal_analytics.jsonl，填充未追踪记录的 outcome 并回写同一个文件。
     返回 {"processed": int, "skipped": int, "errors": int}
     """
     from config import SIGNAL_ANALYTICS_TRACK_AFTER_H, SIGNAL_ANALYTICS_FILE
@@ -212,7 +281,9 @@ def run(analytics_file: Path | None = None) -> dict:
             except Exception:
                 stats["errors"] += 1
 
-    changed = False
+    merged = _merge_patches(records)
+    outcomes: dict = {}
+    eparams: dict = {}
     for rec in records:
         out = rec.get("outcome") or {}
         # 只处理 judge_passed=True 且未追踪的记录
@@ -225,22 +296,20 @@ def run(analytics_file: Path | None = None) -> dict:
             stats["skipped"] += 1
             continue
         try:
+            rec.setdefault("outcome", {})
             _track_one(rec)
             if rec["outcome"].get("checked_at") is not None:
                 stats["processed"] += 1
-                changed = True
+                outcomes[_rec_key(rec)] = rec["outcome"]
+                if _has_prices(rec):
+                    eparams[_rec_key(rec)] = rec["entry_params"]
         except Exception as e:
             logger.warning(f"[track_outcomes] {rec.get('symbol')} 追踪失败: {e}")
             stats["errors"] += 1
         time.sleep(0.05)  # 防 429
 
-    # 回写文件
-    if changed:
-        with open(fp, "w", encoding="utf-8") as f:
-            for rec in records:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-    logger.info(f"[track_outcomes] 完成: processed={stats['processed']} "
+    written = _write_back(fp, outcomes, eparams) if outcomes else 0
+    logger.info(f"[track_outcomes] 完成: processed={stats['processed']} written={written} merged_patch={merged} "
                 f"skipped={stats['skipped']} errors={stats['errors']}")
     return stats
 

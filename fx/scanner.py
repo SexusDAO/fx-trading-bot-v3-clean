@@ -3221,6 +3221,13 @@ def _filter_and_register_signals(
                                 "final_score": (sig.get("ind") or {}).get("final_score", sig.get("final_score")),
                                 "final_score_stage": "final",
                             }
+                            if sig["_entry_params_ok"]:
+                                # 入场/止损/止盈价：track_outcomes 事后追踪必须有这些价格才能判断是否成交与出场
+                                _patch["entry_params"] = {
+                                    k: params.get(k) for k in
+                                    ("entry_price", "sl_price", "tp1_price", "tp2_price", "sl_pct", "rr_tp1",
+                                     "sl_degraded", "entry_mode")
+                                }
                             with open(SIGNAL_ANALYTICS_FILE, "a", encoding="utf-8") as _af:
                                 _af.write(_json.dumps(_patch, ensure_ascii=False) + "\n")
                         except Exception as _wp:
