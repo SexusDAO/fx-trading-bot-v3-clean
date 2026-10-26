@@ -779,7 +779,8 @@ async def _sync_positions_on_startup() -> None:
             sl_alive  = bool(sl_id_ps and int(sl_id_ps) in live_algo_ids)
 
             if tp1_alive and tp2_alive and sl_alive and ps.get("status") == "open":
-                logger.info(f"[startup_sync] {sym}: SL✅ TP1✅ {'(单TP)' if single_tp_mode else 'TP2✅'} 无需补挂")
+                logger.info(f"[startup_sync] {sym}: SL✅ TP1✅ {'(单TP)' if single_tp_mode else 'TP2✅'} 无需补挂"
+                            f"{'（孤儿仓位已建档并认领保护单 pos_id=' + str(pid) + '）' if ps.get('source') == 'orphan_recovered' else ''}")
                 continue
 
             logger.info(f"[startup_sync] {sym}: sl_alive={sl_alive} tp1_alive={tp1_alive} "
