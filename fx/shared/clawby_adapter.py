@@ -4,10 +4,17 @@ clawby_adapter.py — 双轨数据适配层（Clawby + CG中转站）
 数据源优先级（2026-10 修订）:
   A. CG中转站  https://vip2.coinglass.site  (professional, 30次/分钟)
      → 核心合约接口，实时性更好，直接映射 CG 路径
-  B. Clawby    https://api.openclawby.com/api/relay (1200次/分钟)
+  B. Clawby    https://api.openclawby.com/api/relay (free 套餐实测 5次/秒/key，支持多 key 轮换)
      → 次要/套利/宏观接口，以及 CG中转 不支持的接口
   C. Binance fapi 公开（无速率限制）
      → LSR / Taker / OI历史 / 资金费率
+
+Clawby key 配置（只从环境变量读取，仓库里不再有默认 key；在 .env 或服务器环境变量里设置）：
+  多 key：CLAWBY_API_KEY_1=pk_xxx
+          CLAWBY_API_KEY_2=pk_yyy
+          CLAWBY_API_KEY_3=pk_zzz      （编号 1~19，重复的 key 自动去重）
+  单 key 兼容：CLAWBY_API_KEY=pk_xxx（仍然有效；存在编号 key 时以编号 key 为准）
+  一个 key 都没配：第一次调用 Clawby 时抛 EnvironmentError，调用方按既有逻辑降级到 CG。
 
 === 接口路由表 ===
 
@@ -51,6 +58,7 @@ LSR 限速保护:
 
 import os
 import time
+import itertools
 import threading
 import logging
 import requests
@@ -62,9 +70,8 @@ logger = logging.getLogger("fx.clawby")
 # ─────────────────────────────────────────────────────────────────────────────
 # ―― Clawby（次要/套利/宏观接口）
 CLAWBY_BASE_URL = "https://api.openclawby.com/api/relay"
-CLAWBY_API_KEY  = os.environ.get("CLAWBY_API_KEY", "pk_xBgG9wi3q1ZnIe6peyFrBHQP_6v2hG2C")
-CLAWBY_HEADERS  = {"X-API-Key": CLAWBY_API_KEY, "Content-Type": "application/json",
-                   "Accept-Encoding": "identity"}  # 禁用压缩，避免urllib3 decompress持GIL阻塞事件循环
+CLAWBY_HEADERS_BASE = {"Content-Type": "application/json",
+                       "Accept-Encoding": "identity"}  # 禁用压缩，避免urllib3 decompress持GIL阻塞事件循环；X-API-Key 按请求注入（见 _clawby_headers）
 
 # ―― CG 中转站（核心合约接口，30次/分钟）
 CG_BASE_URL  = os.environ.get("CG_BASE_URL",  "https://vip2.coinglass.site")
@@ -74,9 +81,109 @@ CG_HEADERS   = {"X-API-Key": CG_API_KEY, "Accept-Encoding": "identity"}  # 禁�
 CG_RATE_LIMIT_S  = 2.2
 CG_LSR_LIMIT_S   = 31.0   # LSR 专用：2次/分钟 → 31s（安全间隔）
 
-# Clawby free 套餐实测上限 5 次/秒（并发 10 → 5 成功 / 5 返回 HTTP 429，credits.rate_limit=5）
-# 串行间隔 0.25s ≈ 4 次/秒，留约 20% 余量
-CLAWBY_RATE_LIMIT_S = 0.25
+# ── Clawby 多 key 轮换池 ─────────────────────────────────────────────────────
+# free 套餐实测上限 5 次/秒/key，单 key 间隔 0.25s（4 次/秒）留约 20% 余量；
+# N 个 key 时全局间隔自动缩短为 0.25/N，等效吞吐 4N 次/秒。
+CLAWBY_BASE_INTERVAL_S = 0.25
+
+
+def _load_clawby_keys() -> list:
+    """编号 key（CLAWBY_API_KEY_1..19）优先，其次单 key CLAWBY_API_KEY；去空、去重并保持顺序。"""
+    keys = []
+    for i in range(1, 20):
+        k = os.environ.get(f"CLAWBY_API_KEY_{i}", "").strip()
+        if k and k not in keys:
+            keys.append(k)
+    if not keys:
+        k = os.environ.get("CLAWBY_API_KEY", "").strip()
+        if k:
+            keys.append(k)
+    return keys
+
+
+def _compute_rate_limit_s(n_keys: int) -> float:
+    return round(CLAWBY_BASE_INTERVAL_S / max(int(n_keys), 1), 4)
+
+
+_CLAWBY_KEYS: list = []
+_key_cycle = None
+_key_cooldown: dict = {}
+_cooldown_lock = threading.Lock()
+CLAWBY_RATE_LIMIT_S = CLAWBY_BASE_INTERVAL_S
+
+
+def _configure_keys(keys: list, announce: bool = True) -> None:
+    """（重新）初始化轮换池、冷却表与限速间隔。"""
+    global _CLAWBY_KEYS, _key_cycle, CLAWBY_RATE_LIMIT_S
+    with _cooldown_lock:
+        _CLAWBY_KEYS = list(keys)
+        _key_cycle = itertools.cycle(_CLAWBY_KEYS) if _CLAWBY_KEYS else None
+        _key_cooldown.clear()
+    CLAWBY_RATE_LIMIT_S = _compute_rate_limit_s(len(_CLAWBY_KEYS))
+    if not announce:
+        return
+    if _CLAWBY_KEYS:
+        logger.info(f"[clawby] 已加载 {len(_CLAWBY_KEYS)} 个 key，限速间隔 {CLAWBY_RATE_LIMIT_S}s/次，"
+                    f"等效 ~{1 / CLAWBY_RATE_LIMIT_S:.0f} 次/秒")
+    else:
+        logger.warning("[clawby] 未配置任何 CLAWBY_API_KEY / CLAWBY_API_KEY_1..N，Clawby 调用将抛 EnvironmentError 并降级到 CG")
+
+
+_NO_KEY_MSG = ("未配置任何 Clawby key：请设置环境变量 CLAWBY_API_KEY_1 / CLAWBY_API_KEY_2 ...（多 key），"
+               "或 CLAWBY_API_KEY（单 key）")
+
+
+def validate_clawby_config() -> int:
+    """启动自检：返回已加载 key 数；一个都没有则抛 EnvironmentError。"""
+    if not _CLAWBY_KEYS:
+        raise EnvironmentError(_NO_KEY_MSG)
+    return len(_CLAWBY_KEYS)
+
+
+def _key_label(key: str) -> str:
+    try:
+        return f"key#{_CLAWBY_KEYS.index(key) + 1}"
+    except ValueError:
+        return "key#?"
+
+
+def _has_available_key() -> bool:
+    now = time.time()
+    with _cooldown_lock:
+        return any(_key_cooldown.get(k, 0) <= now for k in _CLAWBY_KEYS)
+
+
+def _get_available_key(block: bool = True):
+    """round-robin 取 key，跳过冷却中的 key。全部冷却：block=True 等最快恢复的那个；block=False 返回 None。"""
+    if not _CLAWBY_KEYS:
+        raise EnvironmentError(_NO_KEY_MSG)
+    now = time.time()
+    with _cooldown_lock:
+        for _ in range(len(_CLAWBY_KEYS)):
+            key = next(_key_cycle)
+            if _key_cooldown.get(key, 0) <= now:
+                return key
+        key = min(_CLAWBY_KEYS, key=lambda k: _key_cooldown.get(k, 0))
+        wait = max(0.0, _key_cooldown.get(key, 0) - now)
+    if not block:
+        return None
+    if wait > 0:
+        time.sleep(wait)          # 锁外等待，不阻塞其他线程取 key / 标记冷却
+    return key
+
+
+def _mark_key_cooldown(key: str, retry_after: float) -> None:
+    with _cooldown_lock:
+        _key_cooldown[key] = time.time() + retry_after
+
+
+def _clawby_headers(key: str) -> dict:
+    h = dict(CLAWBY_HEADERS_BASE)
+    h["X-API-Key"] = key
+    return h
+
+
+_configure_keys(_load_clawby_keys())
 CACHE_TTL    = 15 * 60   # 15 分钟
 
 import os as _os
@@ -519,12 +626,18 @@ def clawby_relay(name: str, params: dict = None, timeout: int = 15,
     if time.time() < _CLAWBY_402_UNTIL:
         return None
     payload = {"name": name, "params": params or {}}
-    for attempt in range(_max_retries + 1):
+    attempt = -1
+    free_switches = 0                      # 429 后立即换 key 重试的次数，不计入 _max_retries
+    while attempt < _max_retries:
+        attempt += 1
+        key = _get_available_key(block=_max_retries > 0)
+        if key is None:
+            raise RuntimeError("[clawby] 所有 key 都在 429 冷却中")
         _wait_clawby_rate_limit()
         try:
             r = requests.post(
                 CLAWBY_BASE_URL,
-                headers=CLAWBY_HEADERS,
+                headers=_clawby_headers(key),
                 json=payload,
                 timeout=timeout,
                 proxies=_PROXIES,
@@ -559,10 +672,15 @@ def clawby_relay(name: str, params: dict = None, timeout: int = 15,
 
         if r.status_code == 429:
             wait = _clawby_429_wait(r)
-            logger.warning(f"[clawby] 429, waiting {wait:.1f}s (attempt {attempt+1})")
-            if attempt < _max_retries:
-                time.sleep(wait)
+            _mark_key_cooldown(key, wait)           # 只冷却触发 429 的这个 key
+            if free_switches < len(_CLAWBY_KEYS) and _has_available_key():
+                free_switches += 1
+                logger.warning(f"[clawby] {_key_label(key)} 触发429，冷却{wait:.1f}s，切换下一个key重试")
+                attempt -= 1                        # 换 key 重试不消耗重试次数
                 continue
+            logger.warning(f"[clawby] {_key_label(key)} 触发429，冷却{wait:.1f}s (attempt {attempt+1})")
+            if attempt < _max_retries:
+                continue                            # 下一轮 _get_available_key 会等到最快恢复的 key
             r.raise_for_status()
 
         if r.status_code == 401:
@@ -1591,7 +1709,7 @@ def test_connection() -> dict:
     try:
         r = requests.post(
             CLAWBY_BASE_URL,
-            headers=CLAWBY_HEADERS,
+            headers=_clawby_headers(_get_available_key(block=False) or _CLAWBY_KEYS[0]),
             json={"name": "futures_liquidation_coin_list", "params": {"exchange": "Binance"}},
             timeout=15,
             proxies=_PROXIES,

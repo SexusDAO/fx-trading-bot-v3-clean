@@ -4,6 +4,15 @@ import shared.clawby_adapter as C
 
 
 @pytest.fixture(autouse=True)
+def _keys():
+    """默认 1 个假 key（CI 环境没有真实 key）；测完恢复模块原状态。"""
+    old = list(C._CLAWBY_KEYS)
+    C._configure_keys(["k-test-1"], announce=False)
+    yield
+    C._configure_keys(old, announce=False)
+
+
+@pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     C._CACHE.clear() if hasattr(C, "_CACHE") else None
     monkeypatch.setattr(C, "_cache_get", lambda k: None)
@@ -172,7 +181,7 @@ def test_relay_429_sleeps_body_retry_after_then_succeeds(monkeypatch):
     sleeps = []
     monkeypatch.setattr(C.time, "sleep", lambda x: sleeps.append(x))
     assert C.clawby_relay("futures_cvd_history", {}) == [1]
-    assert sleeps == [1.0]                                         # 不再是默认 10s
+    assert len(sleeps) == 1 and sleeps[0] == pytest.approx(1.0, abs=0.05)   # 等该 key 冷却剩余时间（≈1s），不再是默认 10s
 
 
 def test_relay_429_no_retry_when_max_retries_0(monkeypatch):
