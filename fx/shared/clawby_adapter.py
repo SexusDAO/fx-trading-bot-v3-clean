@@ -360,12 +360,48 @@ def _parse_retry_after(value, default: float = 30.0, max_wait: float = 60.0) -> 
         return default
 
 
+# ── 429 指数退避（全局，cg_get 所有端点共用同一限额）───────────────────────────
+#   第 1 次 429 等 10s，第 2 次 20s，第 3 次 40s，之后最大 60s；退避期内 cg_get 直接返回 None，不发新请求、也不阻塞调用线程。
+#   任一请求成功（200）即清零连续计数。Retry-After 若更长则取更长者（同样封顶 60s）。
+_CG_429_LOCK = threading.Lock()
+_CG_429_UNTIL: float = 0.0
+_CG_429_COUNT: int = 0
+CG_429_BASE_WAIT = 10.0
+CG_429_MAX_WAIT = 60.0
+
+
+def cg_backoff_remaining() -> float:
+    """429 退避剩余秒数；0 表示可发请求。"""
+    return max(0.0, _CG_429_UNTIL - time.time())
+
+
+def _cg_note_429(retry_after: float = 0.0) -> float:
+    """记录一次 429，返回本次退避秒数。"""
+    global _CG_429_UNTIL, _CG_429_COUNT
+    with _CG_429_LOCK:
+        _CG_429_COUNT += 1
+        wait = min(CG_429_BASE_WAIT * (2 ** (_CG_429_COUNT - 1)), CG_429_MAX_WAIT)
+        wait = min(max(wait, float(retry_after or 0.0)), CG_429_MAX_WAIT)
+        _CG_429_UNTIL = max(_CG_429_UNTIL, time.time() + wait)
+        return wait
+
+
+def _cg_note_ok() -> None:
+    global _CG_429_COUNT
+    with _CG_429_LOCK:
+        _CG_429_COUNT = 0
+
+
 def cg_get(path: str, params: dict = None, timeout: int = 8) -> "list | dict | None":
     """
     GET https://vip2.coinglass.site/<path>
     返回 data 字段（成功）或 None（失败/限速）。
     自动处理 429 Retry-After（单次重试，最多等待 60s）。
     """
+    _left = cg_backoff_remaining()
+    if _left > 0:        # 429 退避期内不发新请求（调用方按"拿不到数据"处理，清算区走原有降级）
+        logger.debug(f"[cg_get] 429 退避中（剩 {_left:.0f}s），跳过 {path}")
+        return None
     _wait_cg_rate_limit()
     url = f"{CG_BASE_URL}/{path.lstrip('/')}"
     for attempt in range(2):
@@ -378,18 +414,15 @@ def cg_get(path: str, params: dict = None, timeout: int = 8) -> "list | dict | N
 
         if r.status_code == 429:
             # [v3.89 #76] Retry-After 可能是秒数，也可能是 HTTP 日期格式；
-            #   旧实现直接 float() 会把日期型头变成未分类异常，向上抛出。
-            wait = _parse_retry_after(r.headers.get("Retry-After"), default=30.0)
-            logger.warning(f"[cg_get] 429 {path}, 等待 {wait:.0f}s")
-            if attempt == 0:
-                time.sleep(wait)
-                _wait_cg_rate_limit()
-                continue
+            ra = _parse_retry_after(r.headers.get("Retry-After"), default=0.0)
+            wait = _cg_note_429(ra)
+            logger.warning(f"[cg_get] 429 {path}, 指数退避 {wait:.0f}s（退避期内不发新请求）")
             return None
 
         if r.status_code != 200:
             logger.debug(f"[cg_get] {path} HTTP {r.status_code}")
             return None
+        _cg_note_ok()      # 200：清零连续 429 计数，下次 429 从 10s 重新起算
 
         try:
             body = r.json()

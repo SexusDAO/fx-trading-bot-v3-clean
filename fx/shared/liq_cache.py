@@ -24,6 +24,11 @@ except ImportError:   # config 缺这两项时的兜底（与 config.py 默认�
     LIQ_PREFETCH_MAX_WORKERS, LIQ_PREFETCH_SLEEP_SEC = 2, 1.0
 
 try:
+    from config import LIQ_PREFETCH_MAX_SYMBOLS, LIQ_PREFETCH_PRIORITY_POSITIONS
+except ImportError:   # 与 config.py 默认值一致
+    LIQ_PREFETCH_MAX_SYMBOLS, LIQ_PREFETCH_PRIORITY_POSITIONS = 30, True
+
+try:
     from config import LIQ_PREFETCH_FETCH_TIMEOUT_SEC
 except ImportError:   # 与 config.py 默认值一致
     LIQ_PREFETCH_FETCH_TIMEOUT_SEC = 5.0
@@ -402,9 +407,19 @@ def _fetch_with_timeout(sym: str, price: float, range_: str, key: str, timeout: 
         return {}
 
 
+def _cg_backoff_left() -> float:
+    try:
+        from shared.clawby_adapter import cg_backoff_remaining
+        return cg_backoff_remaining()
+    except Exception:
+        return 0.0
+
+
 def _prefetch_one(sym: str, ranges=_PREFETCH_RANGES, price: float = 0.0) -> bool:
     """预热单个标的的清算区缓存；返回是否写入了至少一个 range。"""
     try:
+        if _cg_backoff_left() > 0:     # Coinglass 429 退避期内：预热直接跳过，不发请求（缓存保持原状，下轮再预热）
+            return False
         # [v3.89 #36] 先判断是否需要刷新，缓存仍新鲜的标的不再白白请求一次 mark price
         if not _needs_refresh(sym, ranges):
             return False
@@ -418,6 +433,8 @@ def _prefetch_one(sym: str, ranges=_PREFETCH_RANGES, price: float = 0.0) -> bool
 
         wrote = 0
         for r in ranges:
+            if _cg_backoff_left() > 0:  # 本标的预热中途遇到 429：剩余区间不再请求
+                break
             data = _fetch_with_timeout(sym, price, r, f"{sym}:{r}")   # [v3.89 #35] + 独立线程、单次超时跳过
             if data:
                 wrote += 1
@@ -493,6 +510,42 @@ _bg_stop = threading.Event()
 _bg_thread = None
 
 
+def _position_symbols() -> list:
+    """当前持仓标的（open/pending_guard/patching；pending 挂单不算）。读取失败返回 []，不影响候选池预热。"""
+    try:
+        from shared.state import get_all_positions
+        return [p["symbol"] for p in get_all_positions()
+                if p.get("symbol") and p.get("status") in ("open", "pending_guard", "patching")]
+    except Exception as e:
+        logger.warning(f"[liq_cache] 读取持仓标的失败，本轮预热不含持仓优先档: {e}")
+        return []
+
+
+def select_prefetch_symbols(pool: list, wanted: list | None = None) -> tuple:
+    """后台预热的标的分档（返回 (标的列表, 统计)）：
+      第一档：持仓标的（必预热，不受上限限制）；
+      第二档：扫描路径漏掉的标的(wanted) 与候选池评分前 LIQ_PREFETCH_MAX_SYMBOLS 名——合计占上限（持仓标的若同在池中不重复占额度）；
+      第三档：其余标的不预热，用到时由 get_liq_zones_cached 实时拉取，拉不到走原有 ATR 降级。
+    pool 须已按评分降序（candidate_pool.json 即如此）。LIQ_PREFETCH_PRIORITY_POSITIONS=False → 旧行为：wanted + 全池。"""
+    pool = list(dict.fromkeys(pool or []))
+    wanted = list(dict.fromkeys(wanted or []))
+    if not LIQ_PREFETCH_PRIORITY_POSITIONS:
+        out = list(dict.fromkeys(wanted + pool))
+        return out, {"positions": 0, "tier2": len(out), "skipped": 0, "total_pool": len(pool)}
+    pos = list(dict.fromkeys(_position_symbols()))
+    cap = max(int(LIQ_PREFETCH_MAX_SYMBOLS), 0)
+    pos_set = set(pos)
+    tier2: list = []
+    for sym in wanted + pool:
+        if len(tier2) >= cap:
+            break
+        if sym not in pos_set and sym not in tier2:
+            tier2.append(sym)
+    out = pos + tier2
+    return out, {"positions": len(pos), "tier2": len(tier2),
+                 "skipped": max(len(set(pool) - set(out)), 0), "total_pool": len(pool)}
+
+
 def start_bg_refresh(symbols_fn) -> None:
     """#39 启动可停止的后台刷新线程；启动失败恢复状态。"""
     global _bg_started, _bg_thread
@@ -506,7 +559,9 @@ def start_bg_refresh(symbols_fn) -> None:
                 while not _bg_stop.is_set():
                     try:
                         # 扫描路径漏掉的标的排最前，其后是候选池；过期的才会真正请求（_needs_refresh）
-                        syms = list(dict.fromkeys(_drain_wanted() + list(symbols_fn() or [])))
+                        syms, _st = select_prefetch_symbols(list(symbols_fn() or []), _drain_wanted())
+                        logger.info(f"[liq_cache] 预热分档: 持仓 {_st['positions']} + 候选池前{_st['tier2']} "
+                                    f"= {len(syms)} 个标的 × {len(_PREFETCH_RANGES)} 区间，跳过其余 {_st['skipped']} 个（用到时实时拉）")
                         if syms and not _bg_stop.is_set():
                             prefetch_liq_cache(syms)
                     except Exception as e:
