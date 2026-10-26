@@ -1251,6 +1251,18 @@ def _build_signal(symbol: str, direction: str, sig_type: str, reason, chg24: flo
     return _sig
 
 
+_CHG24_DEPENDENT_ROUTES = ("pullback", "reversal")
+
+
+def _chg24_missing(chg24) -> bool:
+    """chg24 为 None / NaN / 0 视为数据缺失（真实 24H 涨跌几乎不可能恰好为 0）。"""
+    try:
+        v = float(chg24)
+    except (TypeError, ValueError):
+        return True
+    return v != v or abs(v) < 1e-12
+
+
 def analyze_one(symbol: str, ticker: dict,
                 k15: list, k1h: list, k4h: list,
                 active_syms: set, pending_syms: set,
@@ -1312,6 +1324,7 @@ def analyze_one(symbol: str, ticker: dict,
         ind["symbol"]        = symbol
         ind["_weekend_mode"] = is_weekend
         ind["market_mode"]   = market_mode
+        ind["chg24"]         = chg24     # analytics 快照读 ind["chg24"]；此前 analyze_one 未写入，样本里恒为 0
 
         oi_now = float(prefetch.get("oi_now") or 0.0)
 
@@ -1389,6 +1402,11 @@ def analyze_one(symbol: str, ticker: dict,
                     ind_4h = calc_indicators(k15, k1h, _k4h)
                     for _k4h_key in ("ema9_4h", "ema20_4h", "ema50_4h", "rsi_4h", "ema_bull_4h"):
                         ind[_k4h_key] = ind_4h.get(_k4h_key, ind.get(_k4h_key))
+
+            # 数据质量门禁：pullback/reversal 依赖 chg24 做方向判断，chg24 缺失（None/NaN/0）时跳过这两条路径
+            if _route in _CHG24_DEPENDENT_ROUTES and _chg24_missing(chg24):
+                logger.debug(f"[scanner] {symbol} chg24数据缺失，跳过pullback/reversal（当前路径={_route}）")
+                continue
 
             # 执行对应 judge
             if _route == "reversal":
