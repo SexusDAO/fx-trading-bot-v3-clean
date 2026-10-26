@@ -1,6 +1,6 @@
 """daemon 启动/异常退出钉钉通知：纯函数 + 发送路径（全部桩，不联网）。
 运行：cd fx && python3 -m pytest tests/test_daemon_dingtalk.py -v"""
-import sys, unittest
+import os, sys, unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -11,7 +11,7 @@ import daemon_start as D
 class TestDaemonDingtalk(unittest.TestCase):
     def test_startup_text_format(self):
         t = D._startup_text(datetime(2026, 10, 26, 3, 7, tzinfo=timezone.utc), "abcdef12")
-        self.assertEqual(t, "🚀 FX 交易系统已启动\n时间：03:07 UTC\n版本：abcdef12")
+        self.assertEqual(t, f"🚀 FX 交易系统已启动\n时间：03:07 UTC\n版本：abcdef12\nCPU核数：{os.cpu_count()}")
 
     def test_git_commit8_failure_returns_unknown(self):
         with mock.patch.object(D.subprocess, "run", side_effect=OSError("no git")):

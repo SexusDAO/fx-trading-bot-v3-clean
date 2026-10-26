@@ -45,6 +45,13 @@ import sys as _sys
 import logging
 
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# 让顶层名 clawby_adapter 与 shared.clawby_adapter 是「同一个模块实例」：
+#   否则同一文件会被加载两次，各有一份内存缓存和一个后台落盘线程（缓存改为纯内存后会互相看不到）。
+try:
+    from shared import clawby_adapter as _ca_single
+    _sys.modules["clawby_adapter"] = _ca_single
+except Exception:
+    pass
 from clawby_adapter import (  # noqa: F401  将全部公共接口再导出
     # 清算热力图
     get_liq_heatmap, get_liq_density, get_liq_zones,
