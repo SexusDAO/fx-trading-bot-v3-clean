@@ -65,6 +65,11 @@ try:
     from config import KLINE_FETCH_CONCURRENCY as _KLINE_FETCH_CONCURRENCY
 except Exception:
     _KLINE_FETCH_CONCURRENCY = 6
+try:
+    from config import HUB_KLINE_FETCH_TIMEOUT as _HUB_KLINE_FETCH_TIMEOUT
+except Exception:
+    _HUB_KLINE_FETCH_TIMEOUT = 8.0
+KLINE_FETCH_TIMEOUT = float(_HUB_KLINE_FETCH_TIMEOUT)    # 单次历史 K 线拉取的总时限（秒）
 KLINE_FETCH_CONCURRENCY = int(_KLINE_FETCH_CONCURRENCY)   # 历史 K 线 REST 拉取并发上限（_run 内创建信号量时读取）
 try:
     from config import KLINE_LOAD_BATCH_SIZE as _KLINE_LOAD_BATCH_SIZE
@@ -727,7 +732,15 @@ class MarketDataHub:
         rows = None
         try:
             async with self._fetch_sem:
-                rows = await asyncio.get_running_loop().run_in_executor(_LOAD_POOL, self._fetch, sym, iv, KLINE_HISTORY)
+                # 总时限保护：单次历史拉取最多占用 HUB_KLINE_FETCH_TIMEOUT 秒（默认 8s，与 get_klines 的
+                # KLINE_REQUEST_TOTAL_SEC 一致）。超时视同空结果，走原有「30s 后重试」；线程池里的线程无法强杀，
+                # 只是不再让加载协程/信号量被它占住，迟到的结果直接丢弃。
+                rows = await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(_LOAD_POOL, self._fetch, sym, iv, KLINE_HISTORY),
+                    timeout=KLINE_FETCH_TIMEOUT)
+        except asyncio.TimeoutError:
+            rows = None
+            asyncio.get_running_loop().run_in_executor(None, logger.warning, f"[hub] 历史K线拉取超过 {KLINE_FETCH_TIMEOUT}s 放弃 {sym} {iv}")
         except Exception as e:
             # 日志丢线程池：避免 RotatingFileHandler 文件 I/O 阻塞 hub 事件循环
             asyncio.get_running_loop().run_in_executor(None, logger.warning, f"[hub] 历史K线拉取失败 {sym} {iv}: {e}")

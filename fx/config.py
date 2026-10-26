@@ -329,6 +329,7 @@ MARKET_DATA_HUB_ENABLED = True   # 公共市场数据 WS 中心（阶段一：�
 HUB_LOAD_MAX_WORKERS = 4  # hub历史K线加载并发上限
 HUB_NO_MSG_TIMEOUT = 180  # 120→180：给历史加载留余量，减少阻塞引发的假断线； WebSocket 无消息超时（秒），过短会因GIL饿死误触发重连
 KLINE_FETCH_CONCURRENCY = 4  # hub历史K线REST拉取并发上限
+HUB_KLINE_FETCH_TIMEOUT = 8.0  # hub 单次历史K线拉取总时限（秒），超时按空结果处理、30s 后重试
 LIQ_PREFETCH_MAX_WORKERS = 4   # 预热线程数；8 线程实测加剧 GIL 竞争，事件循环反复阻塞 2~4s，回退到 4
 LIQ_PREFETCH_SLEEP_SEC   = 0.05 # 每个标的预热后的节流间隔（秒），50ms 防止 API 429 限速
 LIQ_PRESCAN_PREFETCH_ENABLED     = False  # 扫描前同步预热（已改为后台持续预热，扫描只读缓存；True=恢复旧行为，扫描会等 Clawby）
@@ -1040,6 +1041,8 @@ TRIGGER_DISPATCH_ENABLED = True  # 需同时 TRIGGER_DETECTOR_ENABLED=True；Tru
 SCAN_INTERVAL_PASSIVE    = 900   # 两个开关都为 True 时的兜底扫描间隔（秒）；否则保持 300s / 周末 900s
 TRIGGER_DISPATCH_TIMEOUT = 30     # 单个分析任务超时（预取 + analyze_one + 第四步）
 TRIGGER_DISPATCH_WORKERS = 2      # 分析协程数
+TRIGGER_HUB_WAIT_SEC = 30         # hub 快照未就绪（K线/ticker 缺失）时，触发分析最多等待的秒数；到点仍未就绪则单次 REST 补拉后再分析（0=不等待，直接按旧逻辑报 hub_snapshot_incomplete）
+TRIGGER_HUB_WAIT_POLL_SEC = 2.0   # 等待期间检查 hub 是否就绪的间隔（秒）
 TRIGGER_DISPATCH_MAX_WORKERS = 2  # 触发器派发并发上限，过高会GIL争抢饿死事件循环
 
 # [fix #48] 已删除的失效常量（代码从未引用，保留名单便于追溯）：

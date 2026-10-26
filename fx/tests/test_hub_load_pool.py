@@ -32,3 +32,34 @@ def test_load_history_runs_in_load_pool_not_default_executor():
         await h._load_history(("AUSDT", "15m"), h._shards[0].gen)
     asyncio.run(go())
     assert seen and all(n.startswith("hub-load") for n in seen)
+
+
+def test_load_history_gives_up_after_fetch_timeout(monkeypatch):
+    """单次历史拉取超过 KLINE_FETCH_TIMEOUT 就放弃（按空结果走重试），不长期占住加载协程。"""
+    release = threading.Event()
+
+    def slow_fetcher(sym, iv, n):
+        release.wait(5)
+        return [[0, "1", "2", "0.5", "1.5", "10", 1, "15", 1, "5", "0", "0"]]
+
+    monkeypatch.setattr(H, "KLINE_FETCH_TIMEOUT", 0.2)
+
+    async def go():
+        h = H.MarketDataHub(url="wss://x", market_url="wss://y", kline_fetcher=slow_fetcher)
+        h._fetch_sem = asyncio.Semaphore(1)
+        h.subscribe_klines(["AUSDT"])
+        t0 = asyncio.get_running_loop().time()
+        await h._load_history(("AUSDT", "15m"), h._shards[0].gen)
+        el = asyncio.get_running_loop().time() - t0
+        st = h._series[("AUSDT", "15m")]
+        return el, st.rows, st.retry_at
+    try:
+        el, rows, retry_at = asyncio.run(go())
+    finally:
+        release.set()
+    assert el < 2.0                     # 约 0.2s 就返回，没有等满 5s
+    assert rows is None and retry_at > 0   # 视同空结果，进入重试
+
+
+def test_fetch_timeout_config_default_8s():
+    assert config.HUB_KLINE_FETCH_TIMEOUT == 8.0 and H.KLINE_FETCH_TIMEOUT == 8.0

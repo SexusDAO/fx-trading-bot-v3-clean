@@ -267,6 +267,7 @@ class TriggerDetector:
         self._analyzer = analyzer          # 测试注入；默认 scanner.dispatch_trigger_analysis
         self._dispatch_q: Optional[asyncio.Queue] = None
         self._dispatch_tasks = []
+        self._wait_tasks = set()   # hub 数据未就绪、正在等待的分析任务
         self.dispatch_stats = {"queued": 0, "signal": 0, "rejected": 0, "error": 0, "skipped": 0}
 
     # ── 公共接口 ─────────────────────────────────────────────────────────
@@ -893,12 +894,60 @@ class TriggerDetector:
             finally:
                 self._dispatch_q.task_done()
 
+    def _snapshot_ready(self, sym) -> bool:
+        """hub 快照是否齐全：15m/1h/4h K 线与 ticker 都有（rsi_1h/ema20_1h/atr_1h_pct 由这些数据算出，不齐则为 null）。
+        只读 hub 内存，不发 REST，可在事件循环里直接调用。"""
+        hub = self.hub()
+        if hub is None:
+            return False
+        try:
+            return all(hub.get_klines(sym, iv, 100) for iv in ("15m", "1h", "4h")) and bool(hub.get_ticker(sym))
+        except Exception:
+            return False
+
     async def _dispatch_one(self, rec):
+        sym = rec["symbol"]
+        wait_sec = float(_cfg("TRIGGER_HUB_WAIT_SEC", 30))
+        if wait_sec > 0 and self.hub() is not None and not self._snapshot_ready(sym):
+            # hub 数据未就绪：不报 error、不占 worker，放进等待任务；标的的「分析中」占位保持到等待任务结束
+            t = asyncio.create_task(self._wait_then_dispatch(rec, wait_sec), name=f"trigger_wait_{sym}")
+            self._wait_tasks.add(t)
+            t.add_done_callback(self._wait_tasks.discard)
+            logger.info(f"[trigger-dispatch] {sym} hub 数据未就绪，最多等待 {wait_sec:.0f}s")
+            return
+        await self._run_dispatch(rec, allow_rest=False)
+
+    async def _wait_then_dispatch(self, rec, wait_sec):
+        sym = rec["symbol"]
+        try:
+            poll = max(0.05, float(_cfg("TRIGGER_HUB_WAIT_POLL_SEC", 2.0)))
+            deadline = self._clock() + wait_sec
+            ready = False
+            while True:
+                if self._snapshot_ready(sym):
+                    ready = True
+                    break
+                left = deadline - self._clock()
+                if left <= 0:
+                    break
+                await asyncio.sleep(min(poll, left))
+            if not ready:
+                logger.info(f"[trigger-dispatch] {sym} 等待 {wait_sec:.0f}s hub 仍未就绪，单次 REST 补拉后分析")
+        except asyncio.CancelledError:
+            self.clear_analyzing(sym)
+            raise
+        except Exception as e:
+            self._dispatch_done(rec, "error", None, f"{type(e).__name__}: {e}")
+            self.clear_analyzing(sym)
+            return
+        await self._run_dispatch(rec, allow_rest=not ready)
+
+    async def _run_dispatch(self, rec, allow_rest=False):
         sym = rec["symbol"]
         timeout = float(_cfg("TRIGGER_DISPATCH_TIMEOUT", 30))
         try:
             r = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
-                _dispatch_pool(), self._dispatch_analysis, sym, [rec["strategy"]]), timeout)
+                _dispatch_pool(), self._dispatch_analysis, sym, [rec["strategy"]], allow_rest), timeout)
             self._dispatch_done(rec, r.get("analysis_result", "error"), r.get("signal_strategy"), r.get("error"))
         except asyncio.TimeoutError:
             self._dispatch_done(rec, "error", None, "timeout")
@@ -907,14 +956,28 @@ class TriggerDetector:
         finally:
             self.clear_analyzing(sym)
 
-    def _dispatch_analysis(self, symbol, strategy_hints=None) -> dict:
-        """线程内运行：hub 快照（零 REST）→ scanner.dispatch_trigger_analysis（预取补 REST → analyze_one → 第四步）。"""
+    def _dispatch_analysis(self, symbol, strategy_hints=None, allow_rest=False) -> dict:
+        """线程内运行：hub 快照（零 REST）→ scanner.dispatch_trigger_analysis（预取补 REST → analyze_one → 第四步）。
+        allow_rest=True（等待 TRIGGER_HUB_WAIT_SEC 后 hub 仍不齐）时，只对缺失的部分各做一次 REST 补拉，不走队列。"""
         hub = self.hub()
         if hub is None:
             return {"analysis_result": "error", "error": "no_hub"}
-        kl = tuple(hub.get_klines(symbol, iv, 100) for iv in ("15m", "1h", "4h"))
+        kl = [hub.get_klines(symbol, iv, 100) for iv in ("15m", "1h", "4h")]
         tk = hub.get_ticker(symbol)
         mp = hub.get_mark_price(symbol)
+        if allow_rest and (not all(kl) or not tk):
+            from shared import binance_api as _api
+            for i, iv in enumerate(("15m", "1h", "4h")):
+                if not kl[i]:
+                    kl[i] = _api.get_klines(symbol, iv, 100) or None      # 自带总时限，失败返回 []
+            if not tk:
+                tk = _api.get_ticker(symbol) or None
+            if mp is None:
+                try:
+                    mp = _api.get_mark_price(symbol) or None
+                except Exception:
+                    mp = None
+        kl = tuple(kl)
         if not all(kl) or not tk:
             return {"analysis_result": "error", "error": "hub_snapshot_incomplete"}
         fn = self._analyzer
