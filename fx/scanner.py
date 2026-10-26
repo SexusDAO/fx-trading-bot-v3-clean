@@ -33,6 +33,7 @@ from config import (
     POOL_VOLUME_TOP_N, POOL_GAINERS_N, POOL_LOSERS_N,
     POOL_FUNDING_EXTREME_N, POOL_FUNDING_EXTREME_MIN, POOL_LIQ_TOP_N,
     LIQ_BIAS_MIN_TOTAL_1H, LIQ_BIAS_MIN_RATIO,
+    UNLOCK_FILTER_ENABLED, UNLOCK_FILTER_DAYS, UNLOCK_FILTER_PCT,
     POOL_MIN_VOLUME_USD, POOL_MAX_CHG24_PCT, POOL_STABLE_COINS,
     # 风控
     RISK_MAX_POSITIONS, RISK_MAX_LONG, RISK_MAX_SHORT,
@@ -2016,6 +2017,47 @@ _POOL_OI_WORKERS = 6
 _POOL_OI_TOTAL_TIMEOUT_SEC = 90.0
 
 
+# ── 代币解锁风险过滤（只影响 LONG）─────────────────────────────────────────────
+def _check_unlock_risk(symbol: str, direction: str, now_ms: float = None):
+    """返回 (命中?, 说明)。窗口按 UTC 日历天（今天起 UNLOCK_FILTER_DAYS 天内，含今天）；
+    占流通量百分比 >= UNLOCK_FILTER_PCT。SHORT / 没有解锁数据 / 取数失败 / 解锁日已过 → 一律 (False, "")。"""
+    if (direction or "").upper() != "LONG":
+        return False, ""
+    try:
+        from shared.clawby_adapter import get_upcoming_unlocks
+        d = (get_upcoming_unlocks() or {}).get(str(symbol).upper().removesuffix("USDT"))
+        if not d:
+            return False, ""
+        ts = float(d.get("next_unlock_date") or 0)
+        if ts <= 0:
+            return False, ""
+        import datetime as _dt
+        now_ms = time.time() * 1000 if now_ms is None else now_ms
+        days = (_dt.datetime.fromtimestamp(ts / 1000, _dt.timezone.utc).date()
+                - _dt.datetime.fromtimestamp(now_ms / 1000, _dt.timezone.utc).date()).days
+        pct = float(d.get("next_unlock_of_circulating") or 0)
+        if 0 <= days <= UNLOCK_FILTER_DAYS and pct >= UNLOCK_FILTER_PCT:
+            usd = float(d.get("next_unlock_usd") or 0)
+            return True, f"解锁预警: {days}天后解锁占流通量{pct:.2f}%（约{usd / 1e6:.1f}M USD）"
+    except Exception as e:
+        logger.debug(f"[unlock] {symbol} 解锁风险检查异常，放行: {e}")
+    return False, ""
+
+
+def _apply_unlock_filter(signals: list, result: dict, now_ms: float = None) -> list:
+    """过滤链一环：开关关闭 → 只记录日志、信号原样放行；开启 → LONG 命中则写入 result["rejected"] 并剔除。"""
+    kept = []
+    for sig in signals:
+        hit, msg = _check_unlock_risk(sig.get("symbol", ""), sig.get("direction", ""), now_ms)
+        if hit:
+            logger.info(f"[unlock] {sig.get('symbol')} LONG {msg}（{'已拒绝' if UNLOCK_FILTER_ENABLED else '仅记录，开关关闭未拒绝'}）")
+            if UNLOCK_FILTER_ENABLED:
+                result["rejected"].append({"symbol": sig.get("symbol"), "reason": msg})
+                continue
+        kept.append(sig)
+    return kept
+
+
 # ── coin-list 1h 多空失衡标记 ─────────────────────────────────────────────────
 # 候选池阶段还不知道信号方向，所以这里只“标记”：{BTCUSDT: "LONG"/"SHORT"}，不加分。
 # 后续分析单个标的时用 get_liq_bias(symbol) 取方向，与信号方向比对（加分逻辑尚未接入，先上线观察标记数量和方向分布）。
@@ -2604,6 +2646,9 @@ def _filter_and_register_signals(
         else:
             filtered_bl.append(sig)
     avail_signals = filtered_bl
+
+    # ── 代币解锁风险过滤（LONG；UNLOCK_FILTER_ENABLED=False 时只记录不拒绝）──
+    avail_signals = _apply_unlock_filter(avail_signals, result)
 
     # ── ② 新闻信号过滤（v3.8，超跌解锁 v3.9）──────────────────────────────────
     # bearish 新闻 → LONG 一票否决（默认）

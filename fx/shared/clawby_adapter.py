@@ -926,6 +926,54 @@ def get_liq_orders(symbol: str, exchange: str = "Binance",
         _cache_set(key, result)
     return result
 
+# ── 代币解锁日程（coin_unlock_list）──────────────────────────────────────────
+# 接口不支持按币过滤（symbol 参数会被忽略），只能翻页拉全表：每页 100 条，约 5 页；精度为 UTC 天。
+# 解锁日程按天变化，用独立 6 小时缓存（通用 _cache_get 的 TTL 固定 15 分钟，不适用）。
+UNLOCK_CACHE_TTL = 6 * 3600
+UNLOCK_FAIL_TTL = 600            # 拉取失败/不完整时只缓存 10 分钟，避免每个信号都重打 5 次请求
+UNLOCK_MAX_PAGES = 6
+_UNLOCK_LOCK = threading.Lock()
+_UNLOCK_CACHE: dict = {"ts": 0.0, "ttl": 0.0, "data": {}}
+
+
+def get_upcoming_unlocks() -> dict:
+    """{币名: {next_unlock_date(ms), next_unlock_usd, next_unlock_of_circulating(百分数)}}；失败返回 {}（调用方按“放行”处理）。
+    翻页串行、不重试（_max_retries=0）；任何一页失败 → 已拿到的部分照用，但只缓存 10 分钟。"""
+    now = time.time()
+    with _UNLOCK_LOCK:
+        if now - _UNLOCK_CACHE["ts"] < _UNLOCK_CACHE["ttl"]:
+            return _UNLOCK_CACHE["data"]
+        out: dict = {}
+        complete = False
+        try:
+            for page in range(1, UNLOCK_MAX_PAGES + 1):
+                rows = clawby_relay("coin_unlock_list", {"per_page": 100, "page": page}, timeout=8, _max_retries=0)
+                if not isinstance(rows, list):
+                    logger.warning(f"[unlock] coin_unlock_list 第{page}页失败/无数据，解锁过滤使用已取到的 {len(out)} 个币（默认放行其余）")
+                    break
+                for r in rows:
+                    if not isinstance(r, dict):
+                        continue
+                    sym = str(r.get("symbol") or "").upper().strip()
+                    if not sym or sym in out:
+                        continue
+                    try:
+                        out[sym] = {"next_unlock_date": float(r.get("next_unlock_date") or 0),
+                                    "next_unlock_usd": float(r.get("next_unlock_usd") or 0),
+                                    "next_unlock_of_circulating": float(r.get("next_unlock_of_circulating") or 0)}
+                    except (TypeError, ValueError):
+                        continue
+                if len(rows) < 100:
+                    complete = True
+                    break
+        except Exception as e:
+            logger.warning(f"[unlock] 获取解锁日程失败，默认放行: {type(e).__name__}: {str(e)[:120]}")
+        if not out:
+            logger.warning("[unlock] 解锁日程为空（接口失败或无数据），本轮解锁过滤放行")
+        _UNLOCK_CACHE.update(ts=now, ttl=UNLOCK_CACHE_TTL if (out and complete) else UNLOCK_FAIL_TTL, data=out)
+        return out
+
+
 def get_liq_coin_list(exchange: str = "Binance") -> list:
     """全市场清算量快照 → CG中转 GET"""
     key = f"liq_coin_list:{exchange}"

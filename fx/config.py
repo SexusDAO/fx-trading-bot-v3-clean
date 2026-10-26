@@ -513,6 +513,9 @@ POOL_LOSERS_N               = UNIVERSE_LOSS_TOP
 POOL_FUNDING_EXTREME_N      = UNIVERSE_FUNDING_TOP
 POOL_LIQ_TOP_N              = 30          # CG 清算量 Top N（新来源）
 LIQ_BIAS_MIN_TOTAL_1H       = 10000       # coin-list 1h 多空失衡：最低总清算量门槛（USD），低于视为噪音
+UNLOCK_FILTER_ENABLED       = False       # 代币解锁风险过滤总开关。False=只记录日志不拒绝（先观察）；True=命中则拒绝 LONG
+UNLOCK_FILTER_DAYS          = 7           # 窗口：UTC 日历天，今天起 N 天内（含今天）有解锁
+UNLOCK_FILTER_PCT           = 1.0         # 阈值：下次解锁占流通量百分比（接口 next_unlock_of_circulating 是百分数，1.34=1.34%）
 LIQ_BIAS_MIN_RATIO          = 3.0         # coin-list 1h 多空失衡：多空清算量最低比例（大/小，小侧 +1 防除零）
 POOL_FUNDING_EXTREME_MIN    = UNIVERSE_FUNDING_MIN_ABS
 SCAN_POOL_MAX               = 165          # 200 → 165，对齐理论最大来源数，让评分排序真正生效
