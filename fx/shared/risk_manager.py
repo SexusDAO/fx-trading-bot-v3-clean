@@ -270,7 +270,26 @@ def record_win() -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 # check_position_limits
 # ═══════════════════════════════════════════════════════════════════════════════
-def check_position_limits(direction: str) -> bool | str:
+def exchange_position_counts(positions: list) -> dict:
+    """把交易所 positionRisk 列表汇总成 {total, long, short}（对冲模式：positionSide=LONG/SHORT 且 positionAmt≠0）。
+    注意：交易所口径包含 TP1 已成交后只剩 TP2 的尾仓，而本地 get_position_count 不计尾仓（v3.90），
+    所以取 max 后在有尾仓时会比纯本地口径更严格。"""
+    long_cnt = short_cnt = 0
+    for p in positions or []:
+        try:
+            if abs(float(p.get("positionAmt", 0) or 0)) <= 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        side = str(p.get("positionSide", "")).upper()
+        if side == "LONG":
+            long_cnt += 1
+        elif side == "SHORT":
+            short_cnt += 1
+    return {"total": long_cnt + short_cnt, "long": long_cnt, "short": short_cnt}
+
+
+def check_position_limits(direction: str, exchange_counts: dict | None = None) -> bool | str:
     """
     检查是否允许新开仓（方向 long/short）。
     v3.72: 双层检查
@@ -279,11 +298,20 @@ def check_position_limits(direction: str) -> bool | str:
       第二层：pending 挂单槽位（固定上限 MAX_PENDING_LONG/SHORT）
         → 满了返回 "compete"（交由 signal_watcher 竞争机制决定）
         → 未满返回 True（直接注册）
+
+    exchange_counts: 交易所实际持仓数 {total,long,short}（由调用方在线程池里查好传入，本函数不发请求、不阻塞）。
+      传入时，每一项取 max(本地, 交易所) 再判断上限——pos_state 丢失/漏记时上限不会形同虚设；
+      为 None（查询失败/未查）时只用本地数量。
     """
     try:
         from shared.state import get_position_count, get_pending_count
         from config import MAX_PENDING_LONG, MAX_PENDING_SHORT, MAX_PENDING_TOTAL
         counts  = get_position_count()   # 只含 open+patching
+        if exchange_counts:
+            _merged = {k: max(int(counts.get(k, 0)), int(exchange_counts.get(k, 0))) for k in ("total", "long", "short")}
+            if _merged != {k: counts.get(k, 0) for k in ("total", "long", "short")}:
+                logger.info(f"[risk] 持仓数取 max(本地, 交易所)：本地={dict(counts)} 交易所={dict(exchange_counts)} → {_merged}")
+            counts = _merged
         pending = get_pending_count()    # 只含 pending
         mode    = get_market_mode()
         limits  = _get_position_limits(mode)

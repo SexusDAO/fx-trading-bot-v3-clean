@@ -222,7 +222,7 @@ def _precheck(signal: dict) -> tuple[bool, str]:
     long_cnt  = sum(1 for p in open_pos if p.get("direction", "").upper() == "LONG")
     short_cnt = sum(1 for p in open_pos if p.get("direction", "").upper() == "SHORT")
 
-    if not check_position_limits(direction):
+    if not check_position_limits(direction, signal.get("_exchange_pos_counts")):
         # check_position_limits 内部已记录具体原因日志，这里补充简要描述
         d_cnt = long_cnt if direction == "LONG" else short_cnt
         return False, f"持仓上限（{direction} {d_cnt}仓，总{len(open_pos)}）"
@@ -1581,6 +1581,17 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     logger.info(f"[executor] >>> {symbol} {direction} {mode} 开始执行")
 
     # ── 步骤1：预检 ───────────────────────────────────────────────────────────
+    # 开仓前向交易所取实际持仓数（线程池执行，不阻塞事件循环；_precheck 是同步函数，不能在里面查）；
+    # 失败/超时 → 记 warning，fallback 仅用本地数量。结果经 signal["_exchange_pos_counts"] 交给 check_position_limits 取 max。
+    signal.pop("_exchange_pos_counts", None)
+    try:
+        from shared.risk_manager import exchange_position_counts as _epc
+        _loop = asyncio.get_running_loop()
+        _rp = await asyncio.wait_for(_loop.run_in_executor(None, lambda: api.get_position("")), timeout=10.0)
+        signal["_exchange_pos_counts"] = _epc(_rp)
+    except Exception as _xe:
+        logger.warning(f"[executor] {symbol} 查询交易所实际持仓数失败，持仓上限仅按本地数量判断: "
+                       f"{type(_xe).__name__}: {str(_xe)[:120]}")
     ok, reason = _precheck(signal)
     if not ok:
         logger.info(f"[executor] {symbol} 预检拒绝: {reason}")
