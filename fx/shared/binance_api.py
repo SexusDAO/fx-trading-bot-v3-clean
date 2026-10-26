@@ -569,6 +569,22 @@ def _find_unique_open_order(open_orders: list, spec: dict, since_ms: int, exclud
     return (hits[0] if len(hits) == 1 else None), len(hits)
 
 
+def make_client_id(role: str, *parts, bucket_sec: int = 3600) -> str:
+    """[幂等] 调用方层面的确定性 clientId：同一（角色, 仓位, 价格, 数量…）在同一时间桶内得到同一个 id。
+    - parts 必须包含价格与数量：adjust 改价/改量后 id 随之变化，不会复用旧 id；
+    - 时间桶（默认 1 小时）：规避交易所对已完结订单 id 的复用限制；跨桶后会得到新 id；
+    - 输出符合 Binance 约束（≤36 字符，仅 [A-Za-z0-9_-]）：fx + role(≤4) + sha1 前 24 位。"""
+    import hashlib, re
+    def _norm(x):
+        if isinstance(x, float):
+            return f"{x:.10g}"
+        return str(x)
+    bucket = int(time.time() // max(int(bucket_sec), 1))
+    raw = "|".join(_norm(x) for x in parts) + f"|{bucket}"
+    role = re.sub(r"[^A-Za-z0-9]", "", str(role))[:4]
+    return f"fx{role}{hashlib.sha1(raw.encode()).hexdigest()[:24]}"
+
+
 def place_order(symbol: str, side: str, order_type: str,
                 quantity: float, price: float = None,
                 stop_price: float = None, reduce_only: bool = False,
@@ -662,7 +678,20 @@ def place_order(symbol: str, side: str, order_type: str,
     # [v3.89 #83] 写请求超时不盲目重发：先查挂单对账，找到唯一匹配视为已提交
     since_ms = int(time.time() * 1000) - 5000   # 留 5 秒本地时钟偏差余量
     try:
-        result = _retry(_call, is_write=True)
+        try:
+            result = _retry(_call, is_write=True)
+        except BinanceAPIError as _be:
+            # 确定性 clientId 重复（-4116）：按 id 查单，仍在挂着就视为同一笔，已完结则原样抛出
+            if str(getattr(_be, "code", "")) != "-4116":
+                raise
+            try:
+                _o = _signed_get("/fapi/v1/order", {"symbol": symbol, "origClientOrderId": _cid})
+            except Exception:
+                _o = None
+            if isinstance(_o, dict) and _o.get("orderId") and _o.get("status") in ("NEW", "PARTIALLY_FILLED"):
+                logger.warning(f"[place_order] {symbol} clientId 重复，按 id 查到在挂订单 {_o.get('orderId')}，视为同一笔")
+                return _o
+            raise
     except WriteTimeoutError as e:
         try:
             _o = _signed_get("/fapi/v1/order", {"symbol": symbol, "origClientOrderId": _cid})
@@ -1044,7 +1073,8 @@ def _to_float(v):
 
 
 def place_sl(symbol: str, side: str, position_side: str,
-             trigger_price: float, quantity: float) -> dict:
+             trigger_price: float, quantity: float,
+             client_id: str | None = None) -> dict:
     """
     挂 STOP_MARKET 止损单，走 /fapi/v1/algoOrder（本账号 STOP_MARKET 必须用 Algo 接口）。
     side:          SELL（LONG仓止损）/ BUY（SHORT仓止损）
@@ -1066,7 +1096,8 @@ def place_sl(symbol: str, side: str, position_side: str,
     else:
         params["reduceOnly"] = "true"
     # [幂等] algo 单带 clientAlgoId：连接错误重发前、-2021 恢复时都先按它精确查单
-    params["clientAlgoId"] = "fxsl" + uuid.uuid4().hex[:28]
+    #   client_id 由调用方给定（make_client_id，确定性）时用它，调用方层面的重复提交也能被识别；否则随机
+    params["clientAlgoId"] = client_id or ("fxsl" + uuid.uuid4().hex[:28])
     _cid = params["clientAlgoId"]
 
     def _find_by_cid():

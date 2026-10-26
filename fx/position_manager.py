@@ -54,6 +54,7 @@ from config import (
     PM_HEALTH_EARLY_HOURS, PM_HEALTH_LATE_HOURS,
 )
 from shared import binance_api as api
+from shared.binance_api import make_client_id as _make_client_id   # 确定性 clientId（直接导入，不经 api 对象，便于测试替身）
 from shared.async_utils import _run_sync   # [v3.89 #61] 同步调用移出事件循环的统一封装
 from shared.risk_manager import record_pnl as _record_pnl
 from shared.state import (
@@ -68,6 +69,48 @@ from shared.notifier import (
 )
 
 logger = logging.getLogger("fx.position_manager")
+
+# ── [静默失败留痕] 原先 `except Exception: pass` 的关键位置改为 记日志 + 计数 ──────────────────
+#   行为不变（仍然不抛出、不改变分支），只是让失败可见。计数随每日报告输出并清零。
+import threading as _sf_threading
+_SILENT_FAIL_COUNTS: dict = {}
+_SILENT_FAIL_LOCK = _sf_threading.Lock()
+
+
+def _is_order_gone_error(exc: Exception) -> bool:
+    """撤单时「订单已不存在」类错误：-2011 Unknown order / -2013 Order does not exist（已成交/已撤），属预期。"""
+    code = getattr(exc, "code", None)
+    if str(code) in ("-2011", "-2013"):
+        return True
+    txt = str(exc)
+    return "-2011" in txt or "-2013" in txt or "Unknown order" in txt or "does not exist" in txt
+
+
+def _silent_fail(tag: str, symbol: str, exc: Exception, cancel: bool = False) -> None:
+    """记录一次被吞掉的异常。cancel=True 的撤单类：-2011/-2013（已不存在）记 debug、不计数；其余记 warning 并计数。"""
+    try:
+        if cancel and _is_order_gone_error(exc):
+            logger.debug(f"[silent_fail] {tag} {symbol}: 订单已不存在(预期): {exc}")
+            return
+        with _SILENT_FAIL_LOCK:
+            _SILENT_FAIL_COUNTS[tag] = _SILENT_FAIL_COUNTS.get(tag, 0) + 1
+            n = _SILENT_FAIL_COUNTS[tag]
+        logger.warning(f"[silent_fail] {tag} {symbol}: {type(exc).__name__}: {str(exc)[:160]} (累计第{n}次)")
+    except Exception:
+        pass
+
+
+def _silent_fail_report_line(reset: bool = True) -> str:
+    """日报用：静默失败计数摘要；无计数返回空串。reset=True 时读取后清零（按日统计）。"""
+    with _SILENT_FAIL_LOCK:
+        snap = dict(_SILENT_FAIL_COUNTS)
+        if reset:
+            _SILENT_FAIL_COUNTS.clear()
+    if not snap:
+        return ""
+    items = "、".join(f"{k}×{v}" for k, v in sorted(snap.items(), key=lambda x: -x[1]))
+    return f"\n\n⚠️ 静默失败计数（近24h）:{items}"
+
 
 
 def _remove_position_checked(pos_id: str, symbol: str = "") -> bool:
@@ -425,8 +468,8 @@ async def _execute_trail_sl_inner(pos: dict, new_sl: float,
                     await asyncio.get_running_loop().run_in_executor(
                         None, lambda _aid=aid: api.cancel_algo_order(symbol, _aid)
                     )
-                except Exception:
-                    pass
+                except Exception as _sf_e:
+                    _silent_fail("trail_cancel_old_sl", symbol, _sf_e, cancel=True)
     except Exception as e:
         logger.warning(f"[pm] {symbol} 撤旧SL失败(新单已保护,不影响安全): {e}")
 
@@ -1006,8 +1049,8 @@ class PositionManager:
                                 await asyncio.get_running_loop().run_in_executor(
                                     None, lambda: api.cancel_algo_order(symbol, sl_id)
                                 )
-                            except Exception:
-                                pass
+                            except Exception as _sf_e:
+                                _silent_fail("filled_cancel_sl", symbol, _sf_e, cancel=True)
                         (await asyncio.to_thread(update_position, pid, {"sl_order_id": int(_new_sl_id), "sl_price": _sl_p}))
                         logger.info(
                             f"[pm] {symbol} TP1后补挂SL单成功: "
@@ -1253,10 +1296,10 @@ class PositionManager:
                         await asyncio.get_running_loop().run_in_executor(
                             None, lambda _id=aid: api.cancel_algo_order(symbol, _id)
                         )
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as _sf_e:
+                        _silent_fail("cleanup_cancel_algo", symbol, _sf_e, cancel=True)
+        except Exception as _sf_e:
+            _silent_fail("cleanup_algo_query", symbol, _sf_e)
 
         # 更新 pos_state
         (await asyncio.to_thread(update_position, pid, {"status": "closed", "close_reason": _inferred_close_reason}))
@@ -1345,8 +1388,8 @@ class PositionManager:
             # 补写熔断器盘口（[fix #44] 带实际手续费，上面已取得）
             try:
                 _record_pnl(_real_pnl, symbol=symbol, fee=_manual_fees)
-            except Exception:
-                pass
+            except Exception as _sf_e:
+                _silent_fail("record_pnl_manual_close", symbol, _sf_e)
         except Exception as _te:
             logger.error(f"[pm] {symbol} {_inferred_close_reason} trade_log 补写失败: {_te}")
 
@@ -1747,8 +1790,8 @@ class PositionManager:
                                         await loop.run_in_executor(
                                             None, lambda: api.cancel_algo_order(symbol, _old_sl_id_r)
                                         )
-                                    except Exception:
-                                        pass
+                                    except Exception as _sf_e:
+                                        _silent_fail("tp_filled_cancel_old_sl", symbol, _sf_e, cancel=True)
                                 (await asyncio.to_thread(update_position, pid, {"sl_order_id": int(_new_sl_id_r)}))
                                 logger.info(f"[pm] {symbol} REST路径TP1后补挂SL成功 id={_new_sl_id_r}")
                         except Exception as _rsl_e:
@@ -2771,8 +2814,8 @@ async def _maybe_tighten_tp2(pos: dict) -> None:
         if old_tp2_id:
             try:
                 await loop.run_in_executor(None, lambda: api.cancel_order(symbol, int(old_tp2_id)))
-            except Exception:
-                pass
+            except Exception as _sf_e:
+                _silent_fail("tighten_tp2_cancel_old", symbol, _sf_e, cancel=True)
 
         try:
             resp = await loop.run_in_executor(
@@ -2813,8 +2856,8 @@ async def _maybe_tighten_tp2(pos: dict) -> None:
                 )
                 if _resp2.get("orderId"):
                     (await asyncio.to_thread(update_position, pid, {"tp2_order_id": int(_resp2["orderId"])}))
-            except Exception:
-                pass
+            except Exception as _sf_e:
+                _silent_fail("tp2_restore_old_failed", symbol, _sf_e)
     except Exception as e:
         logger.debug(f"[pm] _maybe_tighten_tp2 {pos.get('symbol','')} 失败(非致命): {e}")
 
@@ -3430,6 +3473,7 @@ async def _generate_daily_report():
         f"今日已用仓位:{len(open_pos)} / {__import__('config').RISK_MAX_POSITIONS}\n"
         f"熔断器状态:{circuit_status}\n\n"
         f"昨日各模式表现:\n{mode_section}"
+        f"{_silent_fail_report_line()}"
     )
     # 完整日报只发 Jarvis；钉钉收 UTC 00:00 的精简摘要（tools/daily_dingtalk.py），这里不重复发
     await asyncio.get_running_loop().run_in_executor(None, lambda: notify(report, dingtalk=False))
@@ -3562,8 +3606,8 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: _api.cancel_algo_order(symbol, int(sl_id_old))
                 )
-            except Exception:
-                pass
+            except Exception as _sf_e:
+                _silent_fail("guard_cancel_old_sl", symbol, _sf_e, cancel=True)
 
         async def _repair_sl_only() -> "int | None":
             """只补 SL（TP 已在交易所）。成功则把新 id 写回 pos_state。"""
@@ -3705,6 +3749,7 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
             symbol, direction, fill_qty,
             sl_price, tp1_price, tp2_price,
             precision, skip_sl=_skip_sl, sig_id=pos.get("_sig_id", ""),
+            guard_key=str(pid),
         )
 
         # 更新 pos_state:pending → open,写入保护单 id
@@ -4367,6 +4412,7 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
                     position_side=pos_side,
                     trigger_price=new_sl_r,
                     quantity=_round_qty(qty, step),
+                    client_id=_make_client_id("sl", pid, symbol, pos_side, new_sl_r, _round_qty(qty, step)),
                 )
             )
             new_id = int(resp.get("algoId") or resp.get("orderId") or 0)
@@ -4406,8 +4452,8 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: api.cancel_order(symbol, int(tp1_id))
                 )
-            except Exception:
-                pass  # 旧单可能已成交或已撤
+            except Exception as _sf_e:
+                _silent_fail("replace_tp1_cancel_old", symbol, _sf_e, cancel=True)  # 旧单可能已成交或已撤
         try:
             resp = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: api.place_order(
@@ -4417,6 +4463,7 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
                     price=new_tp1_r,
                     timeInForce="GTC",
                     positionSide=pos_side,
+                    newClientOrderId=_make_client_id("tp1", pid, symbol, pos_side, new_tp1_r, _round_qty(qty_tp1, step)),
                 )
             )
             new_id = int(resp.get("orderId") or resp.get("algoId") or 0)
@@ -4456,8 +4503,8 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: api.cancel_order(symbol, int(tp2_id))
                 )
-            except Exception:
-                pass
+            except Exception as _sf_e:
+                _silent_fail("replace_tp2_cancel_old", symbol, _sf_e, cancel=True)
         try:
             resp = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: api.place_order(
@@ -4467,6 +4514,7 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
                     price=new_tp2_r,
                     timeInForce="GTC",
                     positionSide=pos_side,
+                    newClientOrderId=_make_client_id("tp2", pid, symbol, pos_side, new_tp2_r, _round_qty(qty_tp2, step)),
                 )
             )
             new_id = int(resp.get("orderId") or resp.get("algoId") or 0)

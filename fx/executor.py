@@ -983,6 +983,7 @@ async def _place_guards_async(
     precision: dict,
     skip_sl: bool = False,
     sig_id: str = "",
+    guard_key: str = "",
 ) -> dict:
     """
     提交保护单：SL + TP1（必选）+ TP2（可选，tp2_price=None 时不挂）。
@@ -1031,6 +1032,11 @@ async def _place_guards_async(
 
     results: dict = {}
 
+    # [幂等] 保护单确定性 clientId：同一仓位同价同量同小时内重复提交（补挂重试/巡检重入）得到同一 id，交易所侧可去重。
+    #   id 内含价格与数量，改价改量后自然换新 id；guard_key 为 pos_id（补挂路径）或空（新开仓路径，靠 symbol+方向+价量）。
+    from shared.binance_api import make_client_id as _mkcid
+    _cid_base = (guard_key or "", symbol, pos_side)
+
     async def _place(tag: str, kwargs: dict):
         if kwargs.get("quantity", 0) <= 0:
             results[tag] = None
@@ -1065,6 +1071,7 @@ async def _place_guards_async(
                     position_side=pos_side,
                     trigger_price=sl_p,
                     quantity=sl_qty_f,
+                    client_id=_mkcid("sl", *_cid_base, sl_p, sl_qty_f),
                 )
             )
             order_id = resp.get("orderId") or resp.get("algoId")
@@ -1093,6 +1100,7 @@ async def _place_guards_async(
             timeInForce="GTC",
             position_side=pos_side,
             reduce_only=True,
+            newClientOrderId=_mkcid("tp1", *_cid_base, tp1_p, tp1_qty_f),
         )),
     ]
     if has_tp2:
@@ -1104,6 +1112,7 @@ async def _place_guards_async(
             timeInForce="GTC",
             position_side=pos_side,
             reduce_only=True,
+            newClientOrderId=_mkcid("tp2", *_cid_base, tp2_p, tp2_qty_f),
         )))
 
     await asyncio.gather(*coros)
