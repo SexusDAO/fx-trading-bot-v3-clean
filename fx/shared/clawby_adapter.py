@@ -70,8 +70,8 @@ CLAWBY_HEADERS  = {"X-API-Key": CLAWBY_API_KEY, "Content-Type": "application/jso
 CG_BASE_URL  = os.environ.get("CG_BASE_URL",  "https://vip2.coinglass.site")
 CG_API_KEY   = os.environ.get("CG_API_KEY",   "cg_998dad4b22ea88573763952d7b9e0944de6addfe7e5ec216")
 CG_HEADERS   = {"X-API-Key": CG_API_KEY, "Accept-Encoding": "identity"}  # 禁用响应压缩
-# 30次/分钟 → 2s 间隔（留 0% 余量安全）
-CG_RATE_LIMIT_S  = 1.0
+# 30次/分钟 → 理论最小间隔 2.0s；取 2.2s（约 27 次/分钟，留约 10% 余量）。此前 1.0s 实际放行 ~60 次/分钟，是 429 的直接原因
+CG_RATE_LIMIT_S  = 2.2
 CG_LSR_LIMIT_S   = 31.0   # LSR 专用：2次/分钟 → 31s（安全间隔）
 
 # Clawby Pro 套餐 1200次/分钟 → 0.052s 间隔
