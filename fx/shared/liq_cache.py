@@ -24,6 +24,11 @@ except ImportError:   # config 缺这两项时的兜底（与 config.py 默认�
     LIQ_PREFETCH_MAX_WORKERS, LIQ_PREFETCH_SLEEP_SEC = 2, 1.0
 
 try:
+    from config import LIQ_PREFETCH_FETCH_TIMEOUT_SEC
+except ImportError:   # 与 config.py 默认值一致
+    LIQ_PREFETCH_FETCH_TIMEOUT_SEC = 5.0
+
+try:
     from config import LIQ_BG_REFRESH_INTERVAL_SEC, LIQ_SCAN_STALE_MAX_SEC
 except ImportError:   # 与 config.py 默认值一致
     LIQ_BG_REFRESH_INTERVAL_SEC, LIQ_SCAN_STALE_MAX_SEC = 600.0, 2400.0
@@ -213,8 +218,10 @@ def _evict_oldest_locked() -> int:
     return len(victims)
 
 
-def _fetch_dedup(symbol: str, price: float, range_: str, key: str) -> dict:
-    """[v3.89 #35] 同一 key 的在途请求合并；返回 {} 表示本次没拿到数据。"""
+def _fetch_dedup(symbol: str, price: float, range_: str, key: str,
+                 abandon: "threading.Event | None" = None) -> dict:
+    """[v3.89 #35] 同一 key 的在途请求合并；返回 {} 表示本次没拿到数据。
+    abandon：调用方因超时放弃等待时置位；置位后即使请求最终返回也不写缓存（预热超时跳过的标的不应被晚到的结果写入）。"""
     with _CACHE_LOCK:
         fut = _INFLIGHT.get(key)
         owner = fut is None
@@ -235,7 +242,10 @@ def _fetch_dedup(symbol: str, price: float, range_: str, key: str) -> dict:
         if time.time() - _failed_at < _FAIL_TTL:
             return {}
         data = _fetch_from_clawby(symbol, price, range_=range_)
-        if data:
+        if data and abandon is not None and abandon.is_set():
+            logger.debug(f"[liq_cache] {key} 请求晚于预热超时返回，丢弃不缓存")
+            data = {}
+        elif data:
             _store_if_newer(key, data)
             with _CACHE_LOCK:
                 _FAIL_CACHE.pop(key, None)
@@ -356,6 +366,42 @@ def _needs_refresh(sym: str, ranges=_PREFETCH_RANGES) -> bool:
     return False
 
 
+# 预热取数专用小线程池：网络等待放在独立线程里，预热工作线程最多等 LIQ_PREFETCH_FETCH_TIMEOUT_SEC 秒；
+# 池满（前面的请求都卡住）时新任务排队，排队时间同样计入超时 → 直接跳过，不会无限堆线程。
+_FETCH_POOL = None
+_FETCH_POOL_LOCK = threading.Lock()
+
+
+def _fetch_pool():
+    global _FETCH_POOL
+    if _FETCH_POOL is None:
+        with _FETCH_POOL_LOCK:
+            if _FETCH_POOL is None:
+                from concurrent.futures import ThreadPoolExecutor as _TPE
+                _FETCH_POOL = _TPE(max_workers=4, thread_name_prefix="liq-fetch")
+    return _FETCH_POOL
+
+
+def _fetch_with_timeout(sym: str, price: float, range_: str, key: str, timeout: float | None = None) -> dict:
+    """在独立线程里执行 _fetch_dedup，最多等 timeout 秒；超时返回 {}（不缓存、不抛异常）。"""
+    if timeout is None:
+        timeout = float(LIQ_PREFETCH_FETCH_TIMEOUT_SEC)
+    if timeout <= 0:                         # 0/负数：关闭超时，直接同步执行（旧行为）
+        return _fetch_dedup(sym, price, range_, key)
+    abandon = threading.Event()
+    fut = _fetch_pool().submit(_fetch_dedup, sym, price, range_, key, abandon)
+    try:
+        return fut.result(timeout=timeout) or {}
+    except concurrent.futures.TimeoutError:
+        abandon.set()
+        fut.cancel()                         # 还在排队的直接取消；已在执行的由 abandon 阻止写缓存
+        logger.warning(f"[liq_cache] {key} 预热取数超过 {timeout:.0f}s，跳过且不缓存")
+        return {}
+    except Exception as e:
+        logger.debug(f"[liq_cache] {key} 预热取数异常: {e}")
+        return {}
+
+
 def _prefetch_one(sym: str, ranges=_PREFETCH_RANGES, price: float = 0.0) -> bool:
     """预热单个标的的清算区缓存；返回是否写入了至少一个 range。"""
     try:
@@ -372,7 +418,7 @@ def _prefetch_one(sym: str, ranges=_PREFETCH_RANGES, price: float = 0.0) -> bool
 
         wrote = 0
         for r in ranges:
-            data = _fetch_dedup(sym, price, r, f"{sym}:{r}")   # [v3.89 #35]
+            data = _fetch_with_timeout(sym, price, r, f"{sym}:{r}")   # [v3.89 #35] + 独立线程、单次超时跳过
             if data:
                 wrote += 1
                 # BYK 数据不区分 range，三个 range 共享，避免重复请求

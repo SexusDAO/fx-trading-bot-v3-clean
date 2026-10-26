@@ -337,6 +337,7 @@ KLINE_FETCH_CONCURRENCY = 2  # hub历史K线REST拉取并发上限
 HUB_KLINE_FETCH_TIMEOUT = 8.0  # hub 单次历史K线拉取总时限（秒），超时按空结果处理、30s 后重试
 LIQ_PREFETCH_MAX_WORKERS = 2   # 预热线程数；8 线程实测加剧 GIL 竞争，事件循环反复阻塞 2~4s，回退到 4
 LIQ_PREFETCH_SLEEP_SEC   = 0.05 # 每个标的预热后的节流间隔（秒），50ms 防止 API 429 限速
+LIQ_PREFETCH_FETCH_TIMEOUT_SEC = 5.0  # 清算图预热单次取数的等待上限（秒）：在独立线程里取，超时直接跳过且晚到结果不写缓存；<=0 关闭超时（旧行为）
 LIQ_PRESCAN_PREFETCH_ENABLED     = False  # 扫描前同步预热（已改为后台持续预热，扫描只读缓存；True=恢复旧行为，扫描会等 Clawby）
 LIQ_SCAN_CACHE_ONLY              = True   # 扫描分析阶段的清算区只读缓存、不发网络请求（缓存缺失按无清算区降级，并登记后台优先预热）
 LIQ_SCAN_STALE_MAX_SEC           = 2400.0 # 扫描允许使用的缓存最大年龄（秒，约两个预热周期）；超过按缺失处理
