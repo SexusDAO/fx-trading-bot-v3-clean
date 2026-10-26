@@ -825,6 +825,81 @@ def get_user_trades(symbol: str, start_time: int = None, limit: int = 20) -> lis
         return d if isinstance(d, list) else []
     return _retry(_call) or []
 
+def get_user_trades_range(symbol: str, start_time: int, end_time: int = None,
+                          limit: int = 1000, max_pages: int = 20) -> list:
+    """按时间区间分页拉某标的成交（/fapi/v1/userTrades，含 realizedPnl/commission）。
+
+    与 get_user_trades 不同：查询失败抛 ApiQueryError（不把失败当作「没有成交」），供对账/同步类工具使用。
+    交易所限制 startTime~endTime 最长 7 天，这里按 6 天切窗；窗内用 startTime=上页最后成交时间 翻页，按成交 id 去重。
+    """
+    end_ms = int(end_time or time.time() * 1000)
+    win = 6 * 86400 * 1000
+    seen: dict = {}
+    cur = int(start_time)
+    while cur <= end_ms:
+        w_end = min(cur + win, end_ms)
+        page_start = cur
+        for _ in range(max(int(max_pages), 1)):
+            def _call(_s=page_start, _e=w_end):
+                d = _signed_get("/fapi/v1/userTrades",
+                                {"symbol": symbol, "startTime": _s, "endTime": _e, "limit": limit})
+                if not isinstance(d, list):
+                    raise ApiQueryError(f"userTrades 返回格式异常: {type(d).__name__}")
+                return d
+            page = _retry(_call)
+            if page is None:
+                raise ApiQueryError(f"get_user_trades_range {symbol} 查询失败（重试耗尽）")
+            new_n = 0
+            for t in page:
+                k = t.get("id")
+                if k is not None and k not in seen:
+                    seen[k] = t
+                    new_n += 1
+            if len(page) < limit or new_n == 0:
+                break
+            page_start = max(int(t.get("time", 0)) for t in page)
+        cur = w_end + 1
+    return sorted(seen.values(), key=lambda t: (int(t.get("time", 0)), int(t.get("id", 0))))
+
+
+def get_income(income_type: str = None, symbol: str = None, start_time: int = None,
+               end_time: int = None, limit: int = 1000, max_pages: int = 20) -> list:
+    """资金流水（/fapi/v1/income），如 REALIZED_PNL / COMMISSION / FUNDING_FEE。分页拉取并去重。
+
+    查询失败抛 ApiQueryError。空区间返回 []。income_type 为空则返回所有类型。
+    """
+    seen: dict = {}
+    cur = start_time
+    for _ in range(max(int(max_pages), 1)):
+        params: dict = {"limit": limit}
+        if income_type:
+            params["incomeType"] = income_type
+        if symbol:
+            params["symbol"] = symbol
+        if cur:
+            params["startTime"] = int(cur)
+        if end_time:
+            params["endTime"] = int(end_time)
+
+        def _call(_p=params):
+            d = _signed_get("/fapi/v1/income", dict(_p))
+            if not isinstance(d, list):
+                raise ApiQueryError(f"income 返回格式异常: {type(d).__name__}")
+            return d
+        page = _retry(_call)
+        if page is None:
+            raise ApiQueryError("get_income 查询失败（重试耗尽）")
+        new_n = 0
+        for r in page:
+            k = (r.get("tranId"), r.get("incomeType"), r.get("symbol"), r.get("time"), r.get("income"))
+            if k not in seen:
+                seen[k] = r
+                new_n += 1
+        if len(page) < limit or new_n == 0:
+            break
+        cur = max(int(r.get("time", 0)) for r in page)
+    return sorted(seen.values(), key=lambda r: int(r.get("time", 0)))
+
 def set_leverage(symbol: str, leverage: int) -> dict:
     """设置杠杆，失败返回 {}"""
     def _call():
