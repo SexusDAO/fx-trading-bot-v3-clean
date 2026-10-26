@@ -943,7 +943,12 @@ def place_batch_orders(orders: list) -> list:
     import json as _json
     if not orders:
         return []
-    batch = orders[:5]
+    # [幂等] 每个子单带 newClientOrderId（调用方已给则保留），写超时后按 id 精确对账，不再只靠属性启发式匹配
+    batch = []
+    for _o in orders[:5]:
+        _o = dict(_o)
+        _o.setdefault("newClientOrderId", "fx" + uuid.uuid4().hex[:30])
+        batch.append(_o)
     params = {"batchOrders": _json.dumps(batch)}
     def _call():
         return _signed_post("/fapi/v1/batchOrders", params)
@@ -956,6 +961,15 @@ def place_batch_orders(orders: list) -> list:
         cache: dict = {}
         for spec in batch:
             sym = spec.get("symbol")
+            # 先按 clientOrderId 精确查单（已成交/已撤的单也能查到）
+            try:
+                _o = _signed_get("/fapi/v1/order", {"symbol": sym, "origClientOrderId": spec.get("newClientOrderId")})
+                if isinstance(_o, dict) and _o.get("orderId"):
+                    used.add(_o.get("orderId"))
+                    out.append(_o)
+                    continue
+            except Exception:
+                pass   # -2013 订单不存在 / 查询失败：落到属性匹配兜底
             try:
                 if sym not in cache:
                     cache[sym] = get_open_orders(sym)
@@ -1051,8 +1065,30 @@ def place_sl(symbol: str, side: str, position_side: str,
         params["positionSide"] = position_side
     else:
         params["reduceOnly"] = "true"
+    # [幂等] algo 单带 clientAlgoId：连接错误重发前、-2021 恢复时都先按它精确查单
+    params["clientAlgoId"] = "fxsl" + uuid.uuid4().hex[:28]
+    _cid = params["clientAlgoId"]
+
+    def _find_by_cid():
+        try:
+            ex = _signed_get("/fapi/v1/openAlgoOrders", {"symbol": symbol}) or {}
+            lst = ex.get("orders", []) if isinstance(ex, dict) else (ex if isinstance(ex, list) else [])
+            for o in lst:
+                if o.get("clientAlgoId") == _cid and o.get("algoId"):
+                    return o
+        except Exception:
+            pass
+        return None
+
     def _call():
+        if _call.sent:
+            _o = _find_by_cid()
+            if _o:
+                logger.warning(f"[place_sl] {symbol} 重发前按 clientAlgoId 查到已提交止损单 algoId={_o['algoId']}，不重复下单")
+                return {"algoId": int(_o["algoId"]), "orderId": int(_o["algoId"]), "_recovered": True}
+        _call.sent = True
         return _signed_post("/fapi/v1/algoOrder", params)
+    _call.sent = False
     # v3.56: suppress -2021（同标的重复止损单），超时重试时第一次可能已在交易所生效
     # 若返回 None（被抑制），说明已有同价止损单存在，主动查出真实 algoId
     result = _retry(_call, suppress_codes=[-2021]) or {}
@@ -1061,6 +1097,11 @@ def place_sl(symbol: str, side: str, position_side: str,
         # [v3.89 #12] 原逻辑只按 symbol+side 取最新一单认领，可能认领到别的保护单（如旧仓位/其他价位的止损）。
         #   现要求 symbol/side/positionSide(Hedge)/type/触发价(±0.1%)/数量(±1%) 全部匹配且唯一才认领；
         #   多个匹配或字段缺失无法核对 → 不认领，返回 {}（未确认），由调用方重新处理。
+        _by_cid = _find_by_cid()
+        if _by_cid:
+            result = {"algoId": int(_by_cid["algoId"]), "orderId": int(_by_cid["algoId"]), "_recovered": True}
+            logger.info(f"[api] place_sl {symbol} 按 clientAlgoId 精确恢复已有algoId={_by_cid['algoId']}")
+    if not result.get("algoId") and not result.get("orderId"):
         try:
             existing = _signed_get("/fapi/v1/openAlgoOrders", {"symbol": symbol}) or {}
             orders   = existing.get("orders", []) if isinstance(existing, dict) else []
