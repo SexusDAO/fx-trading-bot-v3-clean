@@ -2143,7 +2143,13 @@ def refresh_pool() -> list:
             _held = sorted({p["symbol"] for p in get_all_positions() if p.get("symbol")})
         except Exception:
             _held = []
-        _hub_subscribe_klines(["BTCUSDT"] + _held + list(pool))
+        # 非交易时段的股票代币（港/美/韩/A股）不订阅：它们没有行情，REST 响应极慢，白白占用加载线程池；
+        # 持仓中的股票代币（_held）始终保留订阅，持仓维护要读它们的 K 线
+        _held_set = set(_held)
+        _sub_pool = [s for s in pool if s in _held_set or _is_stock_token_tradeable(s)]
+        if len(_sub_pool) != len(pool):
+            logger.debug(f"[scanner] hub 订阅跳过非交易时段股票代币 {len(pool) - len(_sub_pool)} 个")
+        _hub_subscribe_klines(["BTCUSDT"] + _held + _sub_pool)
         return pool
 
     except Exception as e:

@@ -840,6 +840,7 @@ async def _verify_hedge_mode_or_exit() -> None:
 
 async def main() -> None:
     logger.info("[main] fx 交易系统 V3.0 启动")
+    logger.info(f"CPU核心数: {os.cpu_count()}")
     logger.info(f"[main] 事件循环: {type(asyncio.get_event_loop_policy()).__name__} / "
                 f"loop={type(asyncio.get_running_loop()).__name__}")
     import config as _cfg_req
