@@ -187,7 +187,41 @@ def _order_timeout():
 _ORDER_PATHS = ("/fapi/v1/order", "/fapi/v1/batchOrders", "/fapi/v1/algoOrder")
 
 
-def _retry(fn, *args, retries=None, suppress_codes=None, is_write: bool = False, raise_business: bool = False, **kwargs):
+def _retry(fn, *args, **kwargs):
+    """[慢请求诊断] 包装 _retry_impl：总耗时（含重试与退避）超过 API_SLOW_LOG_SEC（默认 3s）记一条 warning，
+    含调用方函数名、线程名、尝试次数、结果类型；不改变任何返回值/异常行为。"""
+    t0 = time.monotonic()
+    stat = {"n": 0}
+
+    def _counted(*a, **k):
+        stat["n"] += 1
+        return fn(*a, **k)
+
+    outcome = "ok"
+    try:
+        res = _retry_impl(_counted, *args, **kwargs)
+        if res is None:
+            outcome = "none"
+        return res
+    except BaseException as e:
+        outcome = f"raise:{type(e).__name__}"
+        raise
+    finally:
+        try:
+            elapsed = time.monotonic() - t0
+            if elapsed >= float(_cfg("API_SLOW_LOG_SEC", 3.0)):
+                import sys as _sys, threading as _th
+                try:
+                    caller = _sys._getframe(1).f_code.co_name
+                except Exception:
+                    caller = getattr(fn, "__name__", "?")
+                logger.warning(f"[api] 慢请求 {caller} 耗时{elapsed:.1f}s 尝试{stat['n']}次 "
+                               f"结果={outcome} thread={_th.current_thread().name}")
+        except Exception:
+            pass
+
+
+def _retry_impl(fn, *args, retries=None, suppress_codes=None, is_write: bool = False, raise_business: bool = False, **kwargs):
     """
     suppress_codes: 包含这些 Binance 错误码时不打 ERROR，直接返回 None
     连接类错误（SOCKS/Timeout）自动重建 Session 后重试，最多降级一次。

@@ -55,7 +55,7 @@ from config import (
 )
 from shared import binance_api as api
 from shared.binance_api import make_client_id as _make_client_id   # 确定性 clientId（直接导入，不经 api 对象，便于测试替身）
-from shared.async_utils import _run_sync   # [v3.89 #61] 同步调用移出事件循环的统一封装
+from shared.async_utils import _run_sync, _run_patrol   # [v3.89 #61] 同步调用移出事件循环的统一封装
 from shared.risk_manager import record_pnl as _record_pnl
 from shared.state import (
     get_all_positions, update_position, remove_position,
@@ -1165,9 +1165,7 @@ class PositionManager:
         qty       = float(pos.get("quantity_remaining", pos.get("quantity", 0)))
 
         try:
-            live = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: api.get_position(symbol)
-            )
+            live = await _run_patrol(lambda: api.get_position(symbol))
             # [fix] 第一道保护：API 返回 None 或空列表时，跳过判定，避免网络不通误判为已平仓
             if live is None or live == []:
                 logger.warning(
@@ -1190,9 +1188,7 @@ class PositionManager:
         # [fix] 第二道保护：live_qty 为零时，3 秒后二次确认，防止瞬时 API 抗平误判
         try:
             await asyncio.sleep(3)
-            live2 = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: api.get_position(symbol)
-            )
+            live2 = await _run_patrol(lambda: api.get_position(symbol))
             if live2 is None or live2 == []:
                 logger.warning(
                     f"[pm] {symbol} 二次确认 get_position 返回空，跳过平仓判定"
@@ -1230,9 +1226,7 @@ class PositionManager:
         _sl_price = float(pos.get("sl_price", 0) or 0)
         if _sl_id and _sl_price > 0:
             try:
-                _algo_orders = await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: api.get_algo_open_orders(symbol)
-                )
+                _algo_orders = await _run_patrol(lambda: api.get_algo_open_orders(symbol))
                 _algo_ids = {int(o.get("algoId", 0)) for o in (_algo_orders or [])}
                 if int(_sl_id) not in _algo_ids:
                     # SL 单已不存在 → 大概率是 SL 触发了
@@ -1286,9 +1280,7 @@ class PositionManager:
 
         # 额外保险:撤清该标的所有残余 Algo 单
         try:
-            all_algo = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: api.get_algo_open_orders(symbol)
-            )
+            all_algo = await _run_patrol(lambda: api.get_algo_open_orders(symbol))
             for ao in (all_algo or []):
                 aid = int(ao.get("algoId", 0))
                 if aid:
@@ -1463,9 +1455,7 @@ class PositionManager:
                 _sl_check_ts[pid] = time.time()
                 try:
                     # 查 Algo 挂单(SL 走 Algo 接口)
-                    algo_orders = await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: api.get_algo_open_orders(symbol)
-                    )
+                    algo_orders = await _run_patrol(lambda: api.get_algo_open_orders(symbol))
                     algo_ids = {int(o.get("algoId", 0)) for o in (algo_orders or [])}
                     sl_exists = int(sl_order_id) in algo_ids
                     if not sl_exists:
@@ -1473,9 +1463,7 @@ class PositionManager:
                         # 持仓查询失败（网络超时等）或返回空，不能当作「持仓为零」，
                         # 否则会在网络故障时误判 SL 已触发而强制平仓；跳过本次判定，等下一轮巡检。
                         try:
-                            live_pos = await asyncio.get_running_loop().run_in_executor(
-                                None, lambda: api.get_position(symbol)
-                            )
+                            live_pos = await _run_patrol(lambda: api.get_position(symbol))
                         except Exception as _lp_e:
                             logger.warning(
                                 f"[pm] {symbol} SL 不在交易所且持仓查询失败({_lp_e})，"
@@ -1745,9 +1733,7 @@ class PositionManager:
         # ── 检查 TP1 ──────────────────────────────────────────────────────────
         if tp1_id and not tp1_filled:
             try:
-                od = await loop.run_in_executor(
-                    None, lambda: api.get_order(symbol, int(tp1_id))
-                )
+                od = await _run_patrol(lambda: api.get_order(symbol, int(tp1_id)))
                 if od and od.get("status") == "FILLED":
                     # 问题四修复:用 tp2_quantity(开仓时已计算)而非总量×0.4
                     tp2_qty = float(
@@ -1812,9 +1798,7 @@ class PositionManager:
         # ── 检查 TP2 ──────────────────────────────────────────────────────────
         if tp2_id and tp1_filled:
             try:
-                od = await loop.run_in_executor(
-                    None, lambda: api.get_order(symbol, int(tp2_id))
-                )
+                od = await _run_patrol(lambda: api.get_order(symbol, int(tp2_id)))
                 if od and od.get("status") == "FILLED":
                     fill_price = float(od.get("avgPrice") or od.get("price", 0))
                     fill_qty   = float(od.get("executedQty", 0))
@@ -3567,9 +3551,7 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
 
         # ── 实际持仓量校验:持仓为 0 时就是已经被平仓,跳过补挂避免 -2022 ──────────
         try:
-            real_positions = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: _api.get_position(symbol)
-            ) or []
+            real_positions = await _run_patrol(lambda: _api.get_position(symbol)) or []
             real_pos = next(
                 (p for p in real_positions
                  if p.get("positionSide","").upper() == pos_side),
@@ -3594,9 +3576,7 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
         sl_id_old = pos.get("sl_order_id")
         sl_alive = None   # None = 未知
         try:
-            _algo_now = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: _api.get_algo_open_orders(symbol)
-            )
+            _algo_now = await _run_patrol(lambda: _api.get_algo_open_orders(symbol))
             _algo_ids = {int(o.get("algoId", 0)) for o in (_algo_now or []) if o.get("algoId")}
             sl_alive = bool(sl_id_old and int(sl_id_old) in _algo_ids)
         except Exception as _sl_qe:
@@ -3633,9 +3613,7 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
 
         # ── 防重复:查交易所是否已有 TP/SL 挂单 ──────────────────────────────
         try:
-            open_orders = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: _api.get_open_orders(symbol)
-            ) or []
+            open_orders = await _run_patrol(lambda: _api.get_open_orders(symbol)) or []
             existing_tp = [
                 o for o in open_orders
                 if o.get("positionSide", "").upper() == pos_side
@@ -4842,7 +4820,7 @@ async def _patrol_funding_arb(pos: dict) -> None:
 
         # 拉最新 mark_price 作为出场价
         try:
-            mp = await asyncio.get_running_loop().run_in_executor(None, lambda: api.get_mark_price(symbol))
+            mp = await _run_patrol(lambda: api.get_mark_price(symbol))
             exit_price = float(mp.get("markPrice", entry))
         except Exception:
             exit_price = entry
@@ -4908,7 +4886,7 @@ async def _patrol_funding_arb(pos: dict) -> None:
 
     # ── 1 止损检查 ──────────────────────────────────────────────────────────
     try:
-        mp = await asyncio.get_running_loop().run_in_executor(None, lambda: api.get_mark_price(symbol))
+        mp = await _run_patrol(lambda: api.get_mark_price(symbol))
         mark = float(mp.get("markPrice", 0))
     except Exception:
         return   # 拉不到价格,本轮跳过
@@ -5021,7 +4999,7 @@ async def _get_current_fr(symbol: str) -> float | None:
     """异步拉当前资金费率"""
     try:
         from shared import binance_api as _bapi
-        mp = await asyncio.get_running_loop().run_in_executor(None, lambda: _bapi.get_mark_price(symbol))
+        mp = await _run_patrol(lambda: _bapi.get_mark_price(symbol))
         return float(mp.get("lastFundingRate", 0))
     except Exception:
         return None
