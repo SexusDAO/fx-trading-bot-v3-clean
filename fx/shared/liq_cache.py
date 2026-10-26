@@ -289,6 +289,21 @@ def get_liq_zones_cached(symbol: str, direction: str,
     return (entry or {}).get(direction.upper(), [])
 
 
+def coverage(symbols, range_: str = "3d", max_age_sec: float | None = None) -> tuple:
+    """[liq-stats] 只读统计：symbols 中有「可用清算区缓存」的标的数。返回 (命中数, 总数)。
+    可用 = 缓存存在且年龄 <= max_age_sec（默认 LIQ_SCAN_STALE_MAX_SEC）。不发网络请求、不读写文件、不登记 want。"""
+    syms = [str(x) for x in (symbols or [])]
+    limit = LIQ_SCAN_STALE_MAX_SEC if max_age_sec is None else float(max_age_sec)
+    now = time.time()
+    hit = 0
+    with _CACHE_LOCK:
+        for sym in syms:
+            entry = _CACHE.get(f"{sym}:{range_}")
+            if entry is not None and (now - entry.get("ts", 0)) <= limit:
+                hit += 1
+    return hit, len(syms)
+
+
 # 扫描路径「只读缓存」未命中/过期的标的：登记给后台刷新线程，下一轮优先预热
 _WANT: set = set()
 _WANT_LOCK = threading.Lock()

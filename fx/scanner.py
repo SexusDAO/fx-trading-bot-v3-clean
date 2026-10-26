@@ -119,6 +119,24 @@ def _kline_round_reset() -> None:
     _KL_CACHE_STATS0 = cache.stats() if cache is not None else {"hit": 0, "miss": 0, "expired": 0}
 
 
+def _liq_stats_line(hit: int, total: int, degraded: int) -> str:
+    """[liq-stats] 本轮清算区统计日志行。hit/total 来自清算区缓存覆盖；degraded=本轮进入注册阶段的信号中 sl_degraded 的个数。"""
+    pct = (hit / total * 100.0) if total else 0.0
+    return f"[liq-stats] 本轮清算区: 命中{hit}个/扫描{total}个({pct:.0f}%) 缺失{degraded}个(sl_degraded)"
+
+
+def _count_sl_degraded(signals) -> int:
+    """统计信号列表中 sl_degraded=True 的个数（顶层或 params 内任一为真即计）。"""
+    n = 0
+    for sg in signals or []:
+        try:
+            if sg.get("sl_degraded") or (sg.get("params") or {}).get("sl_degraded"):
+                n += 1
+        except Exception:
+            continue
+    return n
+
+
 def _kline_round_summary() -> list:
     """生成本轮 K 线请求汇总日志行（无请求时返回空列表）。"""
     with _KL_ROUND_LOCK:
@@ -3914,6 +3932,13 @@ def run_scan(dry_run: bool = False, signal_watcher=None) -> dict:
                               len(_unfinished), len(scan_pool)))
     except Exception:
         pass
+    # [liq-stats] 每轮扫描结束输出清算区命中率；统计失败不影响扫描
+    try:
+        from shared.liq_cache import coverage as _liq_cov
+        _lh, _lt = _liq_cov(scan_pool, "3d")
+        logger.info(_liq_stats_line(_lh, _lt, _count_sl_degraded(avail_signals)))
+    except Exception as _lse:
+        logger.debug(f"[liq-stats] 统计失败（忽略）: {_lse}")
     _write_scan_log(result, avail_signals)
     # [v3.89 SHADOW] 影子穿透追踪：扫描后处理被拒的信号写入 rejected_log.jsonl（只记录）
     try:
