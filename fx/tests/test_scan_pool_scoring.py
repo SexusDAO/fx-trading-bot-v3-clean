@@ -26,7 +26,9 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "SCAN_POOL_MAX", 200, raising=False)
     monkeypatch.setattr(config, "SCAN_POOL_MIN_OI_U", 1_000_000, raising=False)
     monkeypatch.setattr(sc, "POOL_GAINERS_N", 0); monkeypatch.setattr(sc, "POOL_LOSERS_N", 0)
-    st = types.SimpleNamespace(tickers=[], marks=[], oi={}, oi_calls=[], liq=[])
+    st = types.SimpleNamespace(tickers=[], marks=[], oi={}, oi_calls=[], liq=[], exinfo={})
+    monkeypatch.setitem(sc._TRADIFI_CACHE, "syms", frozenset()); monkeypatch.setitem(sc._TRADIFI_CACHE, "ts", 0.0)
+    monkeypatch.setattr(sc.api, "get_exchange_info", lambda: st.exinfo)
     monkeypatch.setattr(sc.api, "get_ticker_24h", lambda: st.tickers)
     monkeypatch.setattr(sc.api, "get_all_mark_prices", lambda: st.marks)
 
@@ -126,7 +128,7 @@ def test_ranking_by_score_then_volume_and_cap(env, monkeypatch):
     set_market(env, [tk("BIGUSDT", vol=900_000_000), tk("FUNDUSDT", vol=10_000_000), tk("LIQUSDT", vol=20_000_000),
                      tk("BOTHUSDT", vol=5_000_000), tk("PLAINUSDT", vol=800_000_000)],
                funding={"FUNDUSDT": 0.002, "BOTHUSDT": 0.002})
-    env.liq = [{"symbol": "LIQ", "liq_usd": 5}, {"symbol": "BOTH", "liq_usd": 4}]
+    env.liq = [{"symbol": "LIQ", "liquidation_usd_24h": 5}, {"symbol": "BOTH", "liquidation_usd_24h": 4}]
     assert sc.refresh_pool() == ["BOTHUSDT", "FUNDUSDT", "LIQUSDT"]      # 45 > 25(费率) > 20(清算)；BIG/PLAIN 评分为 0 被截断
 
 
@@ -155,3 +157,30 @@ def test_config_values():
     import config
     assert config.SCAN_POOL_MAX == 165 and config.SCAN_POOL_MIN_OI_U == 1_000_000
     assert config.POOL_MAX_CHG24_PCT == 50.0 and config.ENABLE_USDC_PAIRS is False
+
+
+def test_liq_rank_filters_tradifi_via_exchange_info(env, monkeypatch):
+    """清算榜用真实字段名排序，且剔除 TRADIFI_PERPETUAL；加密币（含 CL 开头的 CLANKER）不误杀。"""
+    import config
+    monkeypatch.setattr(config, "SCAN_POOL_MAX", 3, raising=False)
+    monkeypatch.setattr(sc, "_POOL_SCORE_VOL_TOP", 0)
+    monkeypatch.setattr(sc, "POOL_LIQ_TOP_N", 2)
+    set_market(env, [tk("NATGASUSDT"), tk("CLANKERUSDT"), tk("ARBUSDT"), tk("PLAINUSDT")])
+    env.exinfo = {"symbols": [{"symbol": "NATGASUSDT", "contractType": "TRADIFI_PERPETUAL"},
+                              {"symbol": "CLUSDT", "contractType": "TRADIFI_PERPETUAL"},
+                              {"symbol": "ARBUSDT", "contractType": "PERPETUAL"}]}
+    env.liq = [{"symbol": "NATGAS", "liquidation_usd_24h": "900"}, {"symbol": "CLANKER", "liquidation_usd_24h": "500"},
+               {"symbol": "ARB", "liquidation_usd_24h": "400"}, {"symbol": "PLAIN", "liquidation_usd_24h": "1"}]
+    pool = sc.refresh_pool()
+    assert "NATGASUSDT" not in pool[:2]                      # 清算榜剔除后拿不到 +20
+    assert set(pool[:2]) == {"CLANKERUSDT", "ARBUSDT"}       # Top2 = CLANKER、ARB
+
+
+def test_liq_rank_no_filter_when_exchange_info_fails(env, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "SCAN_POOL_MAX", 1, raising=False)
+    monkeypatch.setattr(sc, "_POOL_SCORE_VOL_TOP", 0); monkeypatch.setattr(sc, "POOL_LIQ_TOP_N", 1)
+    set_market(env, [tk("NATGASUSDT"), tk("ARBUSDT")])
+    env.exinfo = {}                                          # exchangeInfo 失败 → 不过滤
+    env.liq = [{"symbol": "NATGAS", "liquidation_usd_24h": "900"}, {"symbol": "ARB", "liquidation_usd_24h": "5"}]
+    assert sc.refresh_pool() == ["NATGASUSDT"]

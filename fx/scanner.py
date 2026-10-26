@@ -2015,6 +2015,26 @@ _POOL_OI_WORKERS = 6
 _POOL_OI_TOTAL_TIMEOUT_SEC = 90.0
 
 
+_TRADIFI_CACHE = {"ts": 0.0, "syms": frozenset()}
+_TRADIFI_TTL = 6 * 3600
+
+
+def _tradifi_symbols() -> frozenset:
+    """exchangeInfo 中 contractType == TRADIFI_PERPETUAL 的合约集合（6h 缓存）；失败返回上次结果/空集。"""
+    now = time.time()
+    if _TRADIFI_CACHE["syms"] and now - _TRADIFI_CACHE["ts"] < _TRADIFI_TTL:
+        return _TRADIFI_CACHE["syms"]
+    try:
+        syms = (api.get_exchange_info() or {}).get("symbols") or []
+        found = frozenset(x["symbol"] for x in syms if x.get("contractType") == "TRADIFI_PERPETUAL")
+        if found:
+            _TRADIFI_CACHE.update(ts=now, syms=found)
+            return found
+    except Exception as e:
+        logger.debug(f"[scanner] 取 TRADIFI 合约列表失败，清算榜不过滤: {e}")
+    return _TRADIFI_CACHE["syms"]
+
+
 def _pool_scores(qualified: list, vol_top: set, mover_syms: set, liq_syms: set) -> dict:
     """候选池评分（0~100，各项独立加分可叠加）。qualified 为通过粗筛的 ticker 列表（带 _fr_abs）。"""
     out = {}
@@ -2147,8 +2167,8 @@ def refresh_pool() -> list:
             from shared.clawby_adapter import get_liq_coin_list as _get_liq_list
             _liq_items = _get_liq_list()
             if _liq_items:
-                # 字段兼容：liq_usd / liquidation_usd / liq_24h / liquidations
-                _LIQ_FIELD = ("liq_usd", "liquidation_usd", "liq_24h", "liquidations")
+                # coin-list 真实字段：liquidation_usd_24h / _12h / _4h / _1h（旧名 liq_usd 等从未出现过）
+                _LIQ_FIELD = ("liquidation_usd_24h", "liquidation_usd_1h")
                 def _liq_val(item):
                     for f in _LIQ_FIELD:
                         v = item.get(f)
@@ -2156,6 +2176,13 @@ def refresh_pool() -> list:
                             try: return float(v)
                             except Exception: pass
                     return 0.0
+                # 清算榜只保留加密货币合约：剔除 TRADIFI_PERPETUAL（股票ETF/外汇/大宗商品）。
+                # coin-list 条目无 contractType，改查 exchangeInfo；查询失败 → 不过滤（保持旧行为）
+                _tradifi = _tradifi_symbols()
+                if _tradifi:
+                    _liq_items = [it for it in _liq_items
+                                  if f"{(it.get('symbol') or it.get('coin') or '').upper().strip().removesuffix('USDT')}USDT"
+                                  not in _tradifi]
                 _liq_sorted = sorted(_liq_items, key=_liq_val, reverse=True)[:POOL_LIQ_TOP_N]
                 _usdt_set = {t["symbol"] for t in usdt}  # 已过粗筛（含 OI）的合约
                 for _item in _liq_sorted:

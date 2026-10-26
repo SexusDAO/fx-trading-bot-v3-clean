@@ -1090,6 +1090,31 @@ def is_post_shock_recovery() -> bool:
         return True
     return False
 
+_LIQ_KEYS_24H = ("liquidation_usd_24h",)
+
+
+def _market_liq_1h() -> float:
+    """全市场 1H 清算量（USD）。coin-list 真实字段为 liquidation_usd_1h / liquidation_usd_24h：
+    ① 优先 1h 字段求和；② 无 1h 数据则 24h 合计 ÷ 24；③ coin-list 为空 → BTC 1h × 5 兜底。"""
+    from shared.clawby_adapter import get_liq_coin_list, get_liq_summary_1h
+    coin_list = get_liq_coin_list()
+    if coin_list:
+        def _f(c, k):
+            try:
+                return float(c.get(k, 0) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        rows = [c for c in coin_list if isinstance(c, dict)]
+        total_1h = sum(_f(c, "liquidation_usd_1h") for c in rows)
+        if total_1h > 0:
+            return total_1h
+        total_24h = sum(_f(c, k) for c in rows for k in _LIQ_KEYS_24H)
+        return total_24h / 24 if total_24h > 0 else 0.0
+    # fallback：BTC ≈ 20% 全市场，× 5 估算全市场1H清算量
+    _btc = get_liq_summary_1h("BTC")
+    return (_btc.get("long_liq_1h", 0) + _btc.get("short_liq_1h", 0)) * 5
+
+
 def check_market_shock(notifier_fn=None) -> bool:
     """
     每轮扫描开始时调用。
@@ -1128,22 +1153,7 @@ def check_market_shock(notifier_fn=None) -> bool:
     # 条件②：全市场1H清算量（通过 clawby_adapter 获取，不再依赖不存在的函数）
     if not shock_reason:
         try:
-            from shared.clawby_adapter import get_liq_coin_list, get_liq_summary_1h
-            coin_list = get_liq_coin_list()
-            if coin_list:
-                # coin-list 各条目可能含 liquidation_usd / liq_usd 等字段，汇总后除以24得1h均值
-                _LIQ_KEYS = ("liquidation_usd", "liq_usd", "liq_24h", "liquidations")
-                total_24h = sum(
-                    float(c.get(k, 0) or 0)
-                    for c in coin_list if isinstance(c, dict)
-                    for k in _LIQ_KEYS if c.get(k)
-                )
-                liq = total_24h / 24 if total_24h > 0 else 0.0
-            else:
-                # fallback：BTC ≈ 20% 全市场，× 5 估算全市场1H清算量
-                _btc = get_liq_summary_1h("BTC")
-                btc_1h = _btc.get("long_liq_1h", 0) + _btc.get("short_liq_1h", 0)
-                liq = btc_1h * 5
+            liq = _market_liq_1h()
             if liq and liq >= _SHOCK_LIQ_THRESH:
                 shock_reason = f"全市场1H清算量 {liq/1e8:.1f}亿U ≥ 5亿U"
         except Exception:
