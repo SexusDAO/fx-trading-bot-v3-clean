@@ -84,3 +84,48 @@ def test_cvd_cache_written(monkeypatch):
     monkeypatch.setattr(C, "clawby_relay", lambda *a, **k: n.append(1) or CVD_ROWS)
     C.get_cvd_history("ARB"); C.get_cvd_history("ARB")
     assert len(n) == 1 and "cvd:ARBUSDT:1h" in store
+
+
+# ── get_liquidation_history ──
+LIQ_ROWS = [{"time": 1, "long_liquidation_usd": "1234.56", "short_liquidation_usd": "0"}]
+
+
+def test_liq_history_clawby_first_and_str_to_float(monkeypatch):
+    calls = []
+    monkeypatch.setattr(C, "clawby_relay", lambda name, params=None, **k: calls.append((name, params, k)) or LIQ_ROWS)
+    monkeypatch.setattr(C, "cg_get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("Clawby 成功时不应调 CG")))
+    r = C.get_liquidation_history("ARB", "Binance", "1h", 2)
+    assert calls[0][0] == "futures_liquidation_history"
+    assert calls[0][1] == {"symbol": "ARBUSDT", "exchange": "Binance", "interval": "1h", "limit": 2}
+    assert calls[0][2].get("_max_retries") == 0
+    assert r == [{"time": 1, "long_liquidation_usd": 1234.56, "short_liquidation_usd": 0.0}]
+    assert isinstance(r[0]["long_liquidation_usd"], float)
+
+
+@pytest.mark.parametrize("relay_ret", [None, [], {"code": "401", "msg": "Upgrade plan"},
+                                       [{"long_liquidation_usd": "x", "short_liquidation_usd": "1"}]])
+def test_liq_history_fallback_to_cg(monkeypatch, relay_ret):
+    monkeypatch.setattr(C, "clawby_relay", lambda *a, **k: relay_ret)
+    seen = []
+    monkeypatch.setattr(C, "cg_get", lambda path, params=None, **k: seen.append((path, params)) or LIQ_ROWS)
+    r = C.get_liquidation_history("ARBUSDT")
+    assert seen[0][0] == "api/futures/liquidation/history"
+    assert r[0]["long_liquidation_usd"] == 1234.56
+
+
+def test_liq_history_both_fail_empty(monkeypatch):
+    monkeypatch.setattr(C, "clawby_relay", lambda *a, **k: None)
+    monkeypatch.setattr(C, "cg_get", lambda *a, **k: None)
+    assert C.get_liquidation_history("ARB") == []
+
+
+def test_liq_summary_1h_uses_float_values(monkeypatch):
+    monkeypatch.setattr(C, "clawby_relay", lambda *a, **k: [{"time": 1, "long_liquidation_usd": "50000", "short_liquidation_usd": "100"}])
+    monkeypatch.setattr(C, "cg_get", lambda *a, **k: None)
+    r = C.get_liq_summary_1h("ARB")
+    assert r["long_liq_1h"] == 50000.0 and r["liq_signal"] == "heavy_long_liq"
+
+
+def test_private_liq_history_compat(monkeypatch):
+    monkeypatch.setattr(C, "get_liquidation_history", lambda *a, **k: ["ok"])
+    assert C._get_liq_history("ARB") == ["ok"]

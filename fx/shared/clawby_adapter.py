@@ -704,23 +704,27 @@ def get_liq_zones_list(symbol: str, direction: str,
 # ② 爆仓历史（替换原 CG V4）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _get_liq_history(symbol: str, exchange: str = "Binance",
-                     interval: str = "1h", limit: int = 6) -> list:
-    """爆仓历史 → CG中转 GET（需要 interval 参数，已验证可用）
-    字段: long_liquidation_usd / short_liquidation_usd
-    """
+def get_liquidation_history(symbol: str, exchange: str = "Binance",
+                           interval: str = "1h", limit: int = 6) -> list:
+    """爆仓历史：Clawby(futures_liquidation_history) 优先，CG 兜底。
+    字段: time / long_liquidation_usd / short_liquidation_usd（Clawby 返回字符串，这里统一转 float）"""
     sym = _sym_full(symbol)
     key = f"liq1h:{sym}:{interval}"
     cached = _cache_get(key)
     if cached is not None:
         return cached
-    data = cg_get("api/futures/liquidation/history",
-                  {"symbol": sym, "exchange": exchange,
-                   "interval": interval, "limit": limit})
-    result = data if isinstance(data, list) else []
+    result = _clawby_first_list("futures_liquidation_history", "api/futures/liquidation/history",
+                                sym, exchange, interval, limit,
+                                ("long_liquidation_usd", "short_liquidation_usd"))
     if result:
         _cache_set(key, result)
     return result
+
+
+def _get_liq_history(symbol: str, exchange: str = "Binance",
+                     interval: str = "1h", limit: int = 6) -> list:
+    """兼容入口 → get_liquidation_history（调用方不需要改）"""
+    return get_liquidation_history(symbol, exchange, interval, limit)
 
 def get_liq_summary_1h(symbol: str, exchange: str = "Binance") -> dict:
     """最近1h多空爆仓量摘要（供外部调用）"""
