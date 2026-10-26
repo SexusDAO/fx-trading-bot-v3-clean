@@ -1319,6 +1319,9 @@ def analyze_one(symbol: str, ticker: dict,
             _judges_mod._fr_velocity_cache[symbol] = (_fv, time.time() + _judges_mod._FR_CACHE_TTL)
 
         # ── B. 先用 k4h=[] 计算 1H/15M 指标，用于分类 ────────────────────────
+        if not market_mode:   # 上游未传/传空：不把空串写进 ind 与 analytics，明确回退 range 并留 warning
+            logger.warning(f"[scanner] {symbol} market_mode 为空，回退 range")
+            market_mode = "range"
         ind = calc_indicators(k15, k1h, [])
         ind["vol24_usd"]     = float(ticker.get("quoteVolume", 0))
         ind["symbol"]        = symbol
@@ -1448,7 +1451,7 @@ def analyze_one(symbol: str, ticker: dict,
                     judge_passed=False,
                     reject_reason=(_reason.get('reject_reason') if isinstance(_reason, dict) else str(_reason)),
                     ind=dict(ind), reason=_reason if isinstance(_reason, dict) else {},
-                    btc_trend=btc_trend, market_mode="",
+                    btc_trend=btc_trend, market_mode=market_mode,
                 )})
                 _rd = _reason if isinstance(_reason, dict) else {}
                 if _rd.get("set_cooldown"):   # [A-2] judge 请求冷却 → 交由主进程 _apply_post_events 写入
@@ -1570,7 +1573,7 @@ def analyze_one(symbol: str, ticker: dict,
             symbol=symbol, mode=sig_type, direction=direction,
             judge_passed=True, reject_reason=None,
             ind=ind, reason=reason if isinstance(reason, dict) else {},
-            btc_trend=btc_trend, market_mode="",
+            btc_trend=btc_trend, market_mode=market_mode,
             route_quality=_best["quality"] if _passed_signals else None,
             competing_routes=_competing_routes,
         )})

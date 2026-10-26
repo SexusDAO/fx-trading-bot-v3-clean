@@ -148,6 +148,9 @@ def get_market_mode() -> str:
         else:
             _market_mode_cache["bear_strength"] = None
 
+        if not mode:   # 明确回退：空值不得外泄给调用方（仓位上限/analytics 都只认 bull/bear/range）
+            logger.warning(f"[risk] 市场模式计算结果为空（raw={raw_mode!r} prev={prev_mode!r}），回退为 range")
+            mode = "range"
         _market_mode_cache = {"mode": mode, "cached_at": now,
                               "bear_strength": _market_mode_cache.get("bear_strength")}
         logger.debug(f"[risk] 市场模式={mode} raw={raw_mode} ema_fast={ema_fast:.0f} price={price:.0f}")
