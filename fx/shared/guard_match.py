@@ -75,3 +75,31 @@ def tp_fields(tps: list) -> dict:
         out.update({"tp2_order_id": int(tps[1]["orderId"]), "tp2_price": _f(tps[1].get("price")),
                     "tp2_quantity": _f(tps[1].get("origQty"))})
     return out
+
+
+def assign_tps_by_price(orders: list, tp1_price, tp2_price, direction: str) -> tuple:
+    """把交易所已有的止盈限价单按「本地 tp1_price/tp2_price 最接近」分配给 tp1/tp2 两个槽位。
+
+    返回 (tp1_order|None, tp2_order|None, by_price)。
+      · 本地价格只用于选择，不修改任何价格；每张单只分给一个槽位，每个槽位至多一张；
+      · 只传了一个本地价格（另一个为 None/0）则只填那个槽位（如 tp1 已成交、只剩 tp2；或单 TP 模式）；
+      · 两个本地价格都没有 → 退回旧规则：按价格「离入场近→远」排序，第 1 张→tp1、第 2 张→tp2，by_price=False（调用方不应据此补挂）。
+    """
+    valid = [o for o in orders or [] if isinstance(o, dict) and o.get("orderId") and _f(o.get("price")) > 0]
+    p1, p2 = _f(tp1_price), _f(tp2_price)
+    if p1 <= 0 and p2 <= 0:
+        s = sorted(valid, key=lambda o: _f(o.get("price")), reverse=(str(direction).upper() == "SHORT"))
+        return (s[0] if s else None), (s[1] if len(s) > 1 else None), False
+    pairs = []
+    for i, o in enumerate(valid):
+        for slot, p in ((1, p1), (2, p2)):
+            if p > 0:
+                pairs.append((abs(_f(o.get("price")) - p), slot, i))
+    pairs.sort()
+    got, used = {}, set()
+    for _d, slot, i in pairs:
+        if slot in got or i in used:
+            continue
+        got[slot] = valid[i]
+        used.add(i)
+    return got.get(1), got.get(2), True

@@ -3594,9 +3594,20 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                 _heal_fields = sl_fields(_sl_hits[0])
                 sl_alive = True
                 sl_id_old = _heal_fields["sl_order_id"]
-                sl_price = _heal_fields["sl_price"]
-                logger.warning(f"[pm] {symbol} 交易所已有止损单 algoId={sl_id_old} @ {sl_price:.6g}，"
-                               f"本地记录缺失/不匹配，自愈认领（不重复挂 SL）")
+                _ex_sl_px = _heal_fields["sl_price"]
+                # 价格由本地逻辑决定：本地 sl_price>0 时只同步 sl_order_id，不改 sl_price；本地为空/0 才用交易所价兜底
+                try:
+                    _local_sl_ok = float(sl_price or 0) > 0
+                except (TypeError, ValueError):
+                    _local_sl_ok = False
+                if _local_sl_ok:
+                    _heal_fields = {"sl_order_id": _heal_fields["sl_order_id"]}
+                    logger.warning(f"[pm] {symbol} 交易所已有止损单 algoId={sl_id_old}（交易所价 {_ex_sl_px:.6g}），"
+                                   f"本地记录缺失/不匹配，自愈认领：只同步 id，保留本地止损价 {float(sl_price):.6g}（不重复挂 SL）")
+                else:
+                    sl_price = _ex_sl_px
+                    logger.warning(f"[pm] {symbol} 交易所已有止损单 algoId={sl_id_old} @ {sl_price:.6g}，"
+                                   f"本地无止损价，自愈认领并用交易所价兜底（不重复挂 SL）")
             elif len(_sl_hits) > 1:
                 sl_alive = None
                 logger.warning(f"[pm] {symbol} 交易所有 {len(_sl_hits)} 个止损单同时匹配，歧义，不自动认领；保持 pending_guard 待人工确认")
@@ -3637,7 +3648,22 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
 
         # ── 防重复:查交易所是否已有 TP/SL 挂单 ──────────────────────────────
         try:
-            open_orders = await _run_patrol(lambda: _api.get_open_orders(symbol)) or []
+            try:
+                open_orders = await _run_patrol(lambda: _api.get_open_orders(symbol)) or []
+            except Exception as _oq_e:
+                # 与 SL 查询失败同策略：不知道交易所有没有 TP 时不盲挂（会与已有 TP 重复）；SL 能补则先补，状态置 pending_guard，patrol 下一轮重试
+                logger.warning(f"[pm] {symbol} 查询挂单失败，本轮不补挂 TP（避免重复），patrol 下一轮重试: {_oq_e}")
+                _q_sl = await _repair_sl_only()
+                import time as _time_q
+                _upd_q = {
+                    "status": "pending_guard", "fill_price": fill_price, "fill_time": int(_time_q.time()),
+                    "quantity": fill_qty, "open_order_id": None, "missing_guards": ["tp_query_failed"],
+                    **_heal_fields,
+                }
+                if not ((sl_alive is True) or _q_sl):
+                    _upd_q["missing_guards"] = ["sl", "tp_query_failed"]
+                (await asyncio.to_thread(update_position, pid, _upd_q))
+                return
             existing_tp = [
                 o for o in open_orders
                 if o.get("positionSide", "").upper() == pos_side
@@ -3645,20 +3671,19 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                 and o.get("side") != ("BUY" if direction == "LONG" else "SELL")  # 平仓方向
             ]
             if existing_tp:
-                # 按价格匹配 pos_state 里的 tp1/tp2,防止顺序错位导致脏数据
-                existing_tp_sorted = sorted(
-                    existing_tp,
-                    key=lambda o: float(o["price"]),
-                    reverse=(pos.get("direction", "long").upper() == "SHORT")
-                )
-                tp1_id = int(existing_tp_sorted[0]["orderId"])
-                tp2_id = int(existing_tp_sorted[1]["orderId"]) if len(existing_tp_sorted) > 1 else None
+                # 按本地 tp1_price/tp2_price「最接近」匹配（不按排序位置分配）：tp1 成交后只剩 tp2 时不会被误写成 tp1。
+                #   价格只用于选择，不修改；本地两个价格都没有时才退回「离入场近→远」排序。
+                from shared.guard_match import assign_tps_by_price
+                _tp1_o, _tp2_o, _by_price = assign_tps_by_price(
+                    existing_tp, pos.get("tp1_price"), pos.get("tp2_price"), direction)
+                tp1_id = int(_tp1_o["orderId"]) if _tp1_o else None
+                tp2_id = int(_tp2_o["orderId"]) if _tp2_o else None
 
                 # 检查 TP2 价格是否和 pos_state 吻合,若相同则说明挂单有误,强制重挂 TP2
                 tp2_state_price = pos.get("tp2_price")
-                if tp2_id and tp2_state_price:
-                    actual_tp1_price = float(existing_tp_sorted[0]["price"])
-                    actual_tp2_price = float(existing_tp_sorted[1]["price"])
+                if tp1_id and tp2_id and tp2_state_price:
+                    actual_tp1_price = float(_tp1_o["price"])
+                    actual_tp2_price = float(_tp2_o["price"])
                     if abs(actual_tp1_price - actual_tp2_price) < 1e-9:
                         # TP1 和 TP2 价格完全相同,TP2 挂错了,撤掉重挂
                         logger.warning(
@@ -3689,6 +3714,24 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                         except Exception as fix_err:
                             logger.error(f"[pm] {symbol} TP2 重挂失败: {fix_err}")
 
+                # 本地期望有、交易所没匹配到的 TP 槽位：不覆盖本地 id，记入 missing_guards 并告警日志（本函数不单独补挂单腿，避免与已有 TP 重复）
+                try:
+                    _tp1_exp = float(pos.get("tp1_price") or 0) > 0 and not pos.get("tp1_filled")
+                    _tp2_exp = float(pos.get("tp2_price") or 0) > 0 and not pos.get("tp2_filled")
+                except (TypeError, ValueError):
+                    _tp1_exp = _tp2_exp = False
+                _tp_upd: dict = {}
+                _tp_missing: list = []
+                for _slot, _tid, _exp in (("tp1", tp1_id, _tp1_exp), ("tp2", tp2_id, _tp2_exp)):
+                    if _tid:
+                        _tp_upd[f"{_slot}_order_id"] = _tid
+                    elif _exp:
+                        _tp_missing.append(_slot)
+                    else:
+                        _tp_upd[f"{_slot}_order_id"] = None
+                if _tp_missing:
+                    logger.warning(f"[pm] {symbol} 交易所 TP 单与本地价格对不上：{_tp_missing} 未找到对应挂单，"
+                                   f"保留本地记录不覆盖，请人工核查")
                 logger.info(
                     f"[pm] {symbol} 交易所已有 {len(existing_tp)} 个 TP 挂单 "
                     f"(tp1={tp1_id} tp2={tp2_id}),跳过补挂,同步 pos_state"
@@ -3705,10 +3748,9 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                     "fill_time":     int(_time_skip.time()),
                     "quantity":      fill_qty,
                     "open_order_id": None,
-                    "tp1_order_id":  tp1_id,
-                    "tp2_order_id":  tp2_id,
+                    **_tp_upd,
                     **_heal_fields,
-                    **({"missing_guards": []} if _sl_ok else {"missing_guards": ["sl"]}),
+                    "missing_guards": ([] if _sl_ok else ["sl"]) + _tp_missing,
                 }))
                 if _skip_ok is False:
                     logger.warning(
