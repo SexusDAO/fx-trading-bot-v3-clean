@@ -32,6 +32,7 @@ from config import (
     # 候选池
     POOL_VOLUME_TOP_N, POOL_GAINERS_N, POOL_LOSERS_N,
     POOL_FUNDING_EXTREME_N, POOL_FUNDING_EXTREME_MIN, POOL_LIQ_TOP_N,
+    LIQ_BIAS_MIN_TOTAL_1H, LIQ_BIAS_MIN_RATIO,
     POOL_MIN_VOLUME_USD, POOL_MAX_CHG24_PCT, POOL_STABLE_COINS,
     # 风控
     RISK_MAX_POSITIONS, RISK_MAX_LONG, RISK_MAX_SHORT,
@@ -2015,6 +2016,54 @@ _POOL_OI_WORKERS = 6
 _POOL_OI_TOTAL_TIMEOUT_SEC = 90.0
 
 
+# ── coin-list 1h 多空失衡标记 ─────────────────────────────────────────────────
+# 候选池阶段还不知道信号方向，所以这里只“标记”：{BTCUSDT: "LONG"/"SHORT"}，不加分。
+# 后续分析单个标的时用 get_liq_bias(symbol) 取方向，与信号方向比对（加分逻辑尚未接入，先上线观察标记数量和方向分布）。
+_LIQ_BIAS: dict = {}
+_LIQ_BIAS_LOCK = _threading.Lock()
+
+
+def _liq_bias_direction(long_1h: float, short_1h: float) -> str:
+    """失衡方向，与 coinglass_api 现有 liq_signal 约定一致：
+    多头被清算更多（long_1h > short_1h，heavy_long_liq，超卖反弹）→ "LONG"；
+    空头被清算更多（short_1h > long_1h，heavy_short_liq，超涨回落）→ "SHORT"。
+    要改方向约定只改这个函数。"""
+    return "LONG" if long_1h > short_1h else "SHORT"
+
+
+def _calc_liq_bias(items: list, min_total: float = None, min_ratio: float = None) -> dict:
+    """遍历 coin-list 全部条目，返回 {symbol+USDT: "LONG"/"SHORT"}。
+    条件（同时满足）：1h 多空清算合计 ≥ min_total；max/(min+1) ≥ min_ratio。数值可能是 int/float/None/字符串。"""
+    min_total = LIQ_BIAS_MIN_TOTAL_1H if min_total is None else min_total
+    min_ratio = LIQ_BIAS_MIN_RATIO if min_ratio is None else min_ratio
+    out: dict = {}
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        coin = (it.get("symbol") or it.get("coin") or "").upper().strip()
+        if not coin:
+            continue
+        try:
+            long_1h = float(it.get("long_liquidation_usd_1h", 0) or 0)
+            short_1h = float(it.get("short_liquidation_usd_1h", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if long_1h < 0 or short_1h < 0:
+            continue
+        if long_1h + short_1h < min_total:
+            continue
+        if max(long_1h, short_1h) / (min(long_1h, short_1h) + 1) < min_ratio:
+            continue
+        out[coin if coin.endswith("USDT") else f"{coin}USDT"] = _liq_bias_direction(long_1h, short_1h)
+    return out
+
+
+def get_liq_bias(symbol: str):
+    """返回最近一次候选池刷新标记的 1h 清算失衡方向 "LONG"/"SHORT"；无标记返回 None。"""
+    with _LIQ_BIAS_LOCK:
+        return _LIQ_BIAS.get((symbol or "").upper())
+
+
 _TRADIFI_CACHE = {"ts": 0.0, "syms": frozenset()}
 _TRADIFI_TTL = 6 * 3600
 
@@ -2194,6 +2243,14 @@ def refresh_pool() -> list:
                     if _sym_full in _usdt_set:
                         _liq_syms.add(_sym_full)
                 logger.debug(f"[scanner] CG清算量来源 命中 {len(_liq_syms)} 个（≤{POOL_LIQ_TOP_N}）")
+                # 1h 多空失衡：独立于 24h 总量 Top，只标记方向，不加分（候选池阶段无信号方向）
+                _bias = _calc_liq_bias(_liq_items)
+                with _LIQ_BIAS_LOCK:
+                    _LIQ_BIAS.clear()
+                    _LIQ_BIAS.update(_bias)
+                logger.debug(f"[scanner] 1h 清算多空失衡标记 {len(_bias)} 个"
+                             f"（LONG={sum(1 for v in _bias.values() if v == 'LONG')} "
+                             f"SHORT={sum(1 for v in _bias.values() if v == 'SHORT')}）")
         except Exception as _liq_e:
             logger.debug(f"[scanner] CG清算量来源获取失败，跳过: {_liq_e}")
 
