@@ -129,3 +129,58 @@ def test_liq_summary_1h_uses_float_values(monkeypatch):
 def test_private_liq_history_compat(monkeypatch):
     monkeypatch.setattr(C, "get_liquidation_history", lambda *a, **k: ["ok"])
     assert C._get_liq_history("ARB") == ["ok"]
+
+
+# ── 限速 / 429 退避 ──
+class _Resp:
+    def __init__(self, status=200, body=None, headers=None, bad_json=False):
+        self.status_code = status; self._b = body; self.headers = headers or {}; self._bad = bad_json
+    def json(self):
+        if self._bad:
+            raise ValueError("no json")
+        return self._b
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+def test_rate_limit_interval_matches_measured_5_per_sec():
+    assert C.CLAWBY_RATE_LIMIT_S == 0.25
+
+
+@pytest.mark.parametrize("resp,expect", [
+    (_Resp(429, {"code": "rate_limited", "retry_after": 1}), 1.0),
+    (_Resp(429, {"retry_after": 2.5}), 2.5),
+    (_Resp(429, {"retry_after": 999}), 5.0),                       # 封顶 5s
+    (_Resp(429, {"code": "rate_limited"}), 1.0),                   # 缺失 → 1s
+    (_Resp(429, {"retry_after": "abc"}), 1.0),
+    (_Resp(429, {"retry_after": -3}), 1.0),
+    (_Resp(429, bad_json=True), 1.0),                              # 非 JSON → 1s
+    (_Resp(429, bad_json=True, headers={"Retry-After": "3"}), 3.0),
+    (_Resp(429, bad_json=True, headers={"Retry-After": "300"}), 5.0),
+])
+def test_clawby_429_wait(resp, expect):
+    assert C._clawby_429_wait(resp) == expect
+
+
+def test_relay_429_sleeps_body_retry_after_then_succeeds(monkeypatch):
+    seq = [_Resp(429, {"code": "rate_limited", "retry_after": 1, "limit": 5}),
+           _Resp(200, {"data": {"code": "0", "data": [1]}})]
+    monkeypatch.setattr(C.requests, "post", lambda *a, **k: seq.pop(0))
+    monkeypatch.setattr(C, "_wait_clawby_rate_limit", lambda: None)
+    monkeypatch.setattr(C, "_CLAWBY_402_UNTIL", 0.0)
+    sleeps = []
+    monkeypatch.setattr(C.time, "sleep", lambda x: sleeps.append(x))
+    assert C.clawby_relay("futures_cvd_history", {}) == [1]
+    assert sleeps == [1.0]                                         # 不再是默认 10s
+
+
+def test_relay_429_no_retry_when_max_retries_0(monkeypatch):
+    monkeypatch.setattr(C.requests, "post", lambda *a, **k: _Resp(429, {"retry_after": 1}))
+    monkeypatch.setattr(C, "_wait_clawby_rate_limit", lambda: None)
+    monkeypatch.setattr(C, "_CLAWBY_402_UNTIL", 0.0)
+    sleeps = []
+    monkeypatch.setattr(C.time, "sleep", lambda x: sleeps.append(x))
+    with pytest.raises(RuntimeError):
+        C.clawby_relay("x", {}, _max_retries=0)
+    assert sleeps == []

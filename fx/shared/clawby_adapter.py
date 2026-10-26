@@ -74,8 +74,9 @@ CG_HEADERS   = {"X-API-Key": CG_API_KEY, "Accept-Encoding": "identity"}  # 禁�
 CG_RATE_LIMIT_S  = 2.2
 CG_LSR_LIMIT_S   = 31.0   # LSR 专用：2次/分钟 → 31s（安全间隔）
 
-# Clawby Pro 套餐 1200次/分钟 → 0.052s 间隔
-CLAWBY_RATE_LIMIT_S = 0.052
+# Clawby free 套餐实测上限 5 次/秒（并发 10 → 5 成功 / 5 返回 HTTP 429，credits.rate_limit=5）
+# 串行间隔 0.25s ≈ 4 次/秒，留约 20% 余量
+CLAWBY_RATE_LIMIT_S = 0.25
 CACHE_TTL    = 15 * 60   # 15 分钟
 
 import os as _os
@@ -450,6 +451,31 @@ def cg_get(path: str, params: dict = None, timeout: int = 8) -> "list | dict | N
 _CLAWBY_402_UNTIL: float = 0.0   # 熟举时间戳，0表示未被熔断
 _CLAWBY_402_COOLDOWN = 600       # 402后冷却 10 分钟再尝试
 
+CLAWBY_429_DEFAULT_WAIT = 1.0
+CLAWBY_429_MAX_WAIT = 5.0
+
+
+def _clawby_429_wait(r) -> float:
+    """Clawby 429 的等待秒数：实测响应头没有 Retry-After，等待时间在响应体
+    {"code":"rate_limited","retry_after":1}。优先读响应体，缺失/异常 → 1s，封顶 5s。"""
+    val = None
+    try:
+        body = r.json()
+        if isinstance(body, dict):
+            val = body.get("retry_after")
+    except Exception:
+        pass
+    if val is None:
+        val = r.headers.get("Retry-After")      # 兼容万一以后补了响应头
+    try:
+        wait = float(val)
+    except (TypeError, ValueError):
+        wait = CLAWBY_429_DEFAULT_WAIT
+    if wait != wait or wait < 0:                # NaN / 负数
+        wait = CLAWBY_429_DEFAULT_WAIT
+    return min(wait, CLAWBY_429_MAX_WAIT)
+
+
 def _unwrap_clawby(raw, name: str = ""):
     """统一拆 Clawby 响应外壳，内层 code 非 0/200 → None（不把错误对象当数据）。
     两种返回格式兼容:
@@ -532,8 +558,7 @@ def clawby_relay(name: str, params: dict = None, timeout: int = 15,
             pass
 
         if r.status_code == 429:
-            retry_after = float(r.headers.get("Retry-After", 10))
-            wait = min(retry_after, 60)
+            wait = _clawby_429_wait(r)
             logger.warning(f"[clawby] 429, waiting {wait:.1f}s (attempt {attempt+1})")
             if attempt < _max_retries:
                 time.sleep(wait)
