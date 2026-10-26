@@ -450,6 +450,36 @@ def cg_get(path: str, params: dict = None, timeout: int = 8) -> "list | dict | N
 _CLAWBY_402_UNTIL: float = 0.0   # 熟举时间戳，0表示未被熔断
 _CLAWBY_402_COOLDOWN = 600       # 402后冷却 10 分钟再尝试
 
+def _unwrap_clawby(raw, name: str = ""):
+    """统一拆 Clawby 响应外壳，内层 code 非 0/200 → None（不把错误对象当数据）。
+    两种返回格式兼容:
+      1. {"source":..., "data":{"code":"0","data":[...]}, "credits":{...}}  ← 标准 Clawby 格式
+      2. {"source":..., "data":[...]}                                       ← 直接数据
+    返回内层数据；非 dict、code 异常、升级提示（401/402/Upgrade plan）、null 数据一律返回 None。
+    """
+    if not isinstance(raw, dict):
+        return None
+    raw_data = raw.get("data")
+    # 嵌套的上游响应 {"code":"0","data":[...]}
+    if isinstance(raw_data, dict) and "data" in raw_data:
+        code = str(raw_data.get("code", "0"))
+        if code in ("0", "200"):
+            return raw_data["data"]          # code=0 但 data 为 null → None（视为空结果）
+        logger.debug(f"[clawby] {name} upstream code={code} msg={raw_data.get('msg','')}")
+        return None
+    # 无嵌套 data 的 dict：先过滤升级提示 / 错误对象
+    if isinstance(raw_data, dict):
+        code = str(raw_data.get("code", ""))
+        msg  = str(raw_data.get("msg", "")).lower()
+        if code in ("401", "402") or "upgrade" in msg or "plan" in msg:
+            logger.debug(f"[clawby] {name} 需要更高套餐 (code={code} msg={raw_data.get('msg','')})，静默降级")
+            return None
+        if code not in ("", "0", "200"):
+            logger.debug(f"[clawby] {name} 返回错误对象 code={code} msg={raw_data.get('msg','')}")
+            return None
+    return raw_data
+
+
 def clawby_relay(name: str, params: dict = None, timeout: int = 15,
                  _max_retries: int = 3):
     """
@@ -516,37 +546,7 @@ def clawby_relay(name: str, params: dict = None, timeout: int = 15,
         r.raise_for_status()
         _cb_record("ok")
 
-        d = r.json()
-        if not isinstance(d, dict):
-            return None
-
-        # 两种返回格式兼容:
-        # 1. {"source":..., "data":{...}, "credits":{...}}   ← 标准 Clawby 格式
-        # 2. {"code":"0", "data":[...]}                      ← 上游直透格式（data 嵌套）
-        raw_data = d.get("data")
-
-        # 如果 raw_data 是一个嵌套的上游响应 {"code":"0","data":[...]}
-        if isinstance(raw_data, dict) and "data" in raw_data:
-            code = str(raw_data.get("code", "0"))
-            if code in ("0", "200"):
-                inner = raw_data["data"]
-                if inner is not None:
-                    return inner
-                # code=0 但 data 为 null —— 视为空结果
-                return None
-            else:
-                # code 非 0 但有 msg（如 "Upgrade plan"）
-                logger.debug(f"[clawby] {name} upstream code={code} msg={raw_data.get('msg','')}")
-                return None
-
-        # 最后兼容：直接返回 raw_data，但先过滤升级提示
-        if isinstance(raw_data, dict):
-            code = str(raw_data.get("code", ""))
-            msg  = str(raw_data.get("msg", "")).lower()
-            if code in ("401", "402") or "upgrade" in msg or "plan" in msg:
-                logger.debug(f"[clawby] {name} 需要更高套餐 (code={code} msg={raw_data.get('msg','')})，静默降级")
-                return None
-        return raw_data
+        return _unwrap_clawby(r.json(), name)
 
     return None
 
@@ -876,24 +876,69 @@ def get_whale_index(symbol: str, exchange: str = "Binance",
     return []
 
 
-def get_cvd(symbol: str, exchange: str = "Binance",
-            interval: str = "1h", limit: int = 6) -> list:
-    """
-    累计成交量差 (CVD) 历史 → CG中转 GET（已验证可用，优先于 Clawby）
-    字段: time / taker_buy_vol / taker_sell_vol / cum_vol_delta
-    """
+# ─────────────────────────────────────────────────────────────────────────────
+# Clawby 优先 + CG 兜底（通用）
+# ─────────────────────────────────────────────────────────────────────────────
+def _rows_to_float(rows, fields: tuple):
+    """把列表行里的指定字段转 float（Clawby 爆仓量是字符串）。任何行/字段无法转换 → 返回 None（触发降级）。"""
+    if not isinstance(rows, list) or not rows:
+        return None
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        nr = dict(row)
+        for f in fields:
+            if f in nr and nr[f] is not None:
+                try:
+                    nr[f] = float(nr[f])
+                except (TypeError, ValueError):
+                    return None
+        out.append(nr)
+    return out
+
+
+def _clawby_first_list(relay_name: str, cg_path: str, sym: str, exchange: str,
+                       interval: str, limit: int, float_fields: tuple) -> list:
+    """先 Clawby（串行、不重试：429/超时/内层 code≠0/空/字段异常 → 立即降级），再 CG；
+    两条路径都过同一套 float 规整，返回结构一致（list[dict]），失败返回 []。"""
+    params = {"symbol": sym, "exchange": exchange, "interval": interval, "limit": limit}
+    try:
+        raw = clawby_relay(relay_name, dict(params), timeout=8, _max_retries=0)
+        rows = _rows_to_float(raw if isinstance(raw, list) else None, float_fields)
+        if rows:
+            return rows
+    except Exception as e:
+        logger.debug(f"[clawby] {relay_name}({sym}) 失败，降级 CG: {e}")
+    data = cg_get(cg_path, dict(params))
+    rows = _rows_to_float(data if isinstance(data, list) else None, float_fields)
+    return rows if rows else (data if isinstance(data, list) else [])
+
+
+def get_cvd_history(symbol: str, exchange: str = "Binance",
+                    interval: str = "1h", limit: int = 6) -> list:
+    """CVD 历史：Clawby(futures_cvd_history) 优先，CG 兜底。
+    字段: time / taker_buy_vol / taker_sell_vol / cum_vol_delta（数值已转 float）"""
     sym = _sym_full(symbol)
     key = f"cvd:{sym}:{interval}"
     cached = _cache_get(key)
     if cached is not None:
         return cached
-    data   = cg_get("api/futures/cvd/history",
-                    {"symbol": sym, "exchange": exchange,
-                     "interval": interval, "limit": limit})
-    result = data if isinstance(data, list) else []
+    result = _clawby_first_list("futures_cvd_history", "api/futures/cvd/history", sym, exchange,
+                                interval, limit,
+                                ("taker_buy_vol", "taker_sell_vol", "cum_vol_delta"))
     if result:
         _cache_set(key, result)
     return result
+
+
+def get_cvd(symbol: str, exchange: str = "Binance",
+            interval: str = "1h", limit: int = 6) -> list:
+    """
+    累计成交量差 (CVD) 历史 → 兼容入口，转调 get_cvd_history（Clawby 优先，CG 兜底）
+    字段: time / taker_buy_vol / taker_sell_vol / cum_vol_delta
+    """
+    return get_cvd_history(symbol, exchange, interval, limit)
 
 
 def get_coinbase_premium(interval: str = "1h", limit: int = 6) -> list:
