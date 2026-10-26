@@ -165,139 +165,165 @@ def _lsr_try_acquire() -> bool:
         return False
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 共享磁盘缓存（三个工作流共用，Clawby 每个币只请求一次）
+# 缓存：纯内存 + 后台异步快照落盘
 # ─────────────────────────────────────────────────────────────────────────────
-
+# 旧实现每次 _cache_get(未命中)/_cache_set 都在 fcntl.flock 内整文件读写 JSON（线上文件达 39MB），
+# JSON 编解码持有 GIL，事件循环被反复阻塞 2~8s。线上确认只有 main.py 一个进程使用该文件，跨进程锁没有必要。
+# 现在：
+#   · _cache_get 只查内存，未命中返回 None，绝不碰磁盘；
+#   · _cache_set 只写内存（带 TTL 淘汰 + 最大条目数限制）；
+#   · 单个后台线程：启动时读一次快照填充内存，之后每 CACHE_SNAPSHOT_INTERVAL 秒在有变更时落盘一次（临时文件 + os.replace，无 flock）；
+#   · 体积大的 heatmap 原始数据不入快照（liq_cache 自带 liq_cache_snapshot.json），避免快照再次变成大 JSON。
 import pathlib as _pathlib
 import json    as _json_mod
 import os      as _os
 
-_SHARED_CACHE_FILE = _pathlib.Path(__file__).parent.parent.parent / "ws_cache" / "clawby_shared_cache.json"
-_SHARED_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-_cache_lock = threading.Lock()
+_WS_CACHE_DIR       = _pathlib.Path(__file__).parent.parent.parent / "ws_cache"
+_SNAPSHOT_FILE      = _WS_CACHE_DIR / "clawby_mem_snapshot.json"
+_LEGACY_CACHE_FILES = (_WS_CACHE_DIR / "clawby_shared_cache.json",
+                       _WS_CACHE_DIR / "clawby_shared_cache.json.lock")   # 旧版跨进程缓存（启动时一次性清理）
 
-# [v3.89 #75] 该缓存声明为「三个工作流共用」，进程内 threading.Lock 只在单进程内有效，
-#   多进程同时读改写会互相覆盖；且直接 write_text 覆盖整个文件，崩溃即留下半截 JSON。
-#   这里补一层跨进程文件锁（fcntl.flock），并改为唯一临时文件 + os.replace 原子替换。
-_CACHE_LOCK_FILE = _SHARED_CACHE_FILE.with_suffix(".json.lock")
+CACHE_SNAPSHOT_INTERVAL = 60.0      # 后台落盘间隔（秒）
+CACHE_MAX_ENTRIES       = 3000      # 内存缓存最大条目数
+_SNAPSHOT_SKIP_PREFIXES = ("heatmap:",)   # 体积大且 liq_cache 已有自己的快照，不入本快照
+_SNAPSHOT_MAX_LOAD_BYTES = 8 * 1024 * 1024  # 快照超过该大小不加载（防止异常大文件在启动时拖慢进程）
 
-
-class _CrossProcessCacheLock:
-    """
-    [v3.89 #75] 跨进程互斥锁：fcntl.flock 排他锁 + 进程内锁双保险。
-    仅用于保护「读—改—写整个缓存文件」这个临界区，不包裹任何网络调用。
-    在不支持 fcntl 的平台（非 POSIX）自动退化为仅进程内锁。
-    """
-
-    def __init__(self, path):
-        self._path = path
-        self._fd = None
-
-    def __enter__(self):
-        _cache_lock.acquire()
-        try:
-            self._fd = open(self._path, "a+")
-            try:
-                import fcntl
-                fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX)
-            except Exception:
-                pass   # 单进程内仍有 _cache_lock 保护
-        except Exception:
-            self._fd = None
-        return self
-
-    def __exit__(self, *exc):
-        try:
-            if self._fd is not None:
-                try:
-                    import fcntl
-                    fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
-                except Exception:
-                    pass
-                self._fd.close()
-        finally:
-            self._fd = None
-            _cache_lock.release()
-        return False
+_mem_cache: dict = {}
+_MEM_LOCK = threading.Lock()        # 仅保护内存 dict 的短临界区（无 IO、无 JSON）
+_dirty = False
+_bg_started = False
+_bg_start_lock = threading.Lock()
+_bg_stop = threading.Event()
+_PERSIST_ENABLED = _os.environ.get("FX_CLAWBY_CACHE_PERSIST", "1") != "0"
 
 
-def _read_shared_cache() -> dict:
-    """[v3.89 #75] 读取共享缓存；损坏时返回 {} 并记录告警，不再静默吞掉。"""
+def _evict_locked(now: float) -> None:
+    """调用方须持有 _MEM_LOCK：先清过期，仍超限则按时间戳从旧到新淘汰到 90% 水位。"""
+    for k in [k for k, v in _mem_cache.items() if now - v.get("ts", 0) >= CACHE_TTL]:
+        del _mem_cache[k]
+    if len(_mem_cache) > CACHE_MAX_ENTRIES:
+        keep = int(CACHE_MAX_ENTRIES * 0.9)
+        for k, _ in sorted(_mem_cache.items(), key=lambda kv: kv[1].get("ts", 0))[:len(_mem_cache) - keep]:
+            del _mem_cache[k]
+
+
+def _cache_get(key: str):
+    """只查内存；过期或未命中返回 None。不读磁盘、不加文件锁。"""
+    _ensure_bg_started()
+    now = time.time()
+    with _MEM_LOCK:
+        c = _mem_cache.get(key)
+        if c is None:
+            return None
+        if now - c["ts"] < CACHE_TTL:
+            return c["data"]
+        del _mem_cache[key]
+    return None
+
+
+def _cache_set(key: str, data):
+    """只写内存（超限时 TTL/最旧淘汰）；落盘由后台线程批量完成。"""
+    global _dirty
+    _ensure_bg_started()
+    now = time.time()
+    with _MEM_LOCK:
+        _mem_cache[key] = {"ts": now, "data": data}
+        if len(_mem_cache) > CACHE_MAX_ENTRIES:
+            _evict_locked(now)
+        _dirty = True
+
+
+def _snapshot_to_disk() -> bool:
+    """把内存缓存写成快照：持锁只做浅拷贝，序列化与写盘都在锁外；临时文件 + os.replace 原子替换。"""
+    global _dirty
+    now = time.time()
+    with _MEM_LOCK:
+        items = {k: v for k, v in _mem_cache.items()
+                 if now - v.get("ts", 0) < CACHE_TTL and not k.startswith(_SNAPSHOT_SKIP_PREFIXES)}
+        _dirty = False
+    tmp = None
     try:
-        if not _SHARED_CACHE_FILE.exists():
-            return {}
-        raw = _SHARED_CACHE_FILE.read_text(encoding="utf-8")
-        if not raw.strip():
-            return {}
-        data = _json_mod.loads(raw)
-        return data if isinstance(data, dict) else {}
-    except Exception as e:
-        logger.warning(f"[clawby_cache] 共享缓存读取失败（按空缓存继续）: {e}")
-        return {}
-
-
-def _write_shared_cache(disk: dict) -> bool:
-    """
-    [v3.89 #75] 原子替换写入：唯一临时文件 → os.replace。
-    旧实现直接 write_text 覆盖，进程在多进程竞争或写中途崩溃时会留下半截 JSON，
-    下一次读取失败后又被空状态覆盖，缓存批量丢失。
-    """
-    try:
-        tmp = _SHARED_CACHE_FILE.with_name(
-            f"{_SHARED_CACHE_FILE.name}.{_os.getpid()}.tmp"   # 唯一临时名，避免多进程互踩
-        )
-        tmp.write_text(_json_mod.dumps(disk, ensure_ascii=False), encoding="utf-8")
-        _os.replace(tmp, _SHARED_CACHE_FILE)
+        _SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _SNAPSHOT_FILE.with_name(f"{_SNAPSHOT_FILE.name}.{_os.getpid()}.tmp")
+        tmp.write_text(_json_mod.dumps(items, ensure_ascii=False), encoding="utf-8")
+        _os.replace(tmp, _SNAPSHOT_FILE)
         return True
     except Exception as e:
-        logger.warning(f"[clawby_cache] 共享缓存写入失败: {e}")
+        with _MEM_LOCK:
+            _dirty = True          # 写失败，下个周期重试
+        logger.warning(f"[clawby_cache] 快照写入失败: {e}")
         try:
-            if 'tmp' in locals() and tmp.exists():
+            if tmp is not None and tmp.exists():
                 tmp.unlink()
         except Exception:
             pass
         return False
 
-# 进程内二级缓存：减少磁盘读写次数
-_mem_cache: dict = {}
 
-def _cache_get(key: str):
-    now = time.time()
-    # 1. 内存缓存
-    if key in _mem_cache:
-        c = _mem_cache[key]
-        if now - c["ts"] < CACHE_TTL:
-            return c["data"]
-    # 2. 磁盘共享缓存（[v3.89 #75] 跨进程锁 + 容错读取）
+def _load_snapshot() -> int:
+    """读一次快照填充内存（只填充内存中不存在或更旧的未过期条目）。返回加载条数。"""
     try:
-        with _CrossProcessCacheLock(_CACHE_LOCK_FILE):
-            disk = _read_shared_cache()
-            if key in disk:
-                entry = disk[key]
-                if now - entry["ts"] < CACHE_TTL:
-                    # 回填内存缓存
-                    _mem_cache[key] = entry
-                    return entry["data"]
+        if not _SNAPSHOT_FILE.exists() or _SNAPSHOT_FILE.stat().st_size > _SNAPSHOT_MAX_LOAD_BYTES:
+            return 0
+        raw = _SNAPSHOT_FILE.read_text(encoding="utf-8")
+        data = _json_mod.loads(raw) if raw.strip() else {}
+        if not isinstance(data, dict):
+            return 0
     except Exception as e:
-        logger.debug(f"[clawby_cache] 读取 {key} 失败: {e}")
-    return None
+        logger.warning(f"[clawby_cache] 快照读取失败（按空缓存继续）: {e}")
+        return 0
+    now = time.time()
+    n = 0
+    with _MEM_LOCK:
+        for k, v in data.items():
+            if not isinstance(v, dict) or "data" not in v or now - v.get("ts", 0) >= CACHE_TTL:
+                continue
+            cur = _mem_cache.get(k)
+            if cur is None or cur.get("ts", 0) < v["ts"]:
+                _mem_cache[k] = v
+                n += 1
+        if len(_mem_cache) > CACHE_MAX_ENTRIES:
+            _evict_locked(now)
+    return n
 
-def _cache_set(key: str, data):
-    now = time.time()
-    entry = {"ts": now, "data": data}
-    # 1. 写内存
-    _mem_cache[key] = entry
-    # 2. 写磁盘（各进程共享）：[v3.89 #75] 跨进程锁内读改写 + 原子替换
-    try:
-        with _CrossProcessCacheLock(_CACHE_LOCK_FILE):
-            disk = _read_shared_cache()
-            # 清理过期条目，防止文件无限增长
-            disk = {k: v for k, v in disk.items()
-                    if now - v.get("ts", 0) < CACHE_TTL}
-            disk[key] = entry
-            _write_shared_cache(disk)
-    except Exception as e:
-        logger.debug(f"[clawby_cache] 写入 {key} 失败: {e}")
+
+def _remove_legacy_cache() -> None:
+    for f in _LEGACY_CACHE_FILES:
+        try:
+            if f.exists():
+                sz = f.stat().st_size
+                f.unlink()
+                logger.info(f"[clawby_cache] 已清理旧版跨进程缓存文件 {f.name} ({sz / 1024 / 1024:.1f}MB)")
+        except Exception as e:
+            logger.warning(f"[clawby_cache] 清理旧缓存文件 {f.name} 失败: {e}")
+
+
+def _bg_loop() -> None:
+    _remove_legacy_cache()
+    n = _load_snapshot()
+    logger.info(f"[clawby_cache] 后台线程启动：快照加载 {n} 条，之后每 {CACHE_SNAPSHOT_INTERVAL:.0f}s 在有变更时落盘")
+    while not _bg_stop.wait(CACHE_SNAPSHOT_INTERVAL):
+        if _dirty:
+            _snapshot_to_disk()
+
+
+def _ensure_bg_started() -> None:
+    """首次读写缓存时懒启动后台线程（加载快照 + 周期落盘）。FX_CLAWBY_CACHE_PERSIST=0 时只用内存。"""
+    global _bg_started
+    if _bg_started:
+        return
+    with _bg_start_lock:
+        if _bg_started:
+            return
+        _bg_started = True
+        if not _PERSIST_ENABLED:
+            return
+        threading.Thread(target=_bg_loop, name="clawby-cache-bg", daemon=True).start()
+        try:
+            import atexit
+            atexit.register(lambda: _dirty and _snapshot_to_disk())
+        except Exception:
+            pass
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CG 中转站 GET 请求（核心合约接口用）
@@ -1217,6 +1243,21 @@ def get_lsr_signal(symbol: str, mode: str = "trader") -> dict | None:
 # 综合衍生品信号（兼容原 coinglass_api.get_derivatives_signals）
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_DERIV_POOL = None
+_DERIV_POOL_LOCK = threading.Lock()
+
+
+def _get_deriv_pool():
+    """get_derivatives_signals 专用的模块级共享线程池（2 线程）。子任务内部不再向该池提交任务，不会死锁。"""
+    global _DERIV_POOL
+    if _DERIV_POOL is None:
+        with _DERIV_POOL_LOCK:
+            if _DERIV_POOL is None:
+                from concurrent.futures import ThreadPoolExecutor
+                _DERIV_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="deriv")
+    return _DERIV_POOL
+
+
 def get_derivatives_signals(symbol: str, current_price: float = None,
                              exchange: str = "Binance") -> dict:
     """
@@ -1225,7 +1266,6 @@ def get_derivatives_signals(symbol: str, current_price: float = None,
     爆仓                   → Clawby
     ✨ 新增: whale_index / cvd / coinbase_premium 字段
     """
-    from concurrent.futures import ThreadPoolExecutor
     sym = _sym_full(symbol)
     key = f"deriv:{sym}"
     cached = _cache_get(key)
@@ -1245,24 +1285,23 @@ def get_derivatives_signals(symbol: str, current_price: float = None,
         "_raw": {}
     }
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        f_lsr     = ex.submit(_get_top_lsr,      sym, exchange)
-        f_tkr     = ex.submit(_get_taker,        sym, exchange)
-        f_oi      = ex.submit(_get_oi_history,   sym, exchange)
-        f_fr      = ex.submit(_get_funding_rate, sym, exchange)
-        f_whale   = ex.submit(get_whale_index,   sym, exchange)
-        f_cvd     = ex.submit(get_cvd,           sym, exchange)
-        f_cb      = ex.submit(get_coinbase_premium)
-        f_liq     = ex.submit(_get_liq_history,  sym, exchange)
-        # 在 with 块内取结果：shutdown(wait=True) 保证所有任务已完成，并发效果最大化
-        lsr_data   = f_lsr.result()
-        taker_data = f_tkr.result()
-        oi_hist    = f_oi.result()
-        fr_list    = f_fr.result()
-        whale_data = f_whale.result()
-        cvd_data   = f_cvd.result()
-        cb_data    = f_cb.result()
-        liq_hist_prefetch = f_liq.result()
+    # 模块级共享 2 线程池（不再每次新建 8 线程）；已停用的 whale_index 不再提交
+    ex = _get_deriv_pool()
+    f_lsr     = ex.submit(_get_top_lsr,      sym, exchange)
+    f_tkr     = ex.submit(_get_taker,        sym, exchange)
+    f_oi      = ex.submit(_get_oi_history,   sym, exchange)
+    f_fr      = ex.submit(_get_funding_rate, sym, exchange)
+    f_cvd     = ex.submit(get_cvd,           sym, exchange)
+    f_cb      = ex.submit(get_coinbase_premium)
+    f_liq     = ex.submit(_get_liq_history,  sym, exchange)
+    lsr_data   = f_lsr.result()
+    taker_data = f_tkr.result()
+    oi_hist    = f_oi.result()
+    fr_list    = f_fr.result()
+    whale_data = []            # get_whale_index 已停用（恒返回 []）
+    cvd_data   = f_cvd.result()
+    cb_data    = f_cb.result()
+    liq_hist_prefetch = f_liq.result()
 
     # ── 1. 多空比 ─────────────────────────────────────────────────────────────
     if lsr_data:
