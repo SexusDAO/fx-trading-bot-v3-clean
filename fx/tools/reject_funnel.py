@@ -76,7 +76,11 @@ def _load_records(files, cutoff):
             continue
         for k, v in p.items():
             if k not in ("type", "ts", "symbol", "mode", "direction"):
-                tgt.setdefault(k, v)
+                if k in ("final_score", "final_score_stage"):
+                    if v is not None:
+                        tgt[k] = v        # 补丁里的最终分覆盖落盘时的基础分
+                elif tgt.get(k) is None:
+                    tgt[k] = v            # 原 setdefault：键已存在但值为 null 时也应补上
         stats["patch_merged"] += 1
     return verdicts, stats
 

@@ -414,6 +414,7 @@ def _write_signal_analytics(
     route_quality: int | None = None,
     competing_routes: list | None = None,
     entry_params_ok: bool | None = None,
+    final_score: float | None = None,
 ) -> None:
     """每次 judge 结果（通过或拒绝）写入一条结构化记录到 signal_analytics.jsonl。"""
     import time as _t
@@ -450,7 +451,10 @@ def _write_signal_analytics(
         "signal_strength": (reason or {}).get("signal_strength") if judge_passed else None,
         "route_quality":  route_quality,
         "competing_routes": competing_routes or [],
-        "final_score":   ind.get("final_score"),
+        # 通过记录写盘时评分层（_apply_score_*）尚未运行，ind 里没有 final_score；调用方传入基础分兜底，
+        # final_score_stage 标明口径：base=信号强度基础分（评分层之前）；final=评分层之后的最终分。评分层最终分由 entry_params_patch 补写。
+        "final_score":   ind.get("final_score") if ind.get("final_score") is not None else final_score,
+        "final_score_stage": "final" if ind.get("final_score") is not None else ("base" if final_score is not None else None),
         "snapshot": {
             "price":        ind.get("price"),
             "chg24":        round(ind.get("chg24", 0), 2),
@@ -1576,6 +1580,7 @@ def analyze_one(symbol: str, ticker: dict,
             btc_trend=btc_trend, market_mode=market_mode,
             route_quality=_best["quality"] if _passed_signals else None,
             competing_routes=_competing_routes,
+            final_score=_best["score"],     # 基础分（SCORE_BASE_*），避免通过记录 final_score 为 null
         )})
         return _sig
 
@@ -2867,6 +2872,7 @@ def _filter_and_register_signals(
             logger.info(f"[scanner] {sig['symbol']} score {base_score}→{new_score} "
                         f"(btc={btc_adj:+d} cg={cg_bonus:+d} strat={strategy_adj:+d} shock={post_shock_adj:+d} tier={atr_tier_adj:+d} pulse={_pulse_penalty:+d} hub_bonus={_bonus_info.get('hub_bonus', 0):+d})")
         ind["final_score"]    = new_score
+        sig["final_score"]    = new_score     # 信号 dict 顶层也带上，下游/日志不必钻进 ind
         ind["btc_trend"]      = _btc_trend
         ind["btc_adj"]        = btc_adj
         ind["cg_bonus"]       = cg_bonus
@@ -3212,6 +3218,8 @@ def _filter_and_register_signals(
                                 "direction":       sig.get("direction", ""),
                                 "entry_params_ok": sig["_entry_params_ok"],
                                 "calc_sl_tp_error": sig.get("_calc_sl_tp_error", None),
+                                "final_score": (sig.get("ind") or {}).get("final_score", sig.get("final_score")),
+                                "final_score_stage": "final",
                             }
                             with open(SIGNAL_ANALYTICS_FILE, "a", encoding="utf-8") as _af:
                                 _af.write(_json.dumps(_patch, ensure_ascii=False) + "\n")
