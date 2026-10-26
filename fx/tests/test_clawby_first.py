@@ -193,3 +193,61 @@ def test_relay_429_no_retry_when_max_retries_0(monkeypatch):
     with pytest.raises(RuntimeError):
         C.clawby_relay("x", {}, _max_retries=0)
     assert sleeps == []
+
+
+# ── Coinbase 溢价：Clawby 优先（必须带 interval），CG 兜底 ──
+CB_ROWS = [{"time": 1793019600, "premium": -129.96, "premium_rate": -0.1618, "coinbase_price": 80202.75}]
+
+
+def test_cb_premium_clawby_first_with_interval(monkeypatch):
+    calls = []
+    monkeypatch.setattr(C, "clawby_relay", lambda name, params=None, **k: calls.append((name, params, k)) or CB_ROWS)
+    monkeypatch.setattr(C, "cg_get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("Clawby 成功时不应调 CG")))
+    r = C.get_coinbase_premium("1h", 3)
+    assert calls[0][0] == "coinbase_premium_index"
+    assert calls[0][1] == {"interval": "1h", "limit": 3}            # 必须带 interval，且不带 symbol
+    assert calls[0][2].get("_max_retries") == 0
+    assert r == CB_ROWS and r[0]["premium_rate"] == -0.1618
+
+
+@pytest.mark.parametrize("relay_ret", [None, [], {"code": "400", "msg": "Required String parameter 'interval'"}, ["bad"]])
+def test_cb_premium_fallback_to_cg(monkeypatch, relay_ret):
+    monkeypatch.setattr(C, "clawby_relay", lambda *a, **k: relay_ret)
+    seen = []
+    monkeypatch.setattr(C, "cg_get", lambda path, params=None, **k: seen.append((path, params)) or CB_ROWS)
+    r = C.get_coinbase_premium()
+    assert seen[0] == ("api/coinbase-premium-index", {"interval": "1h", "limit": 6})
+    assert r == CB_ROWS
+
+
+def test_cb_premium_relay_exception_falls_back(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("429")
+    monkeypatch.setattr(C, "clawby_relay", boom)
+    monkeypatch.setattr(C, "cg_get", lambda *a, **k: CB_ROWS)
+    assert C.get_coinbase_premium() == CB_ROWS
+
+
+def test_cb_premium_both_fail_empty_and_not_cached(monkeypatch):
+    store = {}
+    monkeypatch.setattr(C, "_cache_get", lambda k: store.get(k))
+    monkeypatch.setattr(C, "_cache_set", lambda k, v: store.__setitem__(k, v))
+    monkeypatch.setattr(C, "clawby_relay", lambda *a, **k: None)
+    monkeypatch.setattr(C, "cg_get", lambda *a, **k: None)
+    assert C.get_coinbase_premium() == [] and store == {}
+
+
+def test_cb_premium_no_key_degrades_to_cg(monkeypatch):
+    C._configure_keys([], announce=False)                           # 未配 Clawby key → EnvironmentError → 走 CG
+    monkeypatch.setattr(C, "cg_get", lambda *a, **k: CB_ROWS)
+    assert C.get_coinbase_premium() == CB_ROWS
+
+
+def test_cb_premium_cache_hit_skips_calls(monkeypatch):
+    store = {}
+    monkeypatch.setattr(C, "_cache_get", lambda k: store.get(k))
+    monkeypatch.setattr(C, "_cache_set", lambda k, v: store.__setitem__(k, v))
+    n = []
+    monkeypatch.setattr(C, "clawby_relay", lambda *a, **k: n.append(1) or CB_ROWS)
+    C.get_coinbase_premium(); C.get_coinbase_premium()
+    assert len(n) == 1 and "cb_premium:1h" in store

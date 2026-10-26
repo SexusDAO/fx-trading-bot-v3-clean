@@ -25,9 +25,9 @@ Clawby key 配置（只从环境变量读取，仓库里不再有默认 key；�
   get_liq_orders()             → GET /api/futures/liquidation/order?symbol=XXXUSDT
   get_liq_coin_list()          → GET /api/futures/liquidation/coin-list
 
-CVD / Coinbase 溢价（→ CG中转 GET，已验证可用）:
+CVD / Coinbase 溢价（→ Clawby 优先，CG中转 GET 兜底）:
   get_cvd()                    → GET /api/futures/cvd/history?symbol=XXXUSDT
-  get_coinbase_premium()       → GET /api/coinbase-premium-index
+  get_coinbase_premium()       → Clawby coinbase_premium_index（必须传 interval）→ 兜底 GET /api/coinbase-premium-index
 
 Binance fapi 公开（保持不变）:
   _get_top_lsr()     → fapi globalLongShortAccountRatio
@@ -1108,17 +1108,28 @@ def get_cvd(symbol: str, exchange: str = "Binance",
 
 def get_coinbase_premium(interval: str = "1h", limit: int = 6) -> list:
     """
-    Coinbase 溢价指数 → CG中转 GET（Clawby relay 返回空，CG GET 已验证可用）
-    字段: time(s) / premium / premium_rate / coinbase_price
-    注意: CG中转返回的 time 单位是秒，非毫秒。
+    Coinbase 溢价指数 → Clawby(coinbase_premium_index) 优先，CG中转 GET 兜底。
+    Clawby 必须传 interval，否则内层返回 400 "Required String parameter 'interval' is not present"
+    （旧注释"Clawby relay 返回空"就是漏传 interval 所致）；带 interval 后与 CG 返回逐字段一致。
+    字段: time(s) / premium / premium_rate / coinbase_price（均为数值）
+    注意: time 单位是秒，非毫秒。这是 BTC 对 Coinbase 的全市场溢价，不区分币种。
+    Clawby 路径串行、不重试（_max_retries=0）：429/超时/内层 code≠0/空/结构异常 → 立即降级 CG。
     """
     key = f"cb_premium:{interval}"
     cached = _cache_get(key)
     if cached is not None:
         return cached
-    data   = cg_get("api/coinbase-premium-index",
-                    {"interval": interval, "limit": limit})
-    result = data if isinstance(data, list) else []
+    params = {"interval": interval, "limit": limit}
+    result = []
+    try:
+        raw = clawby_relay("coinbase_premium_index", dict(params), timeout=8, _max_retries=0)
+        if isinstance(raw, list) and raw and all(isinstance(r, dict) for r in raw):
+            result = raw
+    except Exception as e:
+        logger.debug(f"[clawby] coinbase_premium_index 失败，降级 CG: {e}")
+    if not result:
+        data = cg_get("api/coinbase-premium-index", dict(params))
+        result = data if isinstance(data, list) else []
     if result:
         _cache_set(key, result)
     return result
