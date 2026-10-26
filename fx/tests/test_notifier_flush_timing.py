@@ -39,6 +39,15 @@ def _sig(scan_ts=1):
             "_scan_ts": scan_ts, "ind": {"atr_1h": 1.0}}
 
 
+async def _wait_flushed(tg, n=1, timeout=3.0):
+    """_trigger 把「追加触发行 + flush」放进后台线程任务（create_task + to_thread），
+    断言前必须等它真正发出卡片，否则 len(sent) 会随调度快慢取到 0 或 1（偶发失败的根因）。"""
+    deadline = time.time() + timeout
+    while len(tg["sent"]) < n and time.time() < deadline:
+        await asyncio.sleep(0.01)
+    assert len(tg["sent"]) >= n, "后台卡片任务超时未 flush"
+
+
 async def _register():
     w = sw.SignalWatcher()
     sig = _sig()
@@ -60,7 +69,7 @@ def test_trigger_flushes_monitor_and_trigger_lines_into_one_card(tg):
     async def go():
         w, sig, sid = await _register()
         await w._trigger("XUSDT", 100.0, w._watched["XUSDT"])
-        await asyncio.sleep(0.3)   # 触发卡片追加/flush 现为后台线程任务（2s 超时），等其完成
+        await _wait_flushed(tg)    # 触发卡片追加/flush 现为后台线程任务（2s 超时），轮询等其完成而非固定 sleep
         return sid
     sid = asyncio.run(go())
     assert len(tg["sent"]) == 1                                                 # 只发出一条消息（一张卡片）
@@ -94,6 +103,7 @@ def test_precheck_reject_appends_line_to_flushed_card(tg, monkeypatch):
     async def go():
         w, sig, sid = await _register()
         await w._trigger("XUSDT", 100.0, w._watched["XUSDT"])
+        await _wait_flushed(tg)                                                 # 等后台 flush 完成再取基数
         n_sent = len(tg["sent"])
         ok = await executor._execute_async(sig, None)
         return sid, n_sent, ok
