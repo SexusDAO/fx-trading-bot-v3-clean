@@ -3575,12 +3575,36 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
         #   由 patrol 下一轮重试。新 SL 的 id 一律写回 pos_state。
         sl_id_old = pos.get("sl_order_id")
         sl_alive = None   # None = 未知
+        _algo_now = None
+        _heal_fields: dict = {}      # 自愈从交易所读到的 sl_price/sl_order_id，随后续 update_position 一并写回
         try:
             _algo_now = await _run_patrol(lambda: _api.get_algo_open_orders(symbol))
             _algo_ids = {int(o.get("algoId", 0)) for o in (_algo_now or []) if o.get("algoId")}
             sl_alive = bool(sl_id_old and int(sl_id_old) in _algo_ids)
         except Exception as _sl_qe:
             logger.warning(f"[pm] {symbol} 查询 Algo SL 失败，本轮不补挂 SL（避免重复）: {_sl_qe}")
+
+        # ── [自愈] 记录里没有 sl_order_id（如孤儿仓位）或 id 没匹配上，但交易所其实已有该仓位的止损单 ──────────
+        #   按 symbol+positionSide+平仓方向+STOP_MARKET 在已查到的 Algo 单里找：恰好 1 个 → 认领（sl_alive=True，写回 sl_price/sl_order_id），
+        #   不再重复挂 SL、也不用 ATR 覆盖止损价；多个 → 歧义，不自动选，告警并保持 pending_guard（sl_alive=None → 本轮不挂 SL）。
+        if sl_alive is False and _algo_now is not None:
+            from shared.guard_match import find_exchange_sl, sl_fields
+            _sl_hits = find_exchange_sl(_algo_now, symbol, direction)
+            if len(_sl_hits) == 1:
+                _heal_fields = sl_fields(_sl_hits[0])
+                sl_alive = True
+                sl_id_old = _heal_fields["sl_order_id"]
+                sl_price = _heal_fields["sl_price"]
+                logger.warning(f"[pm] {symbol} 交易所已有止损单 algoId={sl_id_old} @ {sl_price:.6g}，"
+                               f"本地记录缺失/不匹配，自愈认领（不重复挂 SL）")
+            elif len(_sl_hits) > 1:
+                sl_alive = None
+                logger.warning(f"[pm] {symbol} 交易所有 {len(_sl_hits)} 个止损单同时匹配，歧义，不自动认领；保持 pending_guard 待人工确认")
+                try:
+                    await _alert_card_or_notify(pos, f"⚠️ {symbol} 交易所有 {len(_sl_hits)} 个止损单同时匹配，无法自动认领，"
+                                                     f"已保持 pending_guard，请人工确认并清理多余止损单")
+                except Exception as _sf_e:
+                    _silent_fail("heal_multi_sl_alert", symbol, _sf_e)
         if sl_alive is False and sl_id_old:
             try:   # 缺失判定后仍尝试撤旧 id（已失效则静默）
                 await asyncio.get_running_loop().run_in_executor(
@@ -3683,7 +3707,8 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                     "open_order_id": None,
                     "tp1_order_id":  tp1_id,
                     "tp2_order_id":  tp2_id,
-                    **({} if _sl_ok else {"missing_guards": ["sl"]}),
+                    **_heal_fields,
+                    **({"missing_guards": []} if _sl_ok else {"missing_guards": ["sl"]}),
                 }))
                 if _skip_ok is False:
                     logger.warning(
@@ -3695,6 +3720,8 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
             logger.warning(f"[pm] {symbol} 检查已有挂单失败(继续补挂): {chk_err}")
 
         # ── 如果 pos_state 里没有 sl/tp 价格,重新用 ATR 降级计算 ─────────────
+        #   交易所已有 SL（自愈认领）时，止损价以交易所为准，不被 ATR 结果覆盖。
+        _sl_from_exchange = float(sl_price) if (_heal_fields and sl_price) else None
         if not sl_price or not tp1_price:
             try:
                 klines = (await asyncio.to_thread(_api.get_klines, symbol, "1h", 22))
@@ -3716,6 +3743,8 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                 # tp2_price 不在这里生成--由 calc_sl_tp 决定是否需要 TP2
                 # 降级计算时保持 tp2_price=None(单TP),避免挂出无效 TP2
                 tp2_price = None
+                if _sl_from_exchange:
+                    sl_price = _sl_from_exchange
                 logger.info(f"[pm] {symbol} 降级计算: sl={sl_price:.6g} tp1={tp1_price:.6g} tp2=None(单TP)")
             except Exception as e:
                 raise RuntimeError(f"计算止损价失败: {e}")
@@ -3755,6 +3784,7 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
             "tp1_price":   tp1_price,
             "tp2_price":   tp2_price,
             "missing_guards": _missing,
+            **_heal_fields,
         }
         (await asyncio.to_thread(update_position, pid, _upd))
         if _missing:

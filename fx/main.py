@@ -592,6 +592,46 @@ async def _loop_track_outcomes(interval_sec: int = 3600) -> None:
 # 主入口
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _build_orphan_record(sym: str, pos_side: str, rp: dict, algo_orders, open_orders, now_ms: int) -> tuple:
+    """孤儿仓位（交易所有、本地无）→ 建档记录。返回 (record, notes)。
+    同时从已拉取的交易所挂单里读出保护单，避免记录里 sl_price/sl_order_id 缺失（读取方 float(.get('sl_price',0)) 会得到 0）：
+      · 止损：Algo 单按 symbol+positionSide+平仓方向+STOP_MARKET 匹配，恰好 1 个才写 sl_price/sl_order_id；0 个或多个不写；
+      · 止盈：普通限价单按离入场近→远排序，第 1 个写 tp1_*，第 2 个写 tp2_*。"""
+    from shared.guard_match import find_exchange_sl, sl_fields, find_exchange_tps, tp_fields
+    entry = float(rp["entryPrice"])
+    qty = abs(float(rp["positionAmt"]))
+    ps = {
+        "pos_id":             f"rec_{sym}_{pos_side[0]}_{now_ms}",
+        "symbol":             sym,
+        "direction":          pos_side.lower(),   # 取自交易所 positionSide
+        "status":             "open",
+        "mode":               "recovered",
+        "sig_type":           "recovered",
+        "entry_price":        entry,
+        "fill_price":         entry,
+        "quantity":           qty,
+        "quantity_remaining": qty,
+        "leverage":           int(float(rp.get("leverage", 0) or 0)),
+        "open_time":          now_ms,
+        "fill_time":          now_ms,
+        "tp1_filled":         False,
+        "tp2_filled":         False,
+        "source":             "orphan_recovered",
+    }
+    notes = []
+    sl_hits = find_exchange_sl(algo_orders, sym, pos_side)
+    if len(sl_hits) == 1:
+        ps.update(sl_fields(sl_hits[0]))
+        notes.append(f"SL@{ps['sl_price']:.6g}(id={ps['sl_order_id']})")
+    elif len(sl_hits) > 1:
+        notes.append(f"交易所有{len(sl_hits)}个止损单，歧义，未自动认领SL")
+    tps = find_exchange_tps(open_orders, sym, pos_side)
+    if tps:
+        ps.update(tp_fields(tps))
+        notes.append(f"TP×{min(len(tps), 2)}")
+    return ps, notes
+
+
 async def _sync_positions_on_startup() -> None:
     """
     启动时对齐持仓状态：
@@ -717,30 +757,16 @@ async def _sync_positions_on_startup() -> None:
 
             if ps is None:
                 _now_ms = int(_time.time() * 1000)
-                ps = {
-                    "pos_id":             f"rec_{sym}_{pos_side[0]}_{_now_ms}",
-                    "symbol":             sym,
-                    "direction":          pos_side.lower(),   # 取自交易所 positionSide
-                    "status":             "open",
-                    "mode":               "recovered",
-                    "sig_type":           "recovered",
-                    "entry_price":        entry,
-                    "fill_price":         entry,
-                    "quantity":           qty,
-                    "quantity_remaining": qty,
-                    "leverage":           int(float(rp.get("leverage", 0) or 0)),
-                    "open_time":          _now_ms,
-                    "fill_time":          _now_ms,
-                    "tp1_filled":         False,
-                    "tp2_filled":         False,
-                    "source":             "orphan_recovered",
-                }
+                ps, _orphan_notes = _build_orphan_record(sym, pos_side, rp, _algo_orders, open_orders, _now_ms)
+                if len(_orphan_notes) and any("歧义" in _n for _n in _orphan_notes):
+                    logger.warning(f"[startup_sync] {sym}({pos_side}) {'; '.join(_orphan_notes)}")
                 if not add_position(ps):
                     errors.append(f"{sym}({pos_side}) 孤儿仓位建档失败")
                     logger.error(f"[startup_sync] {sym}({pos_side}) 孤儿仓位建档失败，请人工核查")
                     continue
                 orphans_rebuilt.append(f"{sym}({pos_side})")
-                logger.warning(f"[startup_sync] {sym}({pos_side}) 孤儿仓位已按交易所数据建档: qty={qty} entry={entry}")
+                logger.warning(f"[startup_sync] {sym}({pos_side}) 孤儿仓位已按交易所数据建档: qty={qty} entry={entry} "
+                               f"{'已读取保护单: ' + ', '.join(_orphan_notes) if _orphan_notes else '交易所未读到保护单'}")
 
             pid    = ps.get("pos_id", sym)
             tp1_id = ps.get("tp1_order_id")
