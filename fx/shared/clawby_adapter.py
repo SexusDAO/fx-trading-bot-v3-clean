@@ -474,6 +474,7 @@ def _parse_retry_after(value, default: float = 30.0, max_wait: float = 60.0) -> 
 _CG_429_LOCK = threading.Lock()
 _CG_429_UNTIL: float = 0.0
 _CG_429_COUNT: int = 0
+_CG_429_LAST: float = 0.0     # 最近一次收到 429 的时间；比它早发出的请求，其结果不能清零连续计数
 CG_429_BASE_WAIT = 10.0
 CG_429_MAX_WAIT = 60.0
 
@@ -485,8 +486,14 @@ def cg_backoff_remaining() -> float:
 
 def _cg_note_429(retry_after: float = 0.0) -> float:
     """记录一次 429，返回本次退避秒数。"""
-    global _CG_429_UNTIL, _CG_429_COUNT
+    global _CG_429_UNTIL, _CG_429_COUNT, _CG_429_LAST
     with _CG_429_LOCK:
+        _CG_429_LAST = time.time()
+        now = _CG_429_LAST
+        if _CG_429_UNTIL > now:
+            # 已在退避期内：这是退避生效前就已在途/排队的请求撞上的 429，
+            # 不再叠加计数、不再重复刷 10s 日志，只返回剩余退避时间
+            return _CG_429_UNTIL - now
         _CG_429_COUNT += 1
         wait = min(CG_429_BASE_WAIT * (2 ** (_CG_429_COUNT - 1)), CG_429_MAX_WAIT)
         wait = min(max(wait, float(retry_after or 0.0)), CG_429_MAX_WAIT)
@@ -494,9 +501,13 @@ def _cg_note_429(retry_after: float = 0.0) -> float:
         return wait
 
 
-def _cg_note_ok() -> None:
+def _cg_note_ok(sent_at: float = None) -> None:
+    """200 清零连续 429 计数。sent_at：该请求的发出时间——如果它发出时 429 退避还没出现
+    （在途请求恰好成功），不能把退避期内的计数清零，否则下一次 429 又从 10s 起算，指数退避形同虚设。"""
     global _CG_429_COUNT
     with _CG_429_LOCK:
+        if sent_at is not None and sent_at <= _CG_429_LAST:
+            return
         _CG_429_COUNT = 0
 
 
@@ -511,8 +522,15 @@ def cg_get(path: str, params: dict = None, timeout: int = 8) -> "list | dict | N
         logger.debug(f"[cg_get] 429 退避中（剩 {_left:.0f}s），跳过 {path}")
         return None
     _wait_cg_rate_limit()
+    # 排队等限速间隔的这段时间里，别的线程可能已经撞上 429 并开启退避：发请求前必须再查一次，
+    # 否则排队中的线程会在退避期内照发（日志里 2s 内连续两条 429 的原因）
+    _left = cg_backoff_remaining()
+    if _left > 0:
+        logger.debug(f"[cg_get] 429 退避中（剩 {_left:.0f}s，排队期间生效），跳过 {path}")
+        return None
     url = f"{CG_BASE_URL}/{path.lstrip('/')}"
     for attempt in range(2):
+        _sent_at = time.time()
         try:
             r = requests.get(url, params=params or {}, headers=CG_HEADERS,
                              timeout=timeout, proxies=_PROXIES)
@@ -530,7 +548,7 @@ def cg_get(path: str, params: dict = None, timeout: int = 8) -> "list | dict | N
         if r.status_code != 200:
             logger.debug(f"[cg_get] {path} HTTP {r.status_code}")
             return None
-        _cg_note_ok()      # 200：清零连续 429 计数，下次 429 从 10s 重新起算
+        _cg_note_ok(_sent_at)      # 200：清零连续 429 计数（仅当该请求发出时还没有退避）
 
         try:
             body = r.json()

@@ -119,13 +119,18 @@ def cg(monkeypatch):
 def test_backoff_sequence_10_20_40_60_60(monkeypatch):
     monkeypatch.setattr(C, "_CG_429_UNTIL", 0.0)
     monkeypatch.setattr(C, "_CG_429_COUNT", 0)
-    assert [C._cg_note_429() for _ in range(5)] == [10, 20, 40, 60, 60]
+    out = []
+    for _ in range(5):
+        out.append(C._cg_note_429())
+        monkeypatch.setattr(C, "_CG_429_UNTIL", 0.0)               # 模拟上一轮退避已过期（退避期内的重复 429 不再升级，见 test_cg_backoff_global.py）
+    assert out == [10, 20, 40, 60, 60]
 
 
 def test_retry_after_longer_wins_but_capped_at_60(monkeypatch):
     monkeypatch.setattr(C, "_CG_429_UNTIL", 0.0)
     monkeypatch.setattr(C, "_CG_429_COUNT", 0)
     assert C._cg_note_429(25) == 25
+    monkeypatch.setattr(C, "_CG_429_UNTIL", 0.0)
     assert C._cg_note_429(500) == 60
 
 
