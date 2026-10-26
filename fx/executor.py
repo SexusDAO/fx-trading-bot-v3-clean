@@ -1201,7 +1201,7 @@ async def _on_position_closed(pos_id: str, symbol: str,
         _log_path = _pl.Path(__file__).parent / "logs" / "trade_log.jsonl"
         _log_path.parent.mkdir(parents=True, exist_ok=True)
         # v3.93: 同步文件写移出事件循环（与 trade_log 其他读写共用一把锁）
-        from shared.trade_log_io import append_jsonl as _append_jsonl
+        from shared.trade_log_io import append_trade_record_dedup as _append_jsonl   # 平仓记录按 open_time+symbol+direction 去重
         await asyncio.to_thread(_append_jsonl, _log_path, _log_entry, None)
     except Exception as _le:
         logger.warning(f"[executor] WS平仓 trade_log 写入失败: {_le}")

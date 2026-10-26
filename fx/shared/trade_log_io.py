@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
 _LOG_LOCK = threading.RLock()
 
 
@@ -21,6 +23,63 @@ def append_jsonl(path, record: dict, encoding: str | None = "utf-8") -> None:
     with _LOG_LOCK:
         with open(p, "a", encoding=encoding) as f:
             f.write(line)
+
+
+_DEDUP_TAIL_BYTES = 512 * 1024      # 去重只回看文件尾部这么多字节（近期记录），避免大文件整读
+
+
+def _same_open_trade(rec: dict, new: dict) -> bool:
+    """同一笔平仓：open_time 相同（>0）且 symbol、direction（忽略大小写）相同。open_time 缺失/为 0 的不判重。"""
+    try:
+        o_new = int(float(new.get("open_time") or 0))
+        o_old = int(float(rec.get("open_time") or 0))
+    except (TypeError, ValueError):
+        return False
+    if o_new <= 0 or o_new != o_old:
+        return False
+    if rec.get("symbol") != new.get("symbol"):
+        return False
+    return str(rec.get("direction") or "").lower() == str(new.get("direction") or "").lower()
+
+
+def append_trade_record_dedup(path, record: dict, encoding: str | None = "utf-8") -> bool:
+    """追加一条「平仓」记录；若文件近期已有相同 open_time + symbol + direction 的记录则跳过（返回 False）。
+
+    判重与追加在同一把锁内完成，WS 平仓路径与 position_manager 路径并发写同一笔时只会留下先到的一条。
+    只对带 open_time(>0) 的平仓记录判重；没有 open_time 的记录（如 missed_unfilled）照常追加。
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, ensure_ascii=False) + "\n"
+    with _LOG_LOCK:
+        try:
+            has_key = int(float(record.get("open_time") or 0)) > 0
+        except (TypeError, ValueError):
+            has_key = False
+        if has_key and p.exists():
+            try:
+                with open(p, "rb") as f:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    f.seek(max(size - _DEDUP_TAIL_BYTES, 0))
+                    tail = f.read().decode("utf-8", errors="replace").splitlines()
+                if size > _DEDUP_TAIL_BYTES and tail:
+                    tail = tail[1:]            # 第一行可能被截断
+                for ln in reversed(tail):
+                    try:
+                        old = json.loads(ln)
+                    except Exception:
+                        continue
+                    if isinstance(old, dict) and _same_open_trade(old, record):
+                        logger.debug(f"[trade_log] 跳过重复平仓记录 {record.get('symbol')} {record.get('direction')} "
+                                     f"open_time={record.get('open_time')}（已有 trade_id={old.get('trade_id')}，"
+                                     f"本次 trade_id={record.get('trade_id')}）")
+                        return False
+            except OSError as e:
+                logger.warning(f"[trade_log] 去重读取失败，按正常追加处理: {e}")
+        with open(p, "a", encoding=encoding) as f:
+            f.write(line)
+    return True
 
 
 def read_lines(path) -> list:

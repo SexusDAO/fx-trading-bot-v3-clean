@@ -19,7 +19,9 @@ def _setup(monkeypatch, pos):
 
     monkeypatch.setattr(pm, "_notify_async", _notify)
     import shared.trade_log_io as T
-    monkeypatch.setattr(T, "append_jsonl", lambda path, rec: records.append(dict(rec)))
+    # 平仓记录现经 append_trade_record_dedup 写入（按 open_time+symbol+direction 去重）；两个入口都截获
+    monkeypatch.setattr(T, "append_jsonl", lambda path, rec, *a, **k: records.append(dict(rec)))
+    monkeypatch.setattr(T, "append_trade_record_dedup", lambda path, rec, *a, **k: records.append(dict(rec)) or True)
     return records
 
 

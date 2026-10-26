@@ -1371,7 +1371,7 @@ class PositionManager:
                 "pnl_net_usdt":      round(_real_pnl - _manual_fees, 4),
             }
             TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            from shared.trade_log_io import append_jsonl as _append_jsonl   # v3.93
+            from shared.trade_log_io import append_trade_record_dedup as _append_jsonl   # v3.93 + 平仓记录按 open_time+symbol+direction 去重
             await asyncio.to_thread(_append_jsonl, TRADE_LOG_PATH, _record)
             logger.info(
                 f"[pm] {symbol} {_inferred_close_reason} trade_log 已补写: "
@@ -2630,7 +2630,7 @@ async def _close_position_post_static(
         elif close_reason in ("tp2", "tp2_hit") and _expected_tp2 > 0:
             _tp2_slip = (exit_price - _expected_tp2) / (_expected_tp2 + 1e-9) * 100
             record["tp_slippage_pct"] = round(_tp2_slip, 4)
-        from shared.trade_log_io import append_jsonl as _append_jsonl   # v3.93
+        from shared.trade_log_io import append_trade_record_dedup as _append_jsonl   # v3.93 + 平仓记录去重
         await asyncio.to_thread(_append_jsonl, TRADE_LOG_PATH, record)
     except Exception as e:
         logger.error(f"[pm] trade_log 写入失败: {e}")
