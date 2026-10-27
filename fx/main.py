@@ -641,6 +641,142 @@ def _claim_quota(ts_list, limits: dict, claimed: dict) -> bool:
             and claimed[ts_list[0][1]] < limits[ts_list[0][1]])
 
 
+_LOCAL_LIVE_STATUSES = ("open", "pending", "patching", "pending_guard")
+
+
+def _match_local_position(positions, sym: str, pos_side: str):
+    """交易所持仓 ↔ 本地 pos_state 记录匹配：(symbol, direction.upper()) + 状态 open/pending/patching/pending_guard。
+    多条时取 open_time 最新的一条；没有返回 None（只有 None 才允许建孤儿档案）。"""
+    side = str(pos_side).upper()
+    hits = [p for p in positions or []
+            if isinstance(p, dict) and p.get("symbol") == sym
+            and str(p.get("direction", "")).upper() == side
+            and p.get("status") in _LOCAL_LIVE_STATUSES]
+    if not hits:
+        return None
+
+    def _ot(p):
+        try:
+            return float(p.get("open_time", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    return max(hits, key=_ot)
+
+
+async def _check_and_reattach_guards(local: dict, rp: dict, algo_orders=None, open_orders=None,
+                                     repatch_tp: bool = True) -> dict:
+    """本地已有记录的仓位：只核对/认领保护单，绝不改动 entry_price/sl_price/mode/judge_detail/pos_id 等业务字段。
+      · SL：先看本地 sl_order_id 是否在交易所 Algo 单 algoId 集合里（存活）；不在则按 symbol+positionSide+平仓方向+STOP_MARKET
+        匹配，恰好 1 个 → 只回写 sl_order_id；0 个 → 缺失，委托 position_manager._补挂保护单 重挂；多个 → 歧义，同样委托（它会告警不盲挂）。
+      · TP：先看本地 tp1/tp2_order_id 是否在挂单 orderId 集合里；不在则在 LIMIT+平仓方向+positionSide 一致的挂单里，
+        按与本地 tp 价格最接近分配（偏差 ≤3% 才认领），只回写 tp*_order_id。
+      · repatch_tp=False（轻量对齐用）：只在 SL 缺失/歧义时委托补挂，TP 缺失不补。
+    查询交易所失败 → 什么都不做（失败≠缺失）。返回 {"sl","tp1","tp2","claimed","repatched"}。"""
+    from shared import binance_api as _bapi
+    from shared.state import update_position
+    from shared.guard_match import find_exchange_sl, find_exchange_tps, assign_tps_by_price
+
+    sym = local.get("symbol")
+    side = str(local.get("direction") or rp.get("positionSide") or "").upper()
+    pid = local.get("pos_id", sym)
+    out = {"sl": "unknown", "tp1": "unknown", "tp2": "unknown", "claimed": {}, "repatched": False}
+    try:
+        if algo_orders is None:
+            algo_orders = (await asyncio.to_thread(_bapi.get_algo_open_orders)) or []
+        if open_orders is None:
+            open_orders = (await asyncio.to_thread(_bapi.get_open_orders)) or []
+    except Exception as _qe:
+        logger.warning(f"[guard_reattach] {sym}({side}) 查询交易所保护单失败，本次不动: {_qe}")
+        out["sl"] = out["tp1"] = out["tp2"] = "query_failed"
+        return out
+
+    def _ids(orders, key):
+        r = set()
+        for o in orders or []:
+            try:
+                if o.get(key):
+                    r.add(int(o[key]))
+            except (TypeError, ValueError):
+                pass
+        return r
+
+    def _alive(v, live):
+        try:
+            return bool(v) and int(v) in live
+        except (TypeError, ValueError):
+            return False
+
+    live_ids = _ids(open_orders, "orderId")
+    live_algo = _ids(algo_orders, "algoId")
+    claims = {}
+
+    # ── SL ──
+    if _alive(local.get("sl_order_id"), live_algo):
+        out["sl"] = "alive"
+    else:
+        hits = find_exchange_sl(algo_orders, sym, side)
+        if len(hits) == 1:
+            claims["sl_order_id"] = int(hits[0]["algoId"])
+            out["sl"] = "claimed"
+        elif len(hits) > 1:
+            out["sl"] = "ambiguous"
+        else:
+            out["sl"] = "missing"
+
+    # ── TP ──
+    single = local.get("tp2_price") is None
+    tp1_ok = _alive(local.get("tp1_order_id"), live_ids)
+    tp2_ok = True if single else _alive(local.get("tp2_order_id"), live_ids)
+    if not (tp1_ok and tp2_ok):
+        taken = set()
+        if tp1_ok:
+            taken.add(int(local["tp1_order_id"]))
+        if not single and tp2_ok:
+            taken.add(int(local["tp2_order_id"]))
+        cands = [o for o in find_exchange_tps(open_orders, sym, side) if int(o["orderId"]) not in taken]
+
+        def _near(o, want):
+            try:
+                w = float(want or 0)
+                return w > 0 and abs(float(o.get("price")) - w) / w <= 0.03
+            except (TypeError, ValueError):
+                return False
+        a1, a2, by_price = assign_tps_by_price(cands,
+                                               None if tp1_ok else local.get("tp1_price"),
+                                               None if (single or tp2_ok) else local.get("tp2_price"), side)
+        if by_price:
+            if not tp1_ok and a1 and _near(a1, local.get("tp1_price")):
+                claims["tp1_order_id"] = int(a1["orderId"])
+                tp1_ok = True
+            if not single and not tp2_ok and a2 and _near(a2, local.get("tp2_price")):
+                claims["tp2_order_id"] = int(a2["orderId"])
+                tp2_ok = True
+    out["tp1"] = "alive_or_claimed" if tp1_ok else "missing"
+    out["tp2"] = "n/a" if single else ("alive_or_claimed" if tp2_ok else "missing")
+
+    if claims:
+        try:
+            await asyncio.to_thread(update_position, pid, claims)   # 只写 *_order_id，不碰任何业务字段
+            local.update(claims)
+            out["claimed"] = dict(claims)
+            logger.info(f"[guard_reattach] {sym}({side}) 认领交易所已有保护单（仅回写订单号）: {claims}")
+        except Exception as _ue:
+            logger.warning(f"[guard_reattach] {sym}({side}) 回写订单号失败: {_ue}")
+
+    sl_bad = out["sl"] in ("missing", "ambiguous")
+    tp_bad = repatch_tp and not (tp1_ok and tp2_ok)
+    status_bad = repatch_tp and local.get("status") != "open"
+    if sl_bad or tp_bad or status_bad:
+        from position_manager import _补挂保护单
+        logger.info(f"[guard_reattach] {sym}({side}) sl={out['sl']} tp1_ok={tp1_ok} tp2_ok={tp2_ok} "
+                    f"status={local.get('status')}，委托 position_manager 补挂")
+        entry = float(rp.get("entryPrice") or local.get("entry_price") or 0)
+        qty = abs(float(rp.get("positionAmt") or local.get("quantity") or 0))
+        await _补挂保护单(local, entry, qty, pid, sym)
+        out["repatched"] = True
+    return out
+
+
 async def _startup_sync_lite() -> None:
     """轻量对齐（WS 重连后 / 每 30 分钟）：不补挂 TP、不推送卡片，只做两件事：
       1. 交易所有、本地无 → 孤儿建档 + 补挂保护单；超出当前市场模式持仓上限的，按开仓时间从新到旧只认领能填满上限的，
@@ -691,12 +827,19 @@ async def _startup_sync_lite() -> None:
                 logger.warning(f"[sync_lite] 交易所已无持仓，清理本地记录: {ps.get('symbol')}({key[1]})")
 
         # 3) 交易所有、本地无 → 孤儿（先按配额筛选）
-        local_keys = {(p.get("symbol"), str(p.get("direction", "")).upper())
-                      for p in positions if p.get("status") in live_status}
-        orphans = [(k, rp) for k, rp in real.items() if k not in local_keys]
+        orphans = [(k, rp) for k, rp in real.items() if _match_local_position(positions, k[0], k[1]) is None]
+        # 本地已有记录的仓位：原样保留，只核对保护单（SL 缺失才补挂；lite 不补 TP）
+        for (k_sym, k_side), k_rp in real.items():
+            _loc = _match_local_position(positions, k_sym, k_side)
+            if _loc is None or _loc.get("status") != "open":
+                continue
+            try:
+                await _check_and_reattach_guards(_loc, k_rp, algo_orders, open_orders, repatch_tp=False)
+            except Exception as _ge:
+                logger.warning(f"[sync_lite] {k_sym}({k_side}) 保护单核对失败: {_ge}")
         claimed = {"total": 0, "long": 0, "short": 0}
         for p in positions:
-            if p.get("status") in live_status:
+            if p.get("status") in _LOCAL_LIVE_STATUSES:
                 claimed["total"] += 1
                 d = str(p.get("direction", "")).upper()
                 if d == "LONG":
@@ -872,15 +1015,14 @@ async def _sync_positions_on_startup() -> None:
         #          （SL 存活不重复挂；缺失先撤旧单；新 SL id 写回 pos_state）。
         from position_manager import _补挂保护单
         from shared.state import add_position
-        ps_by_key = {}
-        for _p in get_all_positions():
-            if _p.get("status") in ("open", "pending_guard", "patching"):
-                ps_by_key[(_p.get("symbol"), str(_p.get("direction", "")).upper())] = _p
+        _local_all = get_all_positions()
 
         for (sym, pos_side), rp in real.items():
             entry = float(rp["entryPrice"])
             qty   = abs(float(rp["positionAmt"]))
-            ps    = ps_by_key.get((sym, pos_side))
+            # 先按 (symbol, direction) 匹配本地记录（open/pending/patching/pending_guard）：有则原样保留，只核对保护单；
+            # 只有真正无记录才建孤儿档案。
+            ps    = _match_local_position(_local_all, sym, pos_side)
 
             if ps is None:
                 _now_ms = int(_time.time() * 1000)
@@ -895,26 +1037,14 @@ async def _sync_positions_on_startup() -> None:
                 logger.warning(f"[startup_sync] {sym}({pos_side}) 孤儿仓位已按交易所数据建档: qty={qty} entry={entry} "
                                f"{'已读取保护单: ' + ', '.join(_orphan_notes) if _orphan_notes else '交易所未读到保护单'}")
 
-            pid    = ps.get("pos_id", sym)
-            tp1_id = ps.get("tp1_order_id")
-            tp2_id = ps.get("tp2_order_id")
-            single_tp_mode = (ps.get("tp2_price") is None)
-            sl_id_ps = ps.get("sl_order_id")
-
-            tp1_alive = bool(tp1_id and int(tp1_id) in live_ids)
-            tp2_alive = bool(tp2_id and int(tp2_id) in live_ids) if not single_tp_mode else True
-            sl_alive  = bool(sl_id_ps and int(sl_id_ps) in live_algo_ids)
-
-            if tp1_alive and tp2_alive and sl_alive and ps.get("status") == "open":
-                logger.info(f"[startup_sync] {sym}: SL✅ TP1✅ {'(单TP)' if single_tp_mode else 'TP2✅'} 无需补挂"
-                            f"{'（孤儿仓位已建档并认领保护单 pos_id=' + str(pid) + '）' if ps.get('source') == 'orphan_recovered' else ''}")
-                continue
-
-            logger.info(f"[startup_sync] {sym}: sl_alive={sl_alive} tp1_alive={tp1_alive} "
-                        f"tp2_alive={tp2_alive} single_tp={single_tp_mode}，委托 position_manager 补挂")
+            pid = ps.get("pos_id", sym)
             try:
-                await _补挂保护单(ps, entry, qty, pid, sym)
-                補挂.append(f"{sym}({pos_side})")
+                _r = await _check_and_reattach_guards(ps, rp, _algo_orders, open_orders)
+                if _r.get("repatched"):
+                    補挂.append(f"{sym}({pos_side})")
+                elif _r.get("sl") == "alive" and _r.get("tp1") != "missing" and _r.get("tp2") != "missing":
+                    logger.info(f"[startup_sync] {sym}: SL✅ TP1✅ {'(单TP)' if _r.get('tp2') == 'n/a' else 'TP2✅'} 无需补挂"
+                                f"{'（孤儿仓位已建档并认领保护单 pos_id=' + str(pid) + '）' if ps.get('source') == 'orphan_recovered' else ''}")
             except Exception as e:
                 errors.append(f"{sym}: {e}")
                 logger.error(f"[startup_sync] {sym} 补挂失败: {e}")

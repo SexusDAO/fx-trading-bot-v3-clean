@@ -50,6 +50,11 @@ REG_RE = re.compile(r"\[signal_watcher\] (?P<sym>\S+) 注册监控 mode=(?P<mode
 # trigger_detector.py: [trigger-dispatch] SYM strategy → result
 DISPATCH_RE = re.compile(r"\[trigger-dispatch\] (?P<sym>\S+) (?P<st>\S+) → (?P<res>\w+)")
 
+# executor.py: [executor] SYM 成交 price=0.123 qty=100
+FILL_RE = re.compile(r"\[executor\] (?P<sym>\S+) 成交 price=(?P<px>[0-9.eE+-]+) qty=(?P<qty>\S+)")
+ORPHAN_TRACE_H = 72           # 孤儿仓位回溯：建档（重启）时间前多少小时内找原始开仓
+ORPHAN_ID_RE = re.compile(r"_(\d{13})$")
+
 PATH_WINDOW_MIN = 90          # 开仓路径：在评分/注册事件前多少分钟内找来源
 EVENT_WINDOW_H = 6            # judge 拒绝历史/评分：开仓前多少小时内
 
@@ -187,6 +192,58 @@ def pick(recs, symbol, direction=None, show_all=False):
     return c if show_all else c[:1]
 
 
+# ── 孤儿仓位回溯 ─────────────────────────────────────────────────────────
+def orphan_created_dt(rec):
+    """孤儿档案建档时间：优先 open_time；缺失则取 pos_id 末尾的 13 位毫秒时间戳（rec_SYM_L_<ms>）。"""
+    d = _utc(rec.get("open_time"))
+    if d:
+        return d
+    m = ORPHAN_ID_RE.search(str(rec.get("pos_id") or ""))
+    return _utc(int(m.group(1))) if m else None
+
+
+def trace_original_signal(ev, sym, entry_price, created_dt, hours=ORPHAN_TRACE_H):
+    """孤儿仓位 → 在 system.log 里回溯建档前的原始开仓。
+    1) 找建档前 hours 小时内该标的的「[executor] SYM 成交」行，优先取成交价与交易所均价偏差≤1% 的最近一条；
+       价格都对不上则取最近一条并标记 price_match=False；一条都没有 → None。
+    2) 以该成交时间为锚，在其前 EVENT_WINDOW_H 小时内取最近的评分行 / base 行 / 注册监控(mode) / JUDGE_REJECT。
+    注意：score/注册监控/成交 日志行本身不带方向，方向只能靠 JUDGE_REJECT 与成交价核对，结果仅作线索。
+    返回 dict(fill_dt, fill_px, price_match, score, base_only, reg_dt, reg_mode, rejects) 或 None。"""
+    if created_dt is None:
+        return None
+    lo = created_dt - timedelta(hours=hours)
+    fills = []
+    for dt, _lv, txt in ev:
+        if lo <= dt <= created_dt:
+            m = FILL_RE.search(txt)
+            if m and m.group("sym") == sym:
+                fills.append((dt, _num(m.group("px"))))
+    if not fills:
+        return None
+    ep = _num(entry_price)
+    near = [f for f in fills if ep and f[1] and abs(f[1] - ep) / ep <= 0.01]
+    fill_dt, fill_px = (near or fills)[-1]
+    out = {"fill_dt": fill_dt, "fill_px": fill_px, "price_match": bool(near),
+           "score": None, "base_only": None, "reg_dt": None, "reg_mode": None, "rejects": []}
+    wlo = fill_dt - timedelta(hours=EVENT_WINDOW_H)
+    for dt, _lv, txt in ev:
+        if not (wlo <= dt <= fill_dt + timedelta(minutes=2)):
+            continue
+        m = SCORE_RE.search(txt)
+        if m and m.group("sym") == sym:
+            out["score"] = (dt, m)
+        m = BASE_RE.search(txt)
+        if m and m.group("sym") == sym:
+            out["base_only"] = (dt, m)
+        m = REG_RE.search(txt)
+        if m and m.group("sym") == sym:
+            out["reg_dt"], out["reg_mode"] = dt, m.group("mode")
+        m = REJECT_RE.search(txt)
+        if m and m.group("sym") == sym:
+            out["rejects"].append((dt, m.group("dir"), m.group("reason").strip()))
+    return out
+
+
 # ── 开仓路径识别 ─────────────────────────────────────────────────────────
 def detect_path(sym, ev, scan_rows, trig_rows, anchor, orphan=False):
     """anchor：评分/注册事件时间（找不到则用开仓时间）。返回 (路径文案, 证据)。
@@ -264,8 +321,15 @@ def review(rec, log_dir, tz_off_h=0.0, net=True, now=None) -> str:
     closed = rec["_status"] == "closed"
     ev = scan_system_logs(log_dir, sym, tz_off_h)
 
-    lo = (open_dt - timedelta(hours=EVENT_WINDOW_H)) if open_dt else None
-    hi = (open_dt + timedelta(minutes=2)) if open_dt else None
+    traced = None
+    win_dt = open_dt
+    if orphan:
+        created = orphan_created_dt(rec)
+        traced = trace_original_signal(ev, sym, rec.get("entry_price"), created)
+        if traced:
+            win_dt = traced["fill_dt"]       # 评分/注册/拒绝/路径都围绕原始成交时间找，而不是重启时间
+    lo = (win_dt - timedelta(hours=EVENT_WINDOW_H)) if win_dt else None
+    hi = (win_dt + timedelta(minutes=2)) if win_dt else None
 
     def inwin(dt):
         return lo is None or lo <= dt <= hi
@@ -288,10 +352,17 @@ def review(rec, log_dir, tz_off_h=0.0, net=True, now=None) -> str:
         m = REJECT_RE.search(txt)
         if m and m.group("sym") == sym and (direction == Q or m.group("dir") == direction):
             rejects.append((dt, m.group("reason").strip()))
-    anchor = (score[0] if score else None) or reg or open_dt
+    anchor = (score[0] if score else None) or reg or win_dt
     scan_rows = read_jsonl(log_dir / "scan_signals.jsonl")
     trig_rows = read_jsonl(log_dir / "trigger_log.jsonl")
-    path, evid = detect_path(sym, ev, scan_rows, trig_rows, anchor, orphan)
+    path, evid = detect_path(sym, ev, scan_rows, trig_rows, anchor, orphan and not traced)
+    if traced:
+        path = f"{path}（回溯：原仓位被误标为 recovered）"
+    reg_mode = None
+    if traced:
+        reg_mode = traced["reg_mode"]
+    elif reg is not None:
+        reg_mode = None
 
     L = []
     L.append(f"═══ {sym} {direction} 开仓复盘 " + "═" * 24)
@@ -299,11 +370,22 @@ def review(rec, log_dir, tz_off_h=0.0, net=True, now=None) -> str:
     L.append("【基本信息】")
     L.append(f"开仓时间:   {open_dt.strftime('%Y-%m-%d %H:%M') + ' UTC' if open_dt else Q}")
     L.append(f"开仓路径:   {path}" + (f"（{evid}）" if evid else ""))
-    L.append(f"策略:       {mode}")
+    L.append(f"策略:       {mode}" + (f"（回溯原策略: {reg_mode}）" if traced and reg_mode else ""))
     L.append(f"方向:       {direction}")
     L.append(f"强度:       {_fmt(rec.get('signal_strength') or d.get('signal_strength'))}")
     L.append(f"pos_id:     {pid}" if not closed else f"trade_id:   {_fmt(rec.get('trade_id'))}")
     L.append("")
+
+    if orphan:
+        L.append("【原始信号回溯】（mode=recovered：重启时被建成孤儿档案，原 judge_detail 已丢失）")
+        if traced:
+            L.append(f"原始成交:   {traced['fill_dt'].strftime('%Y-%m-%d %H:%M')} UTC  成交价 {_g(traced['fill_px'])}"
+                     + ("" if traced["price_match"] else "  ⚠️ 与交易所均价偏差>1%，可能不是同一笔"))
+            L.append(f"原策略:     {traced['reg_mode'] or Q}（取自注册监控日志）")
+            L.append("说明:       judge_detail 本身不写 system.log，无法还原；下方评分/拒绝记录来自原始成交前的日志，日志行不含方向，仅作线索")
+        else:
+            L.append(f"未在建档前 {ORPHAN_TRACE_H}h 的 system.log 中找到该标的成交记录（日志已轮转/仓位更早开出）  →  ?")
+        L.append("")
 
     L.append("【评分拆解】（从 system.log 解析）")
     if score:
