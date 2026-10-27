@@ -348,7 +348,7 @@ LIQ_BG_REFRESH_INTERVAL_SEC      = 600.0  # 后台预热线程每轮间隔（秒
 LIQ_PRESCAN_PREFETCH_TIMEOUT_SEC = 20.0   # 扫描前预热的最长等待（秒），超时直接进入分析（直连后 8 线程足以跑完）
 KLINE_LOAD_BATCH_SIZE = 200  # hub 每次对账最多新建的历史K线加载任务数（超出留到下一轮，每 2s 一轮）
 KLINE_GAP_RELOAD_COOLDOWN_SEC = 60  # 同一 series 因K线缺口触发重拉的冷却时间（秒）
-HUB_WS_PROXY = ""  # hub WebSocket 代理，空字符串=直连，"__env__"=跟随环境变量 PROXY_URL
+HUB_WS_PROXY = (os.environ.get("HUB_WS_PROXY") or os.environ.get("PROXY_URL") or os.environ.get("BINANCE_PROXY") or "").strip()  # hub WebSocket 代理：默认跟随 .env 的 PROXY_URL/BINANCE_PROXY（密码只放 .env，不进 git）；未设置=直连；"__env__" 同义；握手失败自动降级直连（shared/ws_proxy.py）
 KLINE_HUB_SYMBOLS_MAX = 165  # 对应候选池上限 SCAN_POOL_MAX=165；连接数=ceil(165/60)=3 条，共 495 个 stream（单连接上限 KLINE_STREAM_PER_CONN=180）
 KLINE_REQUEST_TOTAL_SEC = 8.0     # 单次 get_klines 调用总时限（秒，含重试、重试间隔、直连失败后改走代理）
 API_REQUEST_TIMEOUT     = (3, 5)    # 全局 REST 接口超时 (connect_s, read_s)：公开行情 _get 与签名查询/撤单/杠杆等

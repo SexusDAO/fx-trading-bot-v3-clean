@@ -24,6 +24,7 @@ import time
 from typing import Callable, Optional
 
 import config
+from shared.ws_proxy import ProxyFallback
 
 logger = logging.getLogger("market_data_hub")
 
@@ -609,6 +610,7 @@ class MarketDataHub:
         import websockets
         delay = RECONNECT_BASE
         first = True
+        _fb = ProxyFallback(_PROXY, name="hub")   # 代理握手失败 → 降级直连，一段时间后再试代理
         while not self._stopping:
             if not first:
                 self.reconnect_count += 1
@@ -622,9 +624,10 @@ class MarketDataHub:
             first = False
             try:
                 async with websockets.connect(
-                    self._url, ping_interval=20, ping_timeout=120, proxy=_PROXY, max_queue=64,
+                    self._url, ping_interval=20, ping_timeout=120, proxy=_fb.current(), max_queue=64,
                     compression=None,   # 禁用 permessage-deflate：免解压，缓解 GIL 争抢
                 ) as ws:
+                    _fb.opened()
                     self._connected = True
                     delay = RECONNECT_BASE
                     logger.info("[hub] WS 已连接")
@@ -639,6 +642,7 @@ class MarketDataHub:
             except Exception as e:
                 logger.warning(f"[hub] 断线: {e}")
             finally:
+                _fb.failed()          # 仅「握手前」失败才降级；连上之后的断线不算代理故障
                 self._on_disconnect()
 
 
@@ -647,6 +651,7 @@ class MarketDataHub:
         import websockets
         delay = RECONNECT_BASE
         first = True
+        _fb = ProxyFallback(_PROXY, name=f"hub#{idx}")
         while not self._stopping:
             if not first:
                 self.market_reconnect_count += 1
@@ -660,9 +665,10 @@ class MarketDataHub:
             first = False
             try:
                 async with websockets.connect(
-                    self._market_url, ping_interval=20, ping_timeout=120, proxy=_PROXY, max_queue=32,
+                    self._market_url, ping_interval=20, ping_timeout=120, proxy=_fb.current(), max_queue=32,
                     compression=None,   # 禁用 permessage-deflate：免解压，缓解 GIL 争抢
                 ) as ws:
+                    _fb.opened()
                     self._shards[idx].connected = True
                     delay = RECONNECT_BASE
                     logger.info(f"[hub] 组合流#{idx} 已连接")
@@ -677,6 +683,7 @@ class MarketDataHub:
             except Exception as e:
                 logger.warning(f"[hub] 组合流#{idx} 断线: {e}")
             finally:
+                _fb.failed()          # 仅「握手前」失败才降级；连上之后的断线不算代理故障
                 self._on_market_disconnect(idx)
 
     async def _send_subscribe(self, ws, params: list, method: str = "SUBSCRIBE") -> None:

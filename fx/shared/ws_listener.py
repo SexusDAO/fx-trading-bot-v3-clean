@@ -46,6 +46,11 @@ try:
 except Exception:
     _WS_PROXY_URL = None
 
+from shared.ws_proxy import ProxyFallback
+_FB_USER = ProxyFallback(_WS_PROXY_URL, name="ws-userData")     # 握手失败 → 降级直连，一段时间后再试代理
+_FB_MARK = ProxyFallback(_WS_PROXY_URL, name="ws-markPrice")
+_FB_FORCE = ProxyFallback(_WS_PROXY_URL, name="ws-forceOrder")
+
 import config
 from shared import binance_api
 from shared.async_utils import _run_sync, RunSyncTimeout   # [v3.89 #6] 同步 HTTP 移出事件循环
@@ -346,9 +351,10 @@ class WsOrderListener:
                     url,
                     ping_interval=20,
                     ping_timeout=10,
-                    proxy=_WS_PROXY_URL,
+                    proxy=_FB_USER.current(),
                     max_queue=_MP_MAX_QUEUE,   # [fix] 限制接收队列，防止消息堆积导致内存泄漏
                 ) as ws:
+                    _FB_USER.opened()
                     delay = RECONNECT_BASE  # 连接成功后重置退避
                     self._user_ws = ws                # [v3.89 #7]
                     self._user_connected = True       # [v3.89 #3] 补偿任务见此状态后不再发起下一轮
@@ -371,8 +377,10 @@ class WsOrderListener:
                 return
             except (ConnectionClosed, WebSocketException) as e:
                 logger.warning(f"[ws] userData 断线: {e}，{delay}s 后重连")
+                _FB_USER.failed(e)
             except Exception as e:
                 logger.error(f"[ws] userData 异常: {e}，{delay}s 后重连")
+                _FB_USER.failed(e)
 
             self._mark_user_stream_down()   # [v3.89 #3] 断线立即启动 REST 补偿，不等重连退避
             await asyncio.sleep(delay)
@@ -437,9 +445,10 @@ class WsOrderListener:
                     url,
                     ping_interval=20,
                     ping_timeout=10,
-                    proxy=_WS_PROXY_URL,
+                    proxy=_FB_MARK.current(),
                     max_queue=_MP_MAX_QUEUE,   # [fix] 限制接收队列，防止消息堆积导致内存泄漏
                 ) as ws:
+                    _FB_MARK.opened()
                     ws_conn = ws
                     delay = RECONNECT_BASE
 
@@ -459,10 +468,12 @@ class WsOrderListener:
                 return
             except (ConnectionClosed, WebSocketException) as e:
                 logger.warning(f"[ws] markPrice 断线: {e}，{delay}s 后重连")
+                _FB_MARK.failed(e)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, RECONNECT_MAX)
             except Exception as e:
                 logger.error(f"[ws] markPrice 异常: {e}，{delay}s 后重连")
+                _FB_MARK.failed(e)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, RECONNECT_MAX)
             finally:
@@ -542,9 +553,10 @@ class WsOrderListener:
                     FORCE_ORDER_URL,
                     ping_interval=20,
                     ping_timeout=10,
-                    proxy=_WS_PROXY_URL,
+                    proxy=_FB_FORCE.current(),
                     max_queue=_MP_MAX_QUEUE,
                 ) as ws:
+                    _FB_FORCE.opened()
                     delay = RECONNECT_BASE
                     logger.info("[ws] 强平事件流已连接")
                     async for raw in ws:
@@ -557,8 +569,10 @@ class WsOrderListener:
                 return
             except (ConnectionClosed, WebSocketException) as e:
                 logger.warning(f"[ws] forceOrder 断线: {e}，{delay}s 后重连")
+                _FB_FORCE.failed(e)
             except Exception as e:
                 logger.error(f"[ws] forceOrder 异常: {e}，{delay}s 后重连")
+                _FB_FORCE.failed(e)
 
             await asyncio.sleep(delay)
             delay = min(delay * 2, RECONNECT_MAX)
