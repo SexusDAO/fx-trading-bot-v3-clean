@@ -873,7 +873,8 @@ EMA_TREND_BASE_MEDIUM         = 52     # medium：两线排列 + RSI 可以
 # ── CHG24 范围约束（防止追极端行情）──────────────────────────────────────────
 EMA_TREND_CHG24_MAX           = 12.0   # chg24 > 12% 说明当日已有大涨，不追高
 EMA_TREND_CHG24_MIN           = -8.0   # chg24 < -8% 说明当日大跌，应走 reversal 不走 trend
-EMA_TREND_MAX_HOLD_HOURS     = 16     # ema_trend 时间止损软上限（小时）
+EMA_TREND_MAX_HOLD_HOURS     = 12     # ema_trend 时间止损软上限（小时；原 16，与硬上限 TIME_STOP_HARD_HOURS=16 拉开层次）
+RECOVERED_MAX_HOLD_HOURS     = 8      # 孤儿(recovered)仓位最大持有时间（小时；原写死 12）
                                       # 4H 趋势追踪，比 pullback 的 8H 宽松，比 reversal 的 12H 宽松
 
 # ── Signal Analytics（信号分析系统）─────────────────────────────────────────

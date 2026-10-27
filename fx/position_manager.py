@@ -1393,14 +1393,33 @@ class PositionManager:
         # v3.56: funding_arb 有自己的最大持仓逻辑(_patrol_funding_arb),跳过通用时间止损
         if pos.get("sig_type") == "funding_arb":
             return
-        # ── 孤儿仓位（交易所已有、启动时认领建档）：最多持有 12H，不走其他时间止损逻辑 ──
+        # ── 孤儿仓位（交易所已有、启动时认领建档）：最多持有 RECOVERED_MAX_HOLD_HOURS（默认 8H），不走其他时间止损逻辑 ──
         # main.py 建档时 mode/sig_type 都写 recovered（source=orphan_recovered）
         if pos.get("mode") == "recovered" or pos.get("sig_type") == "recovered":
-            _symbol_o   = pos["symbol"]
-            _hold_min_o = (now_ms - int(pos.get("open_time", 0))) / 60000
-            if _hold_min_o >= 12 * 60:
-                logger.info(f"[pm] {_symbol_o} 孤儿仓位持仓满12H强制平仓")
-                await self._force_close(pos, "orphan_timeout_12h")
+            _symbol_o = pos["symbol"]
+            try:
+                from config import RECOVERED_MAX_HOLD_HOURS as _REC_H
+                _rec_h = float(_REC_H)
+            except Exception:
+                _rec_h = 8.0
+            # 开仓时间：优先 open_time，缺失用 fill_time；统一成毫秒（<1e12 视为秒）。
+            #   两者都缺/无法解析 → 无法判断持仓时长，跳过本次（原先缺失时按 0 计算，会得到「持仓几十年」而立刻误平仓）。
+            _ot = None
+            for _k in ("open_time", "fill_time"):
+                try:
+                    _v = float(pos.get(_k) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if _v > 0:
+                    _ot = _v * 1000 if _v < 1e12 else _v
+                    break
+            if _ot is None:
+                logger.warning(f"[pm] {_symbol_o} 孤儿仓位缺少 open_time/fill_time，无法计算持仓时长，跳过本次时间止损")
+                return
+            _hold_min_o = (now_ms - _ot) / 60000
+            if _hold_min_o >= _rec_h * 60:
+                logger.info(f"[pm] {_symbol_o} 孤儿仓位持仓满{_rec_h:g}H强制平仓（时间止损·孤儿，持仓{_hold_min_o/60:.1f}H）")
+                await self._force_close(pos, "orphan_timeout")
             return  # 孤儿仓位不走其他时间止损（reversal/ema_trend/普通软硬上限）
         pid       = pos.get("pos_id", pos.get("symbol","unknown"))
         symbol    = pos["symbol"]
