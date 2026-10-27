@@ -80,18 +80,10 @@ def log(msg: str):
     except Exception:
         pass
 
-def notify_jarvis(msg: str):
-    try:
-        subprocess.run(
-            ["openclaw", "message", "send", "--channel", "jarvis", "--message", msg],
-            timeout=10, capture_output=True,
-        )
-    except Exception:
-        pass
-
 def notify(msg: str):
+    """守护进程通知：只写日志。需要推送的重要事件由调用方另行调用 notify_dingtalk。
+    （原先还会调用 openclaw 命令，本环境没有该命令，已移除。）"""
     log(msg)
-    notify_jarvis(msg)
 
 
 def _git_commit8() -> str:

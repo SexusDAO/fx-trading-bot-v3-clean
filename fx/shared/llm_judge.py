@@ -190,6 +190,10 @@ def _call_openai_direct(prompt: str, api_key: str, max_tokens: int, model: str =
         return None
 
 
+# openclaw 命令在本环境不存在：路径 B 默认关闭，LLM 判断只走路径 A（OpenAI 直连）；无 key 时返回 None → 调用方用默认分值
+_OPENCLAW_AGENT_ENABLED = False
+
+
 def _call_openclaw_lite(prompt: str, max_tokens: int) -> Optional[dict]:
     """
     openclaw agent 极简模式：
@@ -197,6 +201,8 @@ def _call_openclaw_lite(prompt: str, max_tokens: int) -> Optional[dict]:
     - 不传 --session-id（每次新 session），但注入轻量系统提示覆盖工作区语境
     - timeout=15s：超时直接 fallback，不阻塞扫描
     """
+    if not _OPENCLAW_AGENT_ENABLED:
+        return None
     import subprocess as _sp
     import uuid as _uuid
 

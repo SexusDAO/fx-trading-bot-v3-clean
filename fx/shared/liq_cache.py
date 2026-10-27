@@ -126,15 +126,9 @@ def _alert_all_failed(symbol: str) -> None:
 
     def _send():
         try:
-            import subprocess as _sp
-            r = _sp.run(
-                ["openclaw", "message", "send", "--channel", "jarvis",
-                 "--message", f"⚠️ liq_cache {symbol} 三级数据源全部失败，清算图不可用，止损将降级为ATR公式"],
-                timeout=5, capture_output=True,
-            )
-            if r.returncode != 0:
-                logger.warning(f"[liq_cache] {symbol} 告警投递失败 rc={r.returncode} "
-                               f"stderr={(r.stderr or b'')[:200]!r}")
+            # openclaw 命令在本环境不存在，告警只走钉钉（未配置钉钉时静默跳过）
+            from shared.notifier import dingtalk_notify
+            dingtalk_notify(f"⚠️ liq_cache {symbol} 三级数据源全部失败，清算图不可用，止损将降级为ATR公式", wait=True)
         except Exception as e:
             logger.warning(f"[liq_cache] {symbol} 告警投递异常: {e}")
 
