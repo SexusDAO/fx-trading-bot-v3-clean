@@ -153,7 +153,7 @@ def test_10_ema_trend_short_rsi4h_60_rejected(monkeypatch):
     monkeypatch.setattr(config, "EMA_TREND_RSI1H_SHORT_MIN", 48, raising=False)
     monkeypatch.setattr(config, "EMA_TREND_RSI1H_SHORT_MAX", 70, raising=False)
     ok, out = _ema_short(60)
-    assert ok is False and "4H RSI=60.0" in _rr(out) and "[28, 55]" in _rr(out)
+    assert ok is False and "4H RSI=60.0" in _rr(out) and "[28, 52]" in _rr(out)
 
 
 def test_11_ema_trend_short_rsi4h_48_passes_gate():

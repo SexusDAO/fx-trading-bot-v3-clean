@@ -846,11 +846,14 @@ EMA_TREND_EMA_GAP_MIN_PCT     = 0.005  # EMA20 > EMA50 至少差距 0.5%（防�
 EMA_TREND_RSI1H_MIN           = 48     # 1H RSI 下限（太低说明已经超卖，走 reversal 更合适）
 EMA_TREND_RSI1H_MAX           = 68     # 1H RSI 上限（太高说明已超买，不是好的回踩入场点）
 EMA_TREND_RSI1H_SHORT_MIN     = 32     # 做空 RSI1H 下限（原沿用做多 48）
-EMA_TREND_RSI1H_SHORT_MAX     = 52     # 做空 RSI1H 上限（原写死 70）
+EMA_TREND_RSI1H_SHORT_MAX     = 48     # 做空 RSI1H 上限（原 52；STRKUSDT 开仓时 52.4 勉强通过，收紧到 48 排除中性偏强区）
 EMA_TREND_RSI_GOLDEN_SHORT_MIN = 38    # 做空 rsi_golden 下限（做多为 52）
 EMA_TREND_RSI_GOLDEN_SHORT_MAX = 48    # 做空 rsi_golden 上限（做多为 62）
 EMA_TREND_RSI4H_MIN           = 45     # 4H RSI 下限（趋势结构支撑）
 EMA_TREND_RSI4H_MAX           = 72     # 4H RSI 上限（超买区域放弃）
+EMA_TREND_RSI4H_SHORT_MAX     = 52     # 做空 4H RSI 上限（原写死 55，现参数化并收紧）
+EMA_TREND_VOL_RATIO_SHORT_MIN = 0.7    # 做空量比下限（做多仍用 EMA_TREND_VOL_RATIO_MIN=0.5）；量比=1H 当前K线量/前20根均量
+EMA_TREND_1H_EMA_ALIGN        = True   # 要求 1H EMA20/EMA50 排列与 4H 方向一致（做空要 1H EMA20<=EMA50，做多要 1H EMA20>=EMA50）；False=关闭
 
 # ── 回踩深度：价格必须在 EMA20 附近（回踩确认） ───────────────────────────────
 EMA_TREND_PULLBACK_ABOVE_EMA  = 0.02   # 价格最多在 EMA20 上方 2%（过高说明没回踩，追高）

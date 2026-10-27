@@ -3896,7 +3896,12 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
     # ── 0. CHG24 范围约束 ─────────────────────────────────────────────────
     # [opt-6] SHORT 方向使用对称参数
     _rsi4h_min_eff = 28 if _ema_direction == "short" else _RSI4H_MIN
-    _rsi4h_max_eff = 55 if _ema_direction == "short" else _RSI4H_MAX
+    try:
+        import config as _config_mod
+    except Exception:
+        _config_mod = None
+    _rsi4h_max_short = getattr(_config_mod, "EMA_TREND_RSI4H_SHORT_MAX", 52)
+    _rsi4h_max_eff = _rsi4h_max_short if _ema_direction == "short" else _RSI4H_MAX
     _chg24_min_eff = -12.0 if _ema_direction == "short" else _CHG24_MIN
     _chg24_max_eff = 8.0 if _ema_direction == "short" else _CHG24_MAX
     if chg24 > _chg24_max_eff:
@@ -3956,7 +3961,7 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
         from config import (EMA_TREND_RSI1H_SHORT_MIN as _R1S_MIN, EMA_TREND_RSI1H_SHORT_MAX as _R1S_MAX,
                             EMA_TREND_RSI_GOLDEN_SHORT_MIN as _RG_S_MIN, EMA_TREND_RSI_GOLDEN_SHORT_MAX as _RG_S_MAX)
     except Exception:
-        _R1S_MIN, _R1S_MAX, _RG_S_MIN, _RG_S_MAX = 32, 52, 38, 48
+        _R1S_MIN, _R1S_MAX, _RG_S_MIN, _RG_S_MAX = 32, 48, 38, 48
     _rsi1h_min_eff = _R1S_MIN if _ema_direction == "short" else _RSI1H_MIN
     _rsi1h_max_eff = _R1S_MAX if _ema_direction == "short" else _RSI1H_MAX
     if not (_rsi1h_min_eff <= rsi_1h <= _rsi1h_max_eff):
@@ -3968,6 +3973,34 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
     if not (_rsi4h_min_eff <= rsi_4h <= _rsi4h_max_eff):
         out["reject_reason"] = (
             f"4H RSI={rsi_4h:.1f} 不在健康区间 [{_rsi4h_min_eff}, {_rsi4h_max_eff}]"
+        )
+        return False, out
+
+    # ── 4.5 方向一致性 + 做空量能（SOONUSDT/STRKUSDT 复盘：4H 空头但 1H 多头排列、缩量时逆势做空）──
+    #   (a) 1H EMA20/EMA50 排列需与 4H 方向一致；缺数据（<=0）不拒绝。开关 EMA_TREND_1H_EMA_ALIGN。
+    #   (b) 做空量比下限用 EMA_TREND_VOL_RATIO_SHORT_MIN（做多沿用 _VOL_MIN）。
+    ema20_1h = ind.get("ema20_1h", 0.0) or 0.0
+    ema50_1h = ind.get("ema50_1h", 0.0) or 0.0
+    out["ema20_1h"] = ema20_1h
+    out["ema50_1h"] = ema50_1h
+    if getattr(_config_mod, "EMA_TREND_1H_EMA_ALIGN", True) and ema20_1h > 0 and ema50_1h > 0:
+        if _ema_direction == "short" and ema20_1h > ema50_1h:
+            out["reject_reason"] = (
+                f"1H EMA 多头排列，与4H空头背离: "
+                f"EMA20_1h={ema20_1h:.4g} > EMA50_1h={ema50_1h:.4g}，拒绝逆势做空"
+            )
+            return False, out
+        if _ema_direction == "long" and ema20_1h < ema50_1h:
+            out["reject_reason"] = (
+                f"1H EMA 空头排列，与4H多头背离: "
+                f"EMA20_1h={ema20_1h:.4g} < EMA50_1h={ema50_1h:.4g}，拒绝顺势做多"
+            )
+            return False, out
+    _vol_min_short = getattr(_config_mod, "EMA_TREND_VOL_RATIO_SHORT_MIN", 0.7)
+    _vr45 = ind.get("vol_ratio", 1.0)
+    if _ema_direction == "short" and _vr45 < _vol_min_short:
+        out["reject_reason"] = (
+            f"做空量能不足: vol_ratio={_vr45:.2f} < {_vol_min_short}，缩量结构不支持做空"
         )
         return False, out
 
