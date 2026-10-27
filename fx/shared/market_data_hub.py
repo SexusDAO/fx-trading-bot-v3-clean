@@ -82,6 +82,8 @@ except Exception:
     _KLINE_GAP_COOLDOWN = 60
 KLINE_GAP_RELOAD_COOLDOWN_SEC = float(_KLINE_GAP_COOLDOWN)    # 同一 series 缺口重拉冷却（秒）
 _GAP_RELOAD_TS: dict = {}                                     # series key → 上次缺口重拉时间（monotonic，进程内）
+KLINE_INCREMENTAL_MAX_GAP_SEC = 300.0           # 断线不超过这么久 → 只补缺失的 K 线；超过则全量重拉
+KLINE_INCREMENTAL_MAX_BARS = 10                 # 增量补缺最多拉多少根
 KLINE_RETRY_SEC = 30.0                         # 历史拉取失败后的重试间隔
 KLINE_STREAM_PER_CONN = 180                    # 单条 /market/stream 连接上的 K 线 stream 上限（币安单连接 200，留出 ticker 等余量）
 SUB_BATCH = 100                                # 每条 SUBSCRIBE/UNSUBSCRIBE 的 stream 数
@@ -90,7 +92,7 @@ TICKER_MIN_COVERAGE = 0.9                      # 新鲜条目数 / 已见过的�
 
 class _Series:
     """一个 (标的, 周期) 的 K 线序列。rows=None 表示尚未就绪（历史未拉到/断线/出现缺口）。"""
-    __slots__ = ("rows", "pending", "loading", "retry_at", "shard", "stale")
+    __slots__ = ("rows", "pending", "loading", "retry_at", "shard", "stale", "disc_ts")
 
     def __init__(self, shard: int = 0):
         self.shard = shard      # 该序列所在的组合流连接编号
@@ -99,6 +101,7 @@ class _Series:
         self.loading = False
         self.stale = False               # 断线后保留 rows 但标记过时，重连后重拉历史
         self.retry_at = 0.0
+        self.disc_ts = None              # 首次断线时间（wall 秒）；重拉成功后清空。重连后据此决定增量补缺还是全量重拉
 
 
 class _Shard:
@@ -519,6 +522,8 @@ class MarketDataHub:
                 if st.shard == idx:
                     st.stale = True     # 断线时只标记过时，保留数据供 scanner 使用
                     st.loading = False  # 重置加载状态，允许重连后触发新加载
+                    if st.disc_ts is None:      # 重复断线保留最早的断线时间（缺口从最早那次算起）
+                        st.disc_ts = self._wall()
         sh.ws = None
         sh.subscribed = set()
 
@@ -750,16 +755,39 @@ class MarketDataHub:
             fn = binance_api.get_klines
         return fn(symbol, interval, limit)
 
+    def _incremental_limit(self, key: tuple):
+        """该序列能否增量补缺：有旧数据、已标过期、断线 < KLINE_INCREMENTAL_MAX_GAP_SEC → 返回 (limit, 断线秒数)；否则 (None, 断线秒数或 None)。"""
+        sym, iv = key
+        with self._kl_lock:
+            st = self._series.get(key)
+            if st is None or not st.rows or not st.stale or st.disc_ts is None:
+                return None, None
+            dur = max(self._wall() - st.disc_ts, 0.0)
+        if dur >= KLINE_INCREMENTAL_MAX_GAP_SEC:
+            return None, dur
+        iv_s = _INTERVAL_MS[iv] / 1000.0
+        missing = int(dur / iv_s) + 2                 # +2 根缓冲（当前未收盘那根 + 边界）
+        return min(max(missing, 2), KLINE_INCREMENTAL_MAX_BARS), dur
+
     async def _load_history(self, key: tuple, gen: int) -> None:
         sym, iv = key
         rows = None
+        _gap = False                              # 增量补缺接不上旧数据时置 True（先初始化：拉取失败/空结果也要走到后面的判断）
+        _inc_limit, _dur = self._incremental_limit(key)
+        _fetch_limit = _inc_limit or KLINE_HISTORY
+        if _inc_limit:
+            asyncio.get_running_loop().run_in_executor(
+                None, logger.info, f"[hub] 断线{_dur:.0f}s，增量补缺{_inc_limit}根K线 {sym} {iv}")
+        elif _dur is not None:
+            asyncio.get_running_loop().run_in_executor(
+                None, logger.info, f"[hub] 断线{_dur:.0f}s，全量重拉{KLINE_HISTORY}根K线 {sym} {iv}")
         try:
             async with self._fetch_sem:
                 # 总时限保护：单次历史拉取最多占用 HUB_KLINE_FETCH_TIMEOUT 秒（默认 8s，与 get_klines 的
                 # KLINE_REQUEST_TOTAL_SEC 一致）。超时视同空结果，走原有「30s 后重试」；线程池里的线程无法强杀，
                 # 只是不再让加载协程/信号量被它占住，迟到的结果直接丢弃。
                 rows = await asyncio.wait_for(
-                    asyncio.get_running_loop().run_in_executor(_LOAD_POOL, self._fetch, sym, iv, KLINE_HISTORY),
+                    asyncio.get_running_loop().run_in_executor(_LOAD_POOL, self._fetch, sym, iv, _fetch_limit),
                     timeout=KLINE_FETCH_TIMEOUT)
         except asyncio.TimeoutError:
             rows = None
@@ -777,13 +805,29 @@ class MarketDataHub:
                 st.retry_at = self._wall() + KLINE_RETRY_SEC
                 _empty = True                        # 锁内只记标志，日志在锁外丢线程池
             else:
-                new = [list(r) for r in rows]
                 iv_ms = _INTERVAL_MS[iv]
-                for pr in st.pending:                # 合并拉取期间收到的推送
-                    _upsert(new, pr, iv_ms)
-                st.rows, st.pending = new, []
-                st.stale = False
+                if _inc_limit and st.rows:
+                    # 增量：把新拉的几根并入旧序列；出现缺口（旧数据与新数据接不上）→ 放弃增量，下一轮全量重拉
+                    new = [list(r) for r in st.rows]
+                    for r in sorted((list(x) for x in rows), key=lambda x: x[0]):
+                        if not _upsert(new, r, iv_ms):
+                            _gap = True
+                            break
+                else:
+                    new = [list(r) for r in rows]
+                if _gap:
+                    st.disc_ts = None                # 清掉断线时间 → _incremental_limit 返回 None → 下一轮走全量
+                    st.retry_at = 0.0
+                else:
+                    for pr in st.pending:            # 合并拉取期间收到的推送
+                        _upsert(new, pr, iv_ms)
+                    st.rows, st.pending = new, []
+                    st.stale = False
+                    st.disc_ts = None
         _loop = asyncio.get_running_loop()
+        if _gap:
+            _loop.run_in_executor(None, logger.info, f"[hub] 增量补缺接不上旧数据 {sym} {iv}，改为全量重拉")
+            return
         if _empty:
             _loop.run_in_executor(None, logger.warning, f"[hub] 历史K线拉取返回空 {sym} {iv}，30s后重试")
             return
