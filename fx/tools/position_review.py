@@ -488,7 +488,7 @@ def list_closed(recs, days=7, now=None) -> str:
     seen = set()
     shown = 0
     for r in rows:
-        tid = r.get("trade_id") or f"{r.get('symbol')}_{r.get('close_time')}"
+        tid = f"{r.get('symbol')}_{r.get('close_time')}"      # 不依赖 trade_id（同一笔可能写入多次且 trade_id 不同）
         if tid in seen:
             continue
         seen.add(tid)

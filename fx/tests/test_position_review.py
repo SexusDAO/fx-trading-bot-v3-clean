@@ -246,3 +246,23 @@ def test_closed_dedup_fallback_key_without_trade_id(tmp_path):
     _w(tmp_path / "trade_log.jsonl", [json.dumps(a), json.dumps(a)])
     out = PR.list_closed(PR.load_positions(tmp_path), now=NOW)
     assert out.count("XUSDT") == 1 and "合计 1 笔" in out
+
+
+def test_closed_dedup_ignores_different_trade_id(tmp_path):
+    """trade_id 不同但 symbol + close_time 相同 → 视为同一笔，只显示一次。"""
+    ct = int(NOW.timestamp() * 1000) - 3600000
+    a = {"trade_id": f"{ct}_CHIPUSDT", "symbol": "CHIPUSDT", "direction": "SHORT", "mode": "ema_trend",
+         "close_time": ct, "close_reason": "sl", "pnl_usdt": -5.0, "holding_minutes": 270}
+    b = dict(a, trade_id="another-id-123")
+    _w(tmp_path / "trade_log.jsonl", [json.dumps(a), json.dumps(b)])
+    out = PR.list_closed(PR.load_positions(tmp_path), now=NOW)
+    assert out.count("CHIPUSDT") == 1 and "合计 1 笔，盈亏 -5.00U" in out
+
+
+def test_closed_same_symbol_different_close_time_both_shown(tmp_path):
+    ct = int(NOW.timestamp() * 1000) - 3600000
+    a = {"trade_id": "1", "symbol": "CHIPUSDT", "direction": "SHORT", "close_time": ct, "pnl_usdt": -5.0}
+    b = {"trade_id": "2", "symbol": "CHIPUSDT", "direction": "SHORT", "close_time": ct - 600000, "pnl_usdt": -1.0}
+    _w(tmp_path / "trade_log.jsonl", [json.dumps(a), json.dumps(b)])
+    out = PR.list_closed(PR.load_positions(tmp_path), now=NOW)
+    assert out.count("CHIPUSDT") == 2 and "合计 2 笔" in out
