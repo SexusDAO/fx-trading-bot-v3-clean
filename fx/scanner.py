@@ -3059,7 +3059,7 @@ def _filter_and_register_signals(
         for sig in avail_signals:
             sc = sig["ind"].get("final_score", 0)
             if sc < MIN_SIGNAL_SCORE_WEEKDAY:
-                # ── v3.41 边界信号：45~55 分交给 LLM，其余直接拒绝 ────────────
+                # ── v3.41 边界信号：55~65 分交给 LLM，其余直接拒绝 ────────────
                 _llm_rescued = False
                 try:
                     from config import (LLM_JUDGE_ENABLED, LLM_JUDGE_BORDERLINE,
@@ -3434,7 +3434,11 @@ def _filter_and_register_signals(
                     logger.warning(f"[scanner] {sym} 预算失败: {e}")
 
             # ── 第二阶段（主 loop）：add_signal 是纯内存操作，极快 ─────────────────
-            _MAX_PENDING_PER_DIR = 5   # v3.54: 每方向最多同时挂5个 pending 单
+            try:
+                from config import MAX_PENDING_LONG as _MPL, MAX_PENDING_SHORT as _MPS
+            except ImportError:
+                _MPL = _MPS = 5
+            _MAX_PENDING_PER_DIR = max(_MPL, _MPS)   # v3.54: 每方向最多同时挂 pending 单（读 config，原硬编码 5）
 
             async def _do_register():
                 for sig, lo, hi, ep, exp in prepared:

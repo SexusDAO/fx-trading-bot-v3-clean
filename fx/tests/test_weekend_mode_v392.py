@@ -77,12 +77,18 @@ def _syms(calls):
 
 # ── 工作日回归 ──────────────────────────────────────────────
 def test_T01_weekday_pullback_medium_55_pass(run):
-    calls, _, _ = run([_mk("AAAUSDT")], WEEKDAY_T, 55)
+    # 门槛 50→60 后，55 分不再直接通过；用 60（新门槛）验证工作日 pullback 仍可入场
+    calls, _, _ = run([_mk("AAAUSDT")], WEEKDAY_T, 60)
     assert "AAAUSDT" in _syms(calls)
 
 
+def test_T01b_weekday_55_below_new_gate_rejected(run):
+    calls, _, _ = run([_mk("AAAUSDT")], WEEKDAY_T, 55)
+    assert "AAAUSDT" not in _syms(calls)
+
+
 def test_T02_weekday_breakout_medium_pass_unchanged(run):
-    calls, _, _ = run([_mk("AAAUSDT", "breakout", volume_ratio=1.0)], WEEKDAY_T, 55)
+    calls, _, _ = run([_mk("AAAUSDT", "breakout", volume_ratio=1.0)], WEEKDAY_T, 60)
     assert "AAAUSDT" in _syms(calls)
 
 
@@ -132,7 +138,7 @@ def test_T12_weekend_breakout_medium_oi_pass(run):
 
 
 def test_T13_weekday_breakout_medium_pass_unchanged(run):
-    calls, _, _ = run([_mk("AAAUSDT", "breakout", volume_ratio=3.5)], WEEKDAY_T, 55)
+    calls, _, _ = run([_mk("AAAUSDT", "breakout", volume_ratio=3.5)], WEEKDAY_T, 60)
     assert "AAAUSDT" in _syms(calls)
 
 

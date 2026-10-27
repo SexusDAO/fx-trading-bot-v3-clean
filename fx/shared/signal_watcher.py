@@ -735,8 +735,8 @@ class SignalWatcher:
                     from config import (MAX_PENDING_LONG, MAX_PENDING_SHORT, MAX_PENDING_TOTAL,
                                         PENDING_MIN_SCORE_TO_COMPETE, PENDING_REPLACE_MARGIN)
                 except ImportError:
-                    MAX_PENDING_LONG = MAX_PENDING_SHORT = 3
-                    MAX_PENDING_TOTAL = 5
+                    MAX_PENDING_LONG = MAX_PENDING_SHORT = 5
+                    MAX_PENDING_TOTAL = 8
                     PENDING_MIN_SCORE_TO_COMPETE = 40
                     PENDING_REPLACE_MARGIN = 8
 

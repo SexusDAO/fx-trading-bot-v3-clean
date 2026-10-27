@@ -137,7 +137,7 @@ CLASSIFY_REVERSAL_RSI4H_SHORT  = REVERSAL_RSI4H_MIN_SHORT   # 78
 CLASSIFY_BREAKOUT_CHG24_MIN    = 5.0   # 8% 降至 5%，成交量验证移到 judge_breakout
 
 # ── final_score 门槛 ──────────────────────────────────────────────────────
-MIN_SIGNAL_SCORE_WEEKDAY       = 50    # 工作日最低信号分，base=strong(70)/medium(50)+btc_adj+cg
+MIN_SIGNAL_SCORE_WEEKDAY       = 60    # 工作日最低信号分（50→60），base=strong(70)/medium(50)+btc_adj+cg
 
 # ── 相关性过滤：同方向信号上限 ────────────────────────────────────────────
 CORR_MAX_REVERSAL_SAME_DIR     = 2     # 同方向 reversal 最多同时持仓+待开
@@ -191,15 +191,15 @@ SCORE_HUB_PENALTY_FLOOR        = -12    # hub 三项加分负向下限
 # 第五组：仓位与风控参数
 # ═══════════════════════════════════════════════════════════════════════════════
 # 持仓上限（按市场模式）
-MAX_POSITIONS_TOTAL_BULL  = 5
-MAX_POSITIONS_LONG_BULL   = 3
-MAX_POSITIONS_SHORT_BULL  = 2
-MAX_POSITIONS_TOTAL_BEAR  = 5
-MAX_POSITIONS_LONG_BEAR   = 2
-MAX_POSITIONS_SHORT_BEAR  = 3
-MAX_POSITIONS_TOTAL_RANGE = 4
-MAX_POSITIONS_LONG_RANGE  = 2
-MAX_POSITIONS_SHORT_RANGE = 2
+MAX_POSITIONS_TOTAL_BULL  = 8   # 原 5
+MAX_POSITIONS_LONG_BULL   = 5   # 原 3
+MAX_POSITIONS_SHORT_BULL  = 3   # 原 2
+MAX_POSITIONS_TOTAL_BEAR  = 8   # 原 5
+MAX_POSITIONS_LONG_BEAR   = 3   # 原 2
+MAX_POSITIONS_SHORT_BEAR  = 5   # 原 3
+MAX_POSITIONS_TOTAL_RANGE = 8   # 原 4
+MAX_POSITIONS_LONG_RANGE  = 4   # 原 2
+MAX_POSITIONS_SHORT_RANGE = 4   # 原 2
 
 # 兼容旧代码
 RISK_MAX_POSITIONS = MAX_POSITIONS_TOTAL_BULL
@@ -439,9 +439,9 @@ PM_HEALTH_LATE_HOURS  = 6    # 中期/晚期分界（小时）
 
 # ── v3.72 挂单竞争机制 ──────────────────────────────────────────────────────
 # 挂单槽位（独立于 open 持仓槽位）
-MAX_PENDING_LONG  = 3   # 多单挂单上限
-MAX_PENDING_SHORT = 3   # 空单挂单上限
-MAX_PENDING_TOTAL = 5   # 总挂单上限
+MAX_PENDING_LONG  = 5   # 多单挂单上限（原 3）
+MAX_PENDING_SHORT = 5   # 空单挂单上限（原 3）
+MAX_PENDING_TOTAL = 8   # 总挂单上限（原 5）
 
 # 评分维度
 
@@ -674,9 +674,10 @@ LLM_JUDGE_MIN_CONFIDENCE   = 0.65   # LLM 最低置信度门槛，低于此视�
 LLM_EXPLOSIVE_GAIN_3D_MIN  = 100.0  # 3日涨幅超过此值（%）才触发妖币检测
 LLM_EXPLOSIVE_GAIN_24H_MAX = 10.0   # 24H涨幅绝对值低于此值（%）才认为是横盘
 
-# 边界信号阈值（工作日门槛 MIN_SIGNAL_SCORE_WEEKDAY=50）
-LLM_BORDERLINE_SCORE_MIN   = 45     # 边界信号分数下界
-LLM_BORDERLINE_SCORE_MAX   = 55     # 边界信号分数上界（>55 规则系统自信，不需要 LLM）
+# 边界信号阈值（工作日门槛 MIN_SIGNAL_SCORE_WEEKDAY=60）——区间同步上移 10 分：55~65
+# 注意：LLM_JUDGE_BORDERLINE 默认 False，此时 55~59 分直接拒绝，不走 LLM 复核
+LLM_BORDERLINE_SCORE_MIN   = 55     # 边界信号分数下界
+LLM_BORDERLINE_SCORE_MAX   = 65     # 边界信号分数上界
 
 # NovaAPI 配置（OpenAI 兼容中转站，路径A优先使用）
 # key 通过环境变量注入，不硬编码；env 优先，config 兜底
