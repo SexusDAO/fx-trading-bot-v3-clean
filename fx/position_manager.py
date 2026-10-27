@@ -4161,6 +4161,20 @@ def _check_volume_exhaustion_shadow(pos: dict, k1h: list, mark_price: float) -> 
         return None
 
 
+MIN_TP_CHANGE_PCT = 0.005   # TP1 动态调整最小变动 0.5%：不足则不撤单重挂（防止为几分钱的变化反复改单）
+
+
+def _tp1_change_too_small(old_tp1, new_tp1, min_pct: float = MIN_TP_CHANGE_PCT) -> bool:
+    """新旧 TP1 相对变动 < min_pct → True（应跳过）。old_tp1 无效时返回 False（不拦截，交给原逻辑）。"""
+    try:
+        o, n = float(old_tp1), float(new_tp1)
+    except (TypeError, ValueError):
+        return False
+    if o <= 0:
+        return False
+    return abs(n - o) / o < min_pct
+
+
 async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
     """
     对单个持仓重新拉数据+清算图,重算 SL/TP,决定是否更新挂单。
@@ -4407,7 +4421,7 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
         #   2. 当前 TP1 距现价 > 3×ATR
         #   3. 新算出的 TP1 比旧 TP1 近
         # 触发条件B(TP绝对距离过远):
-        #   TP1 距现价 > 6×ATR(无论盈亏),新TP更近时直接拉近
+        #   TP1 距现价 >= 3×ATR(无论盈亏),新TP更近时直接拉近
         #   防止「开仓时TP算得过深,价格整个持仓期间都无法触达」
         if not tp1_changed and old_tp1 and new_tp1:
             if direction == "LONG":
@@ -4423,7 +4437,7 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
             cond_a = (price_moved >= atr * 1.0
                       and tp_dist_now >= atr * 3.0
                       and tp_will_closer)
-            # 条件B:TP 绝对距离过远(>6ATR),无论盈亏都拉近
+            # 条件B:TP 绝对距离过远(>=3ATR),无论盈亏都拉近
             # 3ATR 门槛:短线策略(4h以内)TP超过3ATR基本触达概率极低
             cond_b = (tp_dist_now >= atr * 3.0 and tp_will_closer)
 
@@ -4447,6 +4461,13 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
                     tp1_changed = True
                     tp1_reason  = (f"{reason_tag}: price_moved={price_moved:.4g}"
                                    f" tp_dist={tp_dist_now:.4g} ({tp_dist_now/atr:.1f}ATR)")
+
+    # ── TP1 最小变动门槛：所有会撤单重挂 TP1 的分支（improve / shrink / profit_tighten / tp_too_far）统一在此拦截 ──
+    if tp1_changed and _tp1_change_too_small(old_tp1, new_tp1):
+        logger.debug(f"[adjust_sltp] {symbol} TP1 变动不足{MIN_TP_CHANGE_PCT:.1%} "
+                     f"({old_tp1:.6g}→{new_tp1:.6g})，跳过撤单重挂 [{tp1_reason}]")
+        tp1_changed = False
+        tp1_reason = f"skipped: change<{MIN_TP_CHANGE_PCT:.1%} ({tp1_reason})"
 
     # ── TP2 判断(仅当 TP1 已触发且 TP2 存在时才调整)──────────────────────────
     if tp1_filled and old_tp2 and new_tp2 and tp2_id:

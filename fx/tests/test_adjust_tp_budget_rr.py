@@ -228,11 +228,18 @@ def test_trending_blocks_cond_b_tighten(monkeypatch):
 
 
 def test_not_trending_still_tightens_via_cond_b(monkeypatch):
-    # mark=99(有利移动1ATR<1.5);旧TP1=95 距现价4≥3ATR → 条件B成立;新TP1=95.3;预算RR=3.7/1.5=2.5
-    e = Env(monkeypatch, mark=99.0, new_tp1=95.3, new_sl=100.5, old_sl=100.5, old_tp1=95.0)
+    # mark=99(有利移动1ATR<1.5);旧TP1=95 距现价4≥3ATR → 条件B成立;新TP1=96.0(变动约1.05%，过 0.5% 最小变动门槛);预算RR=3/1.5=2.0
+    e = Env(monkeypatch, mark=99.0, new_tp1=96.0, new_sl=100.5, old_sl=100.5, old_tp1=95.0)
     res = _run(e)
     assert res and res["tp1_changed"] is True
-    assert [o["price"] for o in _tp_orders(e)] == [95.3]
+    assert [o["price"] for o in _tp_orders(e)] == [96.0]
+
+
+def test_cond_b_tiny_change_below_min_pct_is_skipped(monkeypatch):
+    # 同上场景但新TP1=95.3(只变 0.32% < 0.5%)：不撤单重挂
+    e = Env(monkeypatch, mark=99.0, new_tp1=95.3, new_sl=100.5, old_sl=100.5, old_tp1=95.0)
+    res = _run(e)
+    assert res is None and _tp_orders(e) == []
 
 
 def test_trending_does_not_block_improve(monkeypatch):
