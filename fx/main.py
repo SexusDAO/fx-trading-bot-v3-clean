@@ -1243,6 +1243,15 @@ def _hard_exit(code: int = 0) -> None:
     os._exit(code)
 
 
+def _backstop_fire() -> None:
+    """兜底线程到点：记日志后强制退出（日志队列卡住时 _hard_exit 内会 flush 后仍退出）。"""
+    try:
+        logger.warning(f"[main] 停止流程 {_STOP_BACKSTOP_SEC:g}s 兜底触发，强制退出")
+    except Exception:
+        pass
+    _hard_exit(0)
+
+
 async def _run_stop_sequence(stop_coro, timeout: float = None) -> bool:
     """带总时限地执行停止流程；超时 → 强制退出（返回前不会再回来，测试里 _hard_exit 被替换时返回 False）。"""
     timeout = _STOP_TIMEOUT_SEC if timeout is None else timeout
@@ -1521,6 +1530,14 @@ async def main() -> None:
             # Windows 不支持 add_signal_handler
             pass
 
+    # 退出兜底线程 + 信号处理器链：SIGTERM 一到（不等事件循环处理）就开始计时，见 shared/stop_backstop.py
+    try:
+        from shared import stop_backstop as _sb
+        _sb.start(lambda: _STOP_BACKSTOP_SEC, _backstop_fire)
+        _sb.chain_signal_handlers((signal.SIGINT, signal.SIGTERM))
+    except Exception as _sbe:
+        logger.warning(f"[main] 退出兜底线程安装失败（忽略，沿用停止流程内兜底）: {_sbe}")
+
     # SIGUSR1: 手动触发诊断快照
     def _handle_sigusr1():
         logger.info("[main] 收到 SIGUSR1，手动触发诊断快照...")
@@ -1608,10 +1625,15 @@ async def main() -> None:
         _SCAN_POOL.shutdown(wait=False, cancel_futures=True)
     except Exception as _spe:
         logger.warning(f"[main] 扫描线程池关闭异常（忽略）: {_spe}")
-    _bk = threading.Timer(_STOP_BACKSTOP_SEC, lambda: (
-        logger.warning(f"[main] 停止流程 {_STOP_BACKSTOP_SEC:g}s 兜底触发，强制退出"), _hard_exit(0)))
-    _bk.daemon = True
-    _bk.start()
+    # 兜底：通常已在信号到达时武装；这里再 request() 一次覆盖「非信号触发的停止」（如内部 WATCHDOG 置位 stop_event）。
+    try:
+        from shared import stop_backstop as _sb2
+        _sb2.start(lambda: _STOP_BACKSTOP_SEC, _backstop_fire)     # 幂等；上面安装失败时在此补上
+        _sb2.request()
+    except Exception:
+        _bk = threading.Timer(_STOP_BACKSTOP_SEC, _backstop_fire)
+        _bk.daemon = True
+        _bk.start()
 
     async def _stop_all():
         if _route_task is not None:
