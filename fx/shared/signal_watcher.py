@@ -548,6 +548,7 @@ class SignalWatcher:
         self._open_pos_cache: list = []
         self._open_pos_ts: float = 0.0
         self._sl_breach_alerted: Dict[str, float] = {}
+        self._notified_exit: Dict[str, float] = {}     # entry_id -> 首次发送退出通知的时间；GC 时清理超过 1 小时的
 
     # ─────────────────────────────────────────────────────────────────────────
     # 公共接口
@@ -1193,7 +1194,14 @@ class SignalWatcher:
             self._open_pos_ts = now
             try:
                 from shared.state import get_all_positions as _gap
-                self._open_pos_cache = [p_ for p_ in (await asyncio.to_thread(_gap)) if p_.get("status") == "open"]
+                # 只保留「open 且 sl_price>0 且 entry_price>0」的记录，过滤已平仓/残缺/历史脏数据
+                def _valid(p_):
+                    try:
+                        return (p_.get("status") == "open" and float(p_.get("sl_price") or 0) > 0
+                                and float(p_.get("entry_price") or 0) > 0)
+                    except (TypeError, ValueError):
+                        return False
+                self._open_pos_cache = [p_ for p_ in (await asyncio.to_thread(_gap)) if _valid(p_)]
             except Exception:
                 pass
         for p_ in self._open_pos_cache:
@@ -1202,6 +1210,12 @@ class SignalWatcher:
             sl = float(p_.get("sl_price") or 0)
             d = str(p_.get("direction", "")).upper()
             if sl <= 0 or not ((d == "LONG" and price <= sl) or (d == "SHORT" and price >= sl)):
+                continue
+            # 方向合理性：LONG 止损必须在入场价下方，SHORT 必须在上方；否则是脏数据，不告警
+            _ep = float(p_.get("entry_price") or 0)
+            if _ep <= 0 or (d == "LONG" and not sl < _ep) or (d == "SHORT" and not sl > _ep):
+                logger.debug(f"[signal_watcher] {symbol} SL-BREACH 跳过：止损/入场价方向不合理 "
+                             f"dir={d} sl={sl} entry={_ep}（疑似脏数据）")
                 continue
             if now - self._sl_breach_alerted.get(symbol, 0) < 300:
                 continue
@@ -1876,8 +1890,13 @@ class SignalWatcher:
         """[机制四] 信号退出监控通知（仅当条目确实已移除时发送），并丢弃其未发送的「进入监控」缓冲。"""
         async with self._lock:
             removed = self._watched.get(sym) is not entry
-        if not removed:
-            return
+            if not removed:
+                return
+            # 同一条目只发一次退出通知（btc_1h_crash_guard / recheck 可能先后处理同一条目）
+            _ne = self.__dict__.setdefault("_notified_exit", {})     # 兼容不经 __init__ 构造的实例
+            if entry.entry_id in _ne:
+                return
+            _ne[entry.entry_id] = time.time()
         try:
             from shared.notifier import discard_signal, notify, _hhmm
             sid = entry.signal.get("_sig_id", "")
@@ -2560,6 +2579,11 @@ class SignalWatcher:
         """GC 一轮：清理已触发条目；过期条目调 _handle_expired 撤单。"""
         expired_entries = []
         async with self._lock:
+            # 清理超过 1 小时的退出通知去重记录，防止无限增长
+            _ne = self.__dict__.setdefault("_notified_exit", {})
+            _cut = time.time() - 3600
+            for _k in [k for k, t in _ne.items() if t < _cut]:
+                _ne.pop(_k, None)
             for sym, e in list(self._watched.items()):
                 # [v3.89 #102/#44] 触发结果未知的条目保留待人工核查；撤单进行中/结果未知的条目由撤单与对账流程负责
                 if e.trigger_state == "unknown" or e.cancel_state != "none":

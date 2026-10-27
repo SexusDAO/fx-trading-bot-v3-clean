@@ -170,7 +170,7 @@ def test_btc_warn_cancels_direction(monkeypatch, pts, victim, keeper):
 
 def test_sl_breach_alert_only(monkeypatch, caplog):
     w = sw.SignalWatcher()
-    w._open_pos_cache = [{"symbol": "ETHUSDT", "status": "open", "direction": "LONG", "sl_price": 95}]
+    w._open_pos_cache = [{"symbol": "ETHUSDT", "status": "open", "direction": "LONG", "sl_price": 95, "entry_price": 100}]
     w._open_pos_ts = time.time()
     with caplog.at_level(logging.ERROR):
         run(w._check_sl_breach("ETHUSDT", 94.0))

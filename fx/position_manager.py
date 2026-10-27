@@ -3552,6 +3552,24 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
         return
 
     async with lock:
+        # ── 重入检查：拿锁后重读最新 pos_state，防止 startup_sync / patrol 先后触发导致重复补挂与重复通知 ──
+        #   只在「调用方持有的是待补挂快照(pending/patching/pending_guard)，而最新记录已被别的路径补完
+        #   (open 且保护单齐全)」或「记录已不存在/已平仓」时跳过。
+        #   注意：不能简单按「status 不在 pending/patching 就跳过」——patrol 重试走的是 pending_guard、
+        #   startup_sync 补挂走的是 open，都是合法入口，会被误跳过。
+        try:
+            _latest = next((p for p in (await asyncio.to_thread(get_all_positions)) if p.get("pos_id") == pid), None)
+        except Exception:
+            _latest = pos        # 读取失败时不拦截，沿用调用方快照
+        if _latest is None:
+            _latest = pos        # 读不到记录不拦截（后面会按交易所实际持仓为 0 自行跳过），沿用调用方快照
+        if _latest.get("status") in ("closed",):
+            logger.info(f"[pm] {symbol} 补挂跳过：记录已平仓（pid={pid}）")
+            return
+        if (pos.get("status") in ("pending", "patching", "pending_guard") and _latest.get("status") == "open"
+                and not _latest.get("missing_guards") and _latest.get("sl_order_id")):
+            logger.info(f"[pm] {symbol} 补挂跳过：status={_latest.get('status')}，已被其他路径处理")
+            return
         direction = pos.get("direction","LONG").upper()
         pos_side  = "LONG" if direction == "LONG" else "SHORT"
         sl_price  = pos.get("sl_price")
@@ -3837,7 +3855,9 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
             "missing_guards": _missing,
             **_heal_fields,
         }
-        (await asyncio.to_thread(update_position, pid, _upd))
+        _upd_ok = (await asyncio.to_thread(update_position, pid, _upd))
+        if _upd_ok is False:
+            logger.warning(f"[pm] {symbol} 补挂后 update_position 返回 False，pos_state 未写入（pid={pid}），不发送完成通知")
         if _missing:
             logger.error(f"[pm] {symbol} 保护单不完整，状态置为 pending_guard，缺失: {_missing}")
             try:
@@ -3904,11 +3924,12 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
         except Exception as _comp_e:
             logger.warning(f"[pm] 竞争开仓清理失败(不影响主流程): {_comp_e}")
 
-        await _notify_async(
-            f"✅ {symbol} 补挂止损止盈完成\n"
-            f"入场:{fill_price:.6g} 止损:{sl_price:.6g} TP1:{tp1_price:.6g}\n"
-            f"sl_id={guard.get('sl_id')} tp1_id={guard.get('tp1_id')}"
-        )
+        if _upd_ok is not False:        # 只在 pos_state 写入成功后才通知
+            await _notify_async(
+                f"✅ {symbol} 补挂止损止盈完成\n"
+                f"入场:{fill_price:.6g} 止损:{sl_price:.6g} TP1:{tp1_price:.6g}\n"
+                f"sl_id={guard.get('sl_id')} tp1_id={guard.get('tp1_id')}"
+            )
 
 
 async def patrol_once() -> dict:
