@@ -796,6 +796,45 @@ def _local_age_ms(ps: dict, now_ms: int):
     return (now_ms - max(ts)) if ts else None
 
 
+def _missing_on_exchange_decision(ps: dict, key: tuple, real: dict, now_ms: int, tag: str) -> str:
+    """本地记录 vs 本轮交易所持仓：决定能否清理。sync_lite 与启动对齐共用，保证两处规则一致。
+    返回：
+      "present"  交易所查到了（若之前有缺失计数则清零）
+      "cooldown" 开仓/成交不足 5 分钟，交易所暂未查到 → 不删、不计数
+      "wait"     非冷却期第 1 次查不到 → 写 _exchange_missing_count，不删
+      "remove"   连续第 2 次查不到 → 调用方执行清理
+    调用方须保证本轮交易所持仓查询成功（查询失败时整轮跳过，根本不会走到这里，因此不计数）。"""
+    from shared.state import update_position as _upd
+    pid = ps.get("pos_id", ps.get("symbol"))
+    if key in real:
+        if ps.get("_exchange_missing_count"):
+            try:
+                _upd(pid, {"_exchange_missing_count": 0})
+            except Exception:
+                pass
+        return "present"
+    _age = _local_age_ms(ps, now_ms)
+    if _age is not None and _age < _SYNC_LITE_COOLDOWN_MS:
+        logger.info(f"[{tag}] {key[0]}({key[1]}) 开仓仅 {_age / 1000:.0f}s（冷却期内），交易所暂未查到，"
+                    f"不清理不建孤儿 pos_id={pid}")
+        return "cooldown"
+    try:
+        _cnt = int(ps.get("_exchange_missing_count") or 0) + 1
+    except (TypeError, ValueError):
+        _cnt = 1
+    if _cnt < _SYNC_LITE_MISSING_LIMIT:
+        try:
+            _upd(pid, {"_exchange_missing_count": _cnt})
+        except Exception:
+            pass
+        logger.warning(f"[{tag}] {key[0]}({key[1]}) 交易所未查到持仓（第{_cnt}/{_SYNC_LITE_MISSING_LIMIT}次），"
+                       f"暂不清理 pos_id={pid}")
+        return "wait"
+    logger.warning(f"[{tag}] {key[0]}({key[1]}) 交易所连续{_cnt}次查不到持仓，清理本地记录 pos_id={pid} "
+                   f"原因=missing_on_exchange")
+    return "remove"
+
+
 async def _startup_sync_lite() -> None:
     """轻量对齐（WS 重连后 / 每 30 分钟）：不补挂 TP、不推送卡片，只做两件事：
       1. 交易所有、本地无 → 孤儿建档 + 补挂保护单；超出当前市场模式持仓上限的，按开仓时间从新到旧只认领能填满上限的，
@@ -828,47 +867,23 @@ async def _startup_sync_lite() -> None:
         positions = [p for p in get_all_positions() if isinstance(p, dict)]
         live_status = ("open", "pending_guard", "patching")
 
-        # 2) 交易所无、本地有 → 清理（保守：冷却期内不动；非冷却期需连续 2 次都查不到才删；查询失败上面已整轮跳过）
-        from shared.state import update_position as _upd
+        # 2) 交易所无、本地有 → 清理（共用 _missing_on_exchange_decision：冷却期内不动；非冷却期需连续 2 次都查不到才删）
         _now_ms0 = int(time.time() * 1000)
         for ps in positions:
             if ps.get("status") not in live_status:
                 continue
             key = (ps.get("symbol"), str(ps.get("direction", "")).upper())
             pid = ps.get("pos_id", ps.get("symbol"))
-            if key in real:
-                if ps.get("_exchange_missing_count"):      # 又查到了：计数清零
-                    try:
-                        _upd(pid, {"_exchange_missing_count": 0})
-                    except Exception:
-                        pass
-                continue
-            _age = _local_age_ms(ps, _now_ms0)
-            if _age is not None and _age < _SYNC_LITE_COOLDOWN_MS:
-                logger.info(f"[sync_lite] {key[0]}({key[1]}) 开仓仅 {_age / 1000:.0f}s（冷却期内），交易所暂未查到，"
-                            f"不清理不建孤儿 pos_id={pid}")
+            if _missing_on_exchange_decision(ps, key, real, _now_ms0, "sync_lite") != "remove":
                 continue
             try:
-                _cnt = int(ps.get("_exchange_missing_count") or 0) + 1
-            except (TypeError, ValueError):
-                _cnt = 1
-            if _cnt < _SYNC_LITE_MISSING_LIMIT:
-                try:
-                    _upd(pid, {"_exchange_missing_count": _cnt})
-                except Exception:
-                    pass
-                logger.warning(f"[sync_lite] {key[0]}({key[1]}) 交易所未查到持仓（第{_cnt}/{_SYNC_LITE_MISSING_LIMIT}次），"
-                               f"暂不清理 pos_id={pid}")
-                continue
-            try:
+                from shared.state import update_position as _upd
                 _upd(pid, {"status": "closed", "close_reason": "sync_lite_missing_on_exchange"})
             except Exception:
                 pass
             from position_manager import _remove_position_checked
             await asyncio.to_thread(_remove_position_checked, pid, ps.get("symbol", ""))
             removed += 1
-            logger.warning(f"[sync_lite] 交易所连续{_cnt}次查不到持仓，清理本地记录: {ps.get('symbol')}({key[1]}) "
-                           f"pos_id={pid} 原因=sync_lite_missing_on_exchange")
 
         # 3) 交易所有、本地无 → 孤儿（先按配额筛选）
         orphans = [(k, rp) for k, rp in real.items() if _match_local_position(positions, k[0], k[1]) is None]
@@ -1055,17 +1070,20 @@ async def _sync_positions_on_startup() -> None:
         orphans_rebuilt = []
 
         # ── 1. 清僵尸记录（仅在上面持仓/挂单查询都成功时才会走到这里）────────────
+        # 与 sync_lite 共用 _missing_on_exchange_decision：开仓/成交 <5 分钟不删；其余需连续 2 次（含 sync_lite 的计数）查不到才删。
         _live_statuses = ("open", "pending_guard")
-        for sym, ps in list(ps_map.items()):
+        _now_ms_z = int(_time.time() * 1000)
+        for ps in list(positions):
             if ps.get("status") not in _live_statuses:
                 continue
-            ps_side = ps.get("direction", "long").upper()  # pos_state 里存的是 direction
-            if (sym, ps_side) not in real:
-                # 交易所已无此方向持仓，用 state.py 的加锁原子接口清除
+            sym = ps.get("symbol")
+            ps_side = str(ps.get("direction") or "long").upper()  # pos_state 里存的是 direction
+            if _missing_on_exchange_decision(ps, (sym, ps_side), real, _now_ms_z, "startup_sync") == "remove":
+                # 交易所连续两次查不到此方向持仓，用 state.py 的加锁原子接口清除
                 pid = ps.get("pos_id", sym)
                 remove_position(pid)
                 removed.append(sym)
-                logger.info(f"[startup_sync] 清除僵尸记录: {sym} ({ps_side})")
+                logger.info(f"[startup_sync] 清除僵尸记录: {sym} ({ps_side}) pos_id={pid}")
 
         # ── 2. 对齐每个真实持仓：孤儿建档 + 统一走 position_manager._补挂保护单 ──────
         # [fix #3] 孤儿仓位（交易所有、本地无）：用交易所数据重建完整记录并 add_position，
