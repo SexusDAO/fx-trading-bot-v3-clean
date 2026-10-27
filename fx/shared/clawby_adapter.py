@@ -739,7 +739,8 @@ def get_liq_heatmap(symbol: str, exchange: str = "Binance",
     if cached is not None:
         return cached
     data = cg_get("api/futures/liquidation/heatmap/model1",
-                  {"symbol": sym, "exchange": exchange, "range": range_})
+                  {"symbol": sym, "exchange": exchange, "range": range_},
+                  timeout=15)  # 热图数据量大，给予更多超时
     if data:
         _cache_set(key, data)
     return data
