@@ -2743,6 +2743,8 @@ async def _maybe_tighten_tp2(pos: dict) -> None:
             TP2_TIGHTEN_4H_MULT, TP2_TIGHTEN_8H_MULT,
             TP2_TIGHTEN_CHECK_INTERVAL_MIN,
         )
+        if pos.get("tp_adjust_locked"):
+            return   # 手动锁定 TP：不收紧 TP2
         pid       = pos.get("pos_id", "")
         symbol    = pos.get("symbol", "")
         direction = pos.get("direction", "long").upper()
@@ -3575,6 +3577,8 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
         sl_price  = pos.get("sl_price")
         tp1_price = pos.get("tp1_price")
         tp2_price = pos.get("tp2_price")
+        if pos.get("tp_mode") == "single" and not tp2_price:
+            tp2_price = None     # 单止盈模式（全仓一张 TP）：不补挂 TP2
 
         # ── 实际持仓量校验:持仓为 0 时就是已经被平仓,跳过补挂避免 -2022 ──────────
         try:
@@ -4479,6 +4483,15 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
             tp2_changed = True
         elif tp2_move < -1e-8 and abs(tp2_move) > TP_SL_ADJUST_TP_SHRINK_ATR * atr:
             tp2_changed = True
+
+    # ── 手动锁定 TP：pos_state 里 tp_adjust_locked=True 时，TP1/TP2 一律不改；SL 收紧照常 ──
+    if pos.get("tp_adjust_locked"):
+        if tp1_changed or tp2_changed:
+            logger.info(f"[adjust_sltp] {symbol} tp_adjust_locked=True，跳过 TP 调整 "
+                        f"(tp1_changed={tp1_changed} tp2_changed={tp2_changed})")
+        tp1_changed = False
+        tp2_changed = False
+        tp1_reason = "locked: tp_adjust_locked"
 
     if not sl_changed and not tp1_changed and not tp2_changed:
         # 无变化也写日志(记录"维持")
@@ -5414,7 +5427,7 @@ async def _check_pending_health_static(pos: dict) -> None:
         return
 
     # 更新 pos_state(v3.72: 标记为重挂单,保护不被竞争替换)
-    (await asyncio.to_thread(update_position, pid, {
+    _pend_upd = {
         "entry_price":               new_entry,
         "sl_price":                  new_params["sl_price"],
         "tp1_price":                 new_params["tp1_price"],
@@ -5423,7 +5436,11 @@ async def _check_pending_health_static(pos: dict) -> None:
         "pending_health_check_count": adj_count + 1,
         "is_reorder":                True,   # 重挂单标记,signal_watcher 竞争机制保护
         "reorder_count":             adj_count + 1,
-    }))
+    }
+    if pos.get("tp_adjust_locked"):      # 手动锁定 TP：重挂入场单时保留原 TP1/TP2 价格
+        _pend_upd.pop("tp1_price", None)
+        _pend_upd.pop("tp2_price", None)
+    (await asyncio.to_thread(update_position, pid, _pend_upd))
 
     _write_pending_adj_log(symbol, mode, "price_adjusted", None,
                             pos, new_params, adj_count + 1, atr, rsi_1h, funding,
