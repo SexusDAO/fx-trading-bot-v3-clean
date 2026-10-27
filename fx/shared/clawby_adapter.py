@@ -187,8 +187,9 @@ _configure_keys(_load_clawby_keys())
 CACHE_TTL    = 15 * 60   # 15 分钟
 
 import os as _os
-_PROXY_URL = _os.environ.get("BINANCE_PROXY", "")
-_PROXIES   = ({"http": _PROXY_URL, "https": _PROXY_URL} if _PROXY_URL else {})
+# Coinglass / Clawby（第三方数据）与 Binance 公开行情一律直连，不走 BINANCE_PROXY：
+# 该代理是为 Binance 签名请求配的，访问 Coinglass 会大量 Read timed out，清算图缺失会使止损降级为 ATR 公式。
+_PROXIES = {}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 健康监控（Clawby 专用）
