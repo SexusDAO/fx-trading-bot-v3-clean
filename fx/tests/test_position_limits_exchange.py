@@ -83,7 +83,7 @@ def test_executor_passes_exchange_counts_via_executor_thread(ex, monkeypatch):
     monkeypatch.setattr(E.api, "get_position", gp)
     run(E)
     assert seen["counts"] == {"total": 2, "long": 1, "short": 1}
-    assert where["arg"] == "" and where["thread"] is not threading.main_thread()   # 不在事件循环线程里发请求
+    assert where["arg"] is None and where["thread"] is not threading.main_thread()   # 不在事件循环线程里发请求
 
 
 def test_executor_query_failure_falls_back_to_local_with_warning(ex, monkeypatch, caplog):

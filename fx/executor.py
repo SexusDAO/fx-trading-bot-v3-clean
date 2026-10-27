@@ -1587,7 +1587,9 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     try:
         from shared.risk_manager import exchange_position_counts as _epc
         _loop = asyncio.get_running_loop()
-        _rp = await asyncio.wait_for(_loop.run_in_executor(None, lambda: api.get_position("")), timeout=10.0)
+        # 必须查全账户持仓：get_position 只在 symbol 为真值时才带 symbol 参数，
+        # 传 "" 目前等价于不传，但依赖这一点太脆——显式 None，语义清楚
+        _rp = await asyncio.wait_for(_loop.run_in_executor(None, lambda: api.get_position(None)), timeout=10.0)
         signal["_exchange_pos_counts"] = _epc(_rp)
     except Exception as _xe:
         logger.warning(f"[executor] {symbol} 查询交易所实际持仓数失败，持仓上限仅按本地数量判断: "

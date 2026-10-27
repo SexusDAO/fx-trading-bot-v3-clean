@@ -1393,6 +1393,15 @@ class PositionManager:
         # v3.56: funding_arb 有自己的最大持仓逻辑(_patrol_funding_arb),跳过通用时间止损
         if pos.get("sig_type") == "funding_arb":
             return
+        # ── 孤儿仓位（交易所已有、启动时认领建档）：最多持有 12H，不走其他时间止损逻辑 ──
+        # main.py 建档时 mode/sig_type 都写 recovered（source=orphan_recovered）
+        if pos.get("mode") == "recovered" or pos.get("sig_type") == "recovered":
+            _symbol_o   = pos["symbol"]
+            _hold_min_o = (now_ms - int(pos.get("open_time", 0))) / 60000
+            if _hold_min_o >= 12 * 60:
+                logger.info(f"[pm] {_symbol_o} 孤儿仓位持仓满12H强制平仓")
+                await self._force_close(pos, "orphan_timeout_12h")
+            return  # 孤儿仓位不走其他时间止损（reversal/ema_trend/普通软硬上限）
         pid       = pos.get("pos_id", pos.get("symbol","unknown"))
         symbol    = pos["symbol"]
         open_ms   = int(pos.get("open_time", 0))
