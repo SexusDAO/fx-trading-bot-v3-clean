@@ -632,6 +632,133 @@ def _build_orphan_record(sym: str, pos_side: str, rp: dict, algo_orders, open_or
     return ps, notes
 
 
+_sync_lite_busy = False       # 防止 WS 重连回调与定时任务重叠执行
+
+
+def _claim_quota(ts_list, limits: dict, claimed: dict) -> bool:
+    """孤儿仓位认领配额判断。ts_list = [(open_ms, symbol)]，claimed = {"total":n, "long":n, "short":n}（已含本地持仓）。"""
+    return (claimed["total"] < limits["total"]
+            and claimed[ts_list[0][1]] < limits[ts_list[0][1]])
+
+
+async def _startup_sync_lite() -> None:
+    """轻量对齐（WS 重连后 / 每 30 分钟）：不补挂 TP、不推送卡片，只做两件事：
+      1. 交易所有、本地无 → 孤儿建档 + 补挂保护单；超出当前市场模式持仓上限的，按开仓时间从新到旧只认领能填满上限的，
+         其余直接市价平仓（不让无人管理的裸仓继续存在）。
+      2. 交易所无、本地有 → 标记 closed 并删除记录。
+    任何异常只记 warning，不影响主流程。"""
+    global _sync_lite_busy
+    if _sync_lite_busy:
+        logger.info("[sync_lite] 上一轮仍在执行，跳过本次")
+        return
+    _sync_lite_busy = True
+    added, removed, force_closed = 0, 0, 0
+    try:
+        from shared import binance_api as _bapi
+        from shared.state import get_all_positions, add_position
+        from shared.risk_manager import get_market_mode, _get_position_limits
+
+        # 1) 交易所真实持仓；查询失败直接放弃本轮（失败≠无持仓，绝不清理）
+        try:
+            pos_risk = await asyncio.to_thread(_bapi.get_position, None)
+            open_orders = await asyncio.to_thread(_bapi.get_open_orders)
+            algo_orders = await asyncio.to_thread(_bapi.get_algo_open_orders)
+        except Exception as _qe:
+            logger.warning(f"[sync_lite] 查询交易所持仓/挂单失败，本轮跳过: {_qe}")
+            return
+        real = {(p["symbol"], p.get("positionSide")): p for p in (pos_risk or [])
+                if p.get("positionSide") in ("LONG", "SHORT")
+                and abs(float(p.get("positionAmt", 0) or 0)) > 0}
+
+        positions = [p for p in get_all_positions() if isinstance(p, dict)]
+        live_status = ("open", "pending_guard", "patching")
+
+        # 2) 交易所无、本地有 → 清理
+        for ps in positions:
+            if ps.get("status") not in live_status:
+                continue
+            key = (ps.get("symbol"), str(ps.get("direction", "")).upper())
+            if key not in real:
+                pid = ps.get("pos_id", ps.get("symbol"))
+                try:
+                    from shared.state import update_position as _upd
+                    _upd(pid, {"status": "closed", "close_reason": "sync_lite_missing_on_exchange"})
+                except Exception:
+                    pass
+                from position_manager import _remove_position_checked
+                await asyncio.to_thread(_remove_position_checked, pid, ps.get("symbol", ""))
+                removed += 1
+                logger.warning(f"[sync_lite] 交易所已无持仓，清理本地记录: {ps.get('symbol')}({key[1]})")
+
+        # 3) 交易所有、本地无 → 孤儿（先按配额筛选）
+        local_keys = {(p.get("symbol"), str(p.get("direction", "")).upper())
+                      for p in positions if p.get("status") in live_status}
+        orphans = [(k, rp) for k, rp in real.items() if k not in local_keys]
+        claimed = {"total": 0, "long": 0, "short": 0}
+        for p in positions:
+            if p.get("status") in live_status:
+                claimed["total"] += 1
+                d = str(p.get("direction", "")).upper()
+                if d == "LONG":
+                    claimed["long"] += 1
+                elif d == "SHORT":
+                    claimed["short"] += 1
+        limits = _get_position_limits(get_market_mode())
+        # 开仓时间：交易所持仓没有开仓时间字段，用 updateTime 倒序（越新越靠前）；缺失时排最后
+        orphans.sort(key=lambda kv: float(kv[1].get("updateTime", 0) or 0), reverse=True)
+
+        from position_manager import _补挂保护单
+        for (sym, pos_side), rp in orphans:
+            _side = pos_side.lower()
+            wants = {"total": 1, "long": 1 if _side == "long" else 0, "short": 1 if _side == "short" else 0}
+            # (open_ms, symbol) 语义：这里用 0 占位，配额只看方向
+            if not _claim_quota([(0, _side)], limits, claimed):
+                qty = abs(float(rp.get("positionAmt", 0) or 0))
+                try:
+                    _close_side = "SELL" if pos_side == "LONG" else "BUY"
+                    # 对冲模式：显式 positionSide 平仓（reduceOnly 语义由交易所按 positionSide 处理）
+                    await asyncio.to_thread(_bapi.place_order, sym, _close_side, "MARKET", qty,
+                                            position_side=pos_side)
+                    force_closed += 1
+                    logger.warning(f"[sync_lite] {sym}({pos_side}) 超出持仓上限，超出部分市价平仓 qty={qty}")
+                except Exception as _ce:
+                    logger.warning(f"[sync_lite] {sym}({pos_side}) 超出上限平仓失败（保留由人工处理）: {_ce}")
+                continue
+            _now_ms = int(time.time() * 1000)
+            ps, _notes = _build_orphan_record(sym, pos_side, rp, algo_orders, open_orders, _now_ms)
+            ps["source"] = "orphan_recovered_sync_lite"
+            if not add_position(ps):
+                logger.warning(f"[sync_lite] {sym}({pos_side}) 孤儿建档失败")
+                continue
+            added += 1
+            claimed["total"] += wants["total"]
+            claimed["long"] += wants["long"]
+            claimed["short"] += wants["short"]
+            logger.warning(f"[sync_lite] {sym}({pos_side}) 新增孤儿仓位: qty={ps['quantity']} entry={ps['entry_price']} "
+                           f"{', '.join(_notes) if _notes else '交易所未读到保护单'}")
+            try:
+                await _补挂保护单(ps, ps["entry_price"], ps["quantity"], ps["pos_id"], sym)
+            except Exception as _ge:
+                logger.warning(f"[sync_lite] {sym}({pos_side}) 补挂保护单失败: {_ge}")
+
+        logger.info(f"[sync_lite] 完成: 新增{added}笔 清理{removed}笔 超限平仓{force_closed}笔")
+    except Exception as e:
+        logger.warning(f"[sync_lite] 对齐异常: {e}")
+    finally:
+        _sync_lite_busy = False
+
+
+async def _periodic_sync_loop(interval_sec: int = 1800) -> None:
+    """每 30 分钟轻量对齐一次（首次错开一个周期，避免与启动对齐撞车）。"""
+    await asyncio.sleep(interval_sec)
+    while True:
+        try:
+            await _startup_sync_lite()
+        except Exception as e:
+            logger.warning(f"[periodic_sync] 定时对齐异常: {e}")
+        await asyncio.sleep(interval_sec)
+
+
 async def _sync_positions_on_startup() -> None:
     """
     启动时对齐持仓状态：
@@ -1014,6 +1141,30 @@ async def main() -> None:
     _set_manager(pm)
     await pm.start()
 
+    # ── 2.5. market_data_hub WS 重连成功 → 轻量对齐（运行期 WS 断连期间成交的仓位靠这里兜底）──
+    if hub is not None:
+        try:
+            _main_loop = asyncio.get_running_loop()
+            _pending = {"task": None}
+
+            def _on_ws_hub_reconnect():
+                # hub 回调在其后台线程/task 中执行，转发回主事件循环
+                def _spawn():
+                    t = _pending["task"]
+                    if t is not None and not t.done():
+                        logger.info("[sync_lite] 上一次重连对齐仍未结束，合并本次")
+                        return
+                    logger.info("[main] market_data_hub WS 已恢复，触发轻量对齐...")
+                    _pending["task"] = asyncio.ensure_future(_startup_sync_lite())
+                try:
+                    _main_loop.call_soon_threadsafe(_spawn)
+                except Exception as _re:
+                    logger.warning(f"[main] hub 重连回调调度失败（非致命）: {_re}")
+            hub.set_reconnect_callback(_on_ws_hub_reconnect)
+            logger.info("[main] market_data_hub 重连回调已注册")
+        except Exception as e:
+            logger.warning(f"[main] hub 重连回调注册失败（非致命）: {e}")
+
     # ── 3. 注册 executor 使用相同的 ws 实例 ───────────────────────────────
     #    executor 的 WsOrderListener 引用通过模块级 _LISTENER 变量注入
     try:
@@ -1086,6 +1237,7 @@ async def main() -> None:
         asyncio.create_task(_loop_liq_snapshot(),                              name="liq_snapshot"),
         asyncio.create_task(_loop_event_latency_monitor(),                     name="loop_latency"),
         asyncio.create_task(_loop_track_outcomes(3600),                        name="track_outcomes"),
+        asyncio.create_task(_periodic_sync_loop(1800),                         name="periodic_sync"),
     ]
     if _trigger_det is not None:
         _trigger_det._watcher = signal_watcher

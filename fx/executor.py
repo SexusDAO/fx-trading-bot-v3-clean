@@ -181,6 +181,14 @@ def _check_correlation(symbol: str, direction: str, open_pos: list) -> tuple[boo
 
 
 def _precheck(signal: dict) -> tuple[bool, str]:
+    # WS 未就绪时禁止开仓，防止重启/断线窗口期产生孤儿仓位
+    try:
+        from shared.market_data_hub import is_ready as _hub_ready
+        if not _hub_ready():
+            return False, "WS行情未就绪，暂停开仓"
+    except Exception:
+        pass  # hub 未启用时跳过此检查
+
     symbol    = signal["symbol"]
     direction = signal["direction"].upper()
 

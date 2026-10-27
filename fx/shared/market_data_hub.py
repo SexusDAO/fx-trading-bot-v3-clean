@@ -174,6 +174,23 @@ class MarketDataHub:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stop_event: Optional[asyncio.Event] = None
         self._stopping = False
+        self._on_reconnect = None                # WS 重连成功（恢复就绪）后回调，主线程安全调度
+        self._had_ready = False                  # 是否曾经就绪过：区分「首次就绪」与「断线后恢复」
+
+    def set_reconnect_callback(self, fn) -> None:
+        """注册 WS 重连回调：连接恢复并重新收到数据帧后调用一次（回调内部异常被吞掉）。"""
+        self._on_reconnect = fn
+
+    def _fire_reconnect(self) -> None:
+        """触发重连回调。本方法在 hub 后台线程/其事件循环中执行，
+        回调若需在主事件循环里跑协程，请自行用 run_coroutine_threadsafe 转发。"""
+        fn = self._on_reconnect
+        if not fn:
+            return
+        try:
+            fn()
+        except Exception as e:
+            logger.warning(f"[hub] 重连回调异常（忽略）: {e}")
 
     # ── 对外读取接口（不加锁） ─────────────────────────────────────────────
     # shard 0 的兼容属性（ticker 所在连接；历史代码/测试按单连接读写）
@@ -381,11 +398,17 @@ class MarketDataHub:
         with self._lock:
             self.last_msg_ts = now
             self.frame_count += 1
+            was_ready = self._ready
             if updates:
                 new = dict(self._prices)          # 复制 + 整体替换，读端不受影响
                 new.update(updates)
                 self._prices = new
                 self._ready = True
+        if updates and not was_ready:
+            # 断线 → 重新就绪：只触发一次（每帧都触发会刷爆对齐任务）；首次就绪不触发
+            if self._had_ready:
+                self._fire_reconnect()
+            self._had_ready = True
         return len(updates)
 
     def _handle_market_frame(self, raw) -> None:
