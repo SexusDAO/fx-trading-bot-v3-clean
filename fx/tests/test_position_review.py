@@ -129,7 +129,7 @@ def test_rotated_logs_searched(tmp_path):
 def test_pick_latest_direction_and_all(tmp_path):
     older = {"symbol": "UNITREEUSDT", "direction": "LONG", "open_time": OPEN_MS - 86400000, "pnl_usdt": -1.0,
              "close_time": OPEN_MS - 80000000, "close_reason": "sl", "holding_minutes": 100}
-    short = {"symbol": "UNITREEUSDT", "direction": "SHORT", "open_time": OPEN_MS + 1000}
+    short = {"symbol": "UNITREEUSDT", "direction": "SHORT", "open_time": OPEN_MS + 1000, "close_time": OPEN_MS + 5000}
     _w(tmp_path / "trade_log.jsonl", [json.dumps(older), json.dumps(short)])
     _w(tmp_path / "pos_state.json", [json.dumps([_pos()])])
     recs = PR.load_positions(tmp_path)
@@ -191,3 +191,58 @@ def test_funding_direction_text(logs, monkeypatch):
     assert "-0.9600%（LONG收钱，有利）" in out
     monkeypatch.setattr(PR, "funding_and_price", lambda *a, **k: (0.0096, 100.0))
     assert "LONG付钱，不利" in PR.review(rec, logs, net=True, now=NOW)
+
+
+# ── 三个修复 ──
+def test_default_tz_offset_auto_detected():
+    import time
+    expect = -(time.altzone if time.localtime().tm_isdst > 0 else time.timezone) / 3600
+    assert PR._local_tz_offset == expect
+
+
+def test_cli_default_tz_offset_is_local(monkeypatch, logs):
+    seen = {}
+    monkeypatch.setattr(PR, "list_today", lambda recs, d, tz, **k: seen.setdefault("tz", tz) or "")
+    PR.main(["--today", "--log-dir", str(logs)])
+    assert seen["tz"] == PR._local_tz_offset
+    seen.clear()
+    PR.main(["--today", "--log-dir", str(logs), "--log-tz-offset", "8"])
+    assert seen["tz"] == 8.0
+
+
+def test_tz_offset_shifts_log_time(tmp_path):
+    # 日志是东八区本地时间 21:19 → UTC 13:19，应命中 13:20 UTC 的开仓
+    _w(tmp_path / "system.log", [SCORE_LINE.replace("13:19:40", "21:19:40")])
+    _w(tmp_path / "pos_state.json", [json.dumps([_pos()])])
+    rec = PR.pick(PR.load_positions(tmp_path), "UNITREEUSDT")[0]
+    assert "最终得分:      53" in PR.review(rec, tmp_path, tz_off_h=8.0, net=False, now=NOW)
+    assert "最终得分" not in PR.review(rec, tmp_path, tz_off_h=0.0, net=False, now=NOW)
+
+
+def test_closed_requires_close_time(tmp_path):
+    good = {"trade_id": "1_A", "symbol": "AAAUSDT", "direction": "LONG", "close_time": OPEN_MS, "pnl_usdt": 1.0}
+    bad1 = {"trade_id": "2_B", "symbol": "BBBUSDT", "direction": "LONG"}                  # 无 close_time
+    bad2 = {"trade_id": "3_C", "symbol": "CCCUSDT", "direction": "LONG", "close_time": 0}  # close_time 为 0
+    _w(tmp_path / "trade_log.jsonl", [json.dumps(r) for r in (good, bad1, bad2)])
+    recs = PR.load_positions(tmp_path)
+    assert [r["symbol"] for r in recs] == ["AAAUSDT"]
+    out = PR.list_closed(recs, now=NOW)
+    assert "BBBUSDT" not in out and "CCCUSDT" not in out
+
+
+def test_closed_dedup_by_trade_id(tmp_path):
+    t = {"trade_id": "9_CHIP", "symbol": "CHIPUSDT", "direction": "SHORT", "mode": "ema_trend",
+         "close_time": int(NOW.timestamp() * 1000) - 3600000, "close_reason": "sl", "pnl_usdt": -5.0, "holding_minutes": 270}
+    dup = dict(t)
+    _w(tmp_path / "trade_log.jsonl", [json.dumps(t), json.dumps(dup)])
+    out = PR.list_closed(PR.load_positions(tmp_path), now=NOW)
+    assert out.count("CHIPUSDT") == 1
+    assert "合计 1 笔，盈亏 -5.00U" in out
+
+
+def test_closed_dedup_fallback_key_without_trade_id(tmp_path):
+    ct = int(NOW.timestamp() * 1000) - 3600000
+    a = {"symbol": "XUSDT", "direction": "LONG", "close_time": ct, "pnl_usdt": -2.0}
+    _w(tmp_path / "trade_log.jsonl", [json.dumps(a), json.dumps(a)])
+    out = PR.list_closed(PR.load_positions(tmp_path), now=NOW)
+    assert out.count("XUSDT") == 1 and "合计 1 笔" in out

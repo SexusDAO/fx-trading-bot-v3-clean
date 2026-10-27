@@ -24,12 +24,15 @@ import json
 import re
 import sys
 import threading
+import time as _time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 FX_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_LOG_DIR = FX_ROOT / "logs"
 Q = "?"
+# 服务器本地时区相对 UTC 的小时偏移（东八区返回 8.0）；用作 --log-tz-offset 的默认值
+_local_tz_offset = -(_time.altzone if _time.localtime().tm_isdst > 0 else _time.timezone) / 3600
 
 # ── 日志行解析 ───────────────────────────────────────────────────────────
 LINE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ (\w+) (\S+) (.*)$")
@@ -169,7 +172,7 @@ def load_positions(log_dir: Path) -> list:
             q["_status"] = "open"
             out.append(q)
     for t in read_jsonl(Path(log_dir) / "trade_log.jsonl"):
-        if t.get("symbol"):
+        if t.get("symbol") and t.get("close_time"):      # 无 close_time 的残缺记录不显示
             q = dict(t)
             q["_status"] = "closed"
             out.append(q)
@@ -482,14 +485,21 @@ def list_closed(recs, days=7, now=None) -> str:
     out = [f"# --closed  (最近{days}天)",
            f"{'日期时间':<12} {'标的':<14} {'方向':<6} {'策略':<14} {'平仓原因':<16} {'盈亏':<10} 持仓时长"]
     total = 0.0
+    seen = set()
+    shown = 0
     for r in rows:
+        tid = r.get("trade_id") or f"{r.get('symbol')}_{r.get('close_time')}"
+        if tid in seen:
+            continue
+        seen.add(tid)
+        shown += 1
         cdt = _utc(r.get("close_time"))
         pnl = _num(r.get("pnl_usdt"))
         total += pnl or 0.0
         out.append(f"{(cdt.strftime('%m-%d %H:%M') if cdt else Q):<12} {str(r.get('symbol', Q)):<14} "
                    f"{str(r.get('direction', Q)).upper():<6} {str(r.get('mode') or Q):<14} {str(r.get('close_reason') or Q):<16} "
                    f"{(f'{pnl:+.2f}U' if pnl is not None else Q):<10} {_dur(r.get('holding_minutes'))}")
-    out.append(f"合计 {len(rows)} 笔，盈亏 {total:+.2f}U" if rows else "（无平仓记录）")
+    out.append(f"合计 {shown} 笔，盈亏 {total:+.2f}U" if shown else "（无平仓记录）")
     return "\n".join(out)
 
 
@@ -501,7 +511,8 @@ def main(argv=None) -> int:
     ap.add_argument("--today", action="store_true")
     ap.add_argument("--closed", action="store_true")
     ap.add_argument("--log-dir", default=str(DEFAULT_LOG_DIR))
-    ap.add_argument("--log-tz-offset", type=float, default=0.0)
+    ap.add_argument("--log-tz-offset", type=float, default=_local_tz_offset,
+                    help=f"system.log 本地时间相对 UTC 的小时偏移（自动检测为 {_local_tz_offset:g}）")
     ap.add_argument("--no-funding", action="store_true")
     a = ap.parse_args(argv)
     recs = load_positions(Path(a.log_dir))
