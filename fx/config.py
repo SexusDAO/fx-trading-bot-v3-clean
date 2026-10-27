@@ -568,7 +568,7 @@ FUNDING_ARB_SIZE_STRONG          = 0.5   # strong 信号仓位系数
 FUNDING_ARB_SIZE_MEDIUM          = 0.3   # medium 信号仓位系数
 FUNDING_ARB_COOLDOWN_AFTER_SL    = 4     # 止损后冷却小时数
 FUNDING_ARB_CONSEC_SL_LIMIT      = 2     # 连续止损次数触发熔断（暂停24H）
-FUNDING_ARB_CANDIDATE_TOP_N      = 10    # 候选池大小
+FUNDING_ARB_CANDIDATE_TOP_N      = 25    # 候选池大小（原10，扩大以覆盖更多强费率标的）
 
 # 做空（正费率极端）门槛
 FUNDING_ARB_MIN_RATE_SHORT       = 0.001    # 触发门槛
@@ -874,6 +874,11 @@ EMA_TREND_BASE_MEDIUM         = 52     # medium：两线排列 + RSI 可以
 EMA_TREND_CHG24_MAX           = 12.0   # chg24 > 12% 说明当日已有大涨，不追高
 EMA_TREND_CHG24_MIN           = -8.0   # chg24 < -8% 说明当日大跌，应走 reversal 不走 trend
 EMA_TREND_MAX_HOLD_HOURS     = 12     # ema_trend 时间止损软上限（小时；原 16，与硬上限 TIME_STOP_HARD_HOURS=16 拉开层次）
+
+# ── EMA Retest（pullback 子路径：价格实际触碰 EMA20 后强化信号）──────────────────
+EMA_RETEST_ENABLED   = True    # 总开关；False 时退化为普通 pullback，不影响其他逻辑
+EMA_RETEST_TOUCH_PCT = 0.003   # 触碰容差：近3根K线最低/高价与EMA20的距离 <= EMA20 × 0.3%
+EMA_RETEST_SIZE_CAP  = 0.65    # Retest 命中时仓位上限（仅提升 medium 信号）
 RECOVERED_MAX_HOLD_HOURS     = 8      # 孤儿(recovered)仓位最大持有时间（小时；原写死 12）
                                       # 4H 趋势追踪，比 pullback 的 8H 宽松，比 reversal 的 12H 宽松
 

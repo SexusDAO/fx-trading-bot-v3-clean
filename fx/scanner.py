@@ -4733,6 +4733,11 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
             logger.error(f"[arb_scan] {sym_full} execute_signal 失败: {_ee}")
 
     logger.info(f"[arb_scan] 完成: scanned={result['scanned']} signals={result['signals']} placed={result['placed']}")
+    # 打出有实质 reject_reason 的标的（排除"已有持仓"等槽位类拒绝，聚焦 judge 拒绝）
+    _arb_judge_rejects = [r for r in result.get("rejected", []) if r.get("reason") and r["reason"] not in ("已有持仓",)]
+    if _arb_judge_rejects:
+        for _rj in _arb_judge_rejects[:10]:   # 最多打 10 条，避免刷屏
+            logger.info(f"[arb_scan] REJECT {_rj['symbol']}: {_rj.get('reason','?')}")
     return result
 
 

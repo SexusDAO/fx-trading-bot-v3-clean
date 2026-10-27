@@ -767,6 +767,36 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
         logger.debug(f"[judge_pullback] {ind.get('symbol', '')} {direction} 已收盘k15不足3根"
                      f"（{len(_k15_closed)}），跳过15M确认")
 
+    # ── EMA Retest 强化（pullback 通过全部条件后）──────────────────────────────
+    # 触碰定义：近3根1H K线的 low（LONG）或 high（SHORT）碰到 EMA20 ± touch_pct
+    # 收盘确认：最近1根K线收盘价未深度跌破（LONG）或突破（SHORT）EMA20
+    try:
+        from config import EMA_RETEST_ENABLED as _RT_EN, EMA_RETEST_TOUCH_PCT as _RT_PCT, EMA_RETEST_SIZE_CAP as _RT_CAP
+    except Exception:
+        _RT_EN, _RT_PCT, _RT_CAP = True, 0.003, 0.65
+
+    out["ema_retest"] = False
+    if _RT_EN and len(k1h) >= 3 and ema20_1h > 0:
+        _touch_band    = ema20_1h * _RT_PCT
+        _recent_lows   = [float(k[3]) for k in k1h[-3:]]
+        _recent_highs  = [float(k[2]) for k in k1h[-3:]]
+        _last_close    = float(k1h[-1][4])
+        if direction == "LONG":
+            _touched  = any(l <= ema20_1h + _touch_band for l in _recent_lows)
+            _close_ok = _last_close >= ema20_1h * (1 - _RT_PCT)   # 收盘未深度跌破
+        else:
+            _touched  = any(h >= ema20_1h - _touch_band for h in _recent_highs)
+            _close_ok = _last_close <= ema20_1h * (1 + _RT_PCT)   # 收盘未深度突破
+
+        if _touched and _close_ok:
+            out["ema_retest"] = True
+            # 仅对 medium 信号升级；strong 已是最高仓位，不覆盖
+            if out.get("signal_strength") == "medium":
+                out["signal_strength"]   = "strong"
+                out["position_size_cap"] = _RT_CAP
+            logger.debug(f"[judge_pullback] {ind.get('symbol', '')} EMA Retest 命中 "
+                         f"ema20={ema20_1h:.4g} last_close={_last_close:.4g}")
+
     return True, out
 
 
