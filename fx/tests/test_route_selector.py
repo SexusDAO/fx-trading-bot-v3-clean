@@ -191,3 +191,43 @@ def test_klines_proxy_first_when_route_proxy(api, monkeypatch):
     R._set_route("direct", "t")
     A.get_klines("BTCUSDT", "1h", 2)
     assert api and api[0][0] == "direct"
+
+
+# ── 失败归因 / 直连会话隔离 ──
+def test_direct_session_ignores_env_proxy(monkeypatch):
+    monkeypatch.setenv("ALL_PROXY", "socks5://u:p@9.9.9.9:1")
+    monkeypatch.setenv("HTTPS_PROXY", "socks5://u:p@9.9.9.9:1")
+    s = A._make_session(use_proxy=False)
+    assert s.trust_env is False and s.proxies == {}
+    prepared = s.prepare_request(__import__("requests").Request("GET", "https://fapi.binance.com/fapi/v1/ping"))
+    assert s.merge_environment_settings(prepared.url, {}, None, None, None)["proxies"] == {}
+
+
+def test_public_get_direct_first_failure_blames_direct_not_proxy(api, monkeypatch):
+    # 通道为 direct：公开行情走直连，直连失败 → 失败记到 direct；回退到代理成功不应给 proxy 记失败
+    R._set_route("direct", "t")
+    install(monkeypatch, api, direct_fail=RuntimeError("direct timeout"))
+    seen = []
+    monkeypatch.setattr(R, "record_failure", lambda r: seen.append(r) or False)
+    assert A._get("/p")["ok"] == "proxy"
+    assert seen == ["direct"]
+
+
+def test_retry_blames_session_actually_used_not_global_route(api, monkeypatch):
+    # 全局通道 proxy，但本次请求最终是在 direct 会话上失败（临时覆盖）→ 归因 direct
+    install(monkeypatch, api, proxy_fail=RuntimeError("SOCKS5 Connection refused"),
+            direct_fail=RuntimeError("Read timed out"))
+    seen = []
+    monkeypatch.setattr(R, "record_failure", lambda r: seen.append(r) or False)
+    A._retry(lambda: A._signed_get("/x", {}))
+    assert seen[0] == "proxy"                      # 第一次在代理会话上失败，记 proxy
+    assert [t for t, _ in api][:2] == ["proxy", "direct"]
+
+
+def test_klines_failure_attribution_per_session(api, monkeypatch):
+    install(monkeypatch, api, proxy_fail=RuntimeError("proxy boom"))
+    monkeypatch.setattr(A, "_record_api_outcome", lambda ok: None)
+    seen = []
+    monkeypatch.setattr(R, "record_failure", lambda r: seen.append(r) or False)
+    A.get_klines("BTCUSDT", "1h", 2)
+    assert "proxy" in seen and "direct" not in seen

@@ -76,6 +76,8 @@ def _make_session(use_proxy: bool = True) -> _requests.Session:
     s.mount("http://",  adapter)
     if use_proxy and PROXIES:
         s.proxies.update(PROXIES)
+    if not use_proxy:
+        s.trust_env = False   # 直连会话不读 ALL_PROXY/HTTPS_PROXY 等环境变量，避免「直连」被环境里的代理悄悄接管
     s.headers["Accept-Encoding"] = "identity"  # 禁用压缩，避免urllib3 decompress持GIL阻塞事件循环
     return s
 
@@ -93,9 +95,18 @@ def _effective_route() -> str:
     return getattr(_ROUTE_TLS, "ov", None) or _rs.active_route()
 
 
+def _mark_route(route: str) -> None:
+    """记下本线程最近一次实际使用的通道：失败归因按它记，而不是按异常抛出时的全局通道（二者可能不同，如回退到另一条会话）。"""
+    _ROUTE_TLS.last = route
+
+
 def _signed_session():
     """签名接口用的 Session：配置了代理且当前通道为 direct → 直连 Session；其余（含未配代理）沿用 _SESSION。"""
-    return _SESSION_DIRECT if (_rs.has_proxy() and _effective_route() == "direct") else _SESSION
+    if _rs.has_proxy() and _effective_route() == "direct":
+        _mark_route("direct")
+        return _SESSION_DIRECT
+    _mark_route("proxy")
+    return _SESSION
 
 
 def _public_proxy_first() -> bool:
@@ -294,10 +305,12 @@ def _retry(fn, *args, **kwargs):
 def _retry_impl(fn, *args, **kw):
     """包装：保证本次调用结束后清除临时通道覆盖。"""
     _ROUTE_TLS.ov = None
+    _ROUTE_TLS.last = None
     try:
         return _retry_impl_inner(fn, *args, **kw)
     finally:
         _ROUTE_TLS.ov = None
+        _ROUTE_TLS.last = None
 
 
 def _retry_impl_inner(fn, *args, retries=None, suppress_codes=None, is_write: bool = False, raise_business: bool = False, **kwargs):
@@ -364,7 +377,7 @@ def _retry_impl_inner(fn, *args, retries=None, suppress_codes=None, is_write: bo
                 # 双通道：记一次当前通道失败（连续 N 次才切全局）；本次请求立即换另一条通道重试。
                 #   写请求只在「确定没发出」（连接阶段失败 / SOCKS 握手失败）时才换，避免重复下单。
                 if _rs.has_proxy():
-                    _cur = _effective_route()
+                    _cur = getattr(_ROUTE_TLS, "last", None) or _effective_route()   # 实际发请求的通道
                     _rs.record_failure(_cur)
                     _safe = (not is_write) or any(x in err_str for x in _NOT_SENT_MARKERS) or "SOCKS" in err_str
                     if _safe:
@@ -386,6 +399,7 @@ def _get(path, params=None):
     global _DIRECT_DISABLED
     _guard_418()
     if _public_proxy_first():
+        _mark_route("proxy")
         try:
             r = _SESSION.get(f"{BASE_URL}{path}", params=params, timeout=_api_timeout())
             _note_418(r)
@@ -396,22 +410,32 @@ def _get(path, params=None):
             if _check_418_cooldown() > 0:
                 raise
             _rs.record_failure("proxy")         # 连续失败达阈值才切换全局通道；本次请求立即退回直连
+            _mark_route("direct")               # 回退的异常算直连的
             r = _SESSION_DIRECT.get(f"{BASE_URL}{path}", params=params, timeout=_api_timeout())
             _note_418(r)
             r.raise_for_status()
             return r.json()
-    if not _DIRECT_DISABLED:
+    if not _DIRECT_DISABLED or _rs.has_proxy():
+        _mark_route("direct")
         try:
             r = _SESSION_DIRECT.get(f"{BASE_URL}{path}", params=params, timeout=_api_timeout())
             _note_418(r)
             r.raise_for_status()
+            if _rs.has_proxy():
+                _rs.record_success("direct")
             return r.json()
         except Exception as _e:
             if _check_418_cooldown() > 0:     # 418 不是「直连不可用」，别误切换到代理模式，直接向上抛
                 raise
-            # 直连失败（网络隔离环境），本进程内标记为不可用，后续直接走代理
-            logger.debug(f"[api] 直连失败，本进程内切换为全代理模式: {_e}")
-            _DIRECT_DISABLED = True
+            if _rs.has_proxy():
+                # 双通道模式：不再永久禁用直连（由路由选择器按连续失败/复测决定），本次请求回退代理
+                _rs.record_failure("direct")
+                logger.debug(f"[api] 直连失败，本次回退代理: {_e}")
+            else:
+                # 直连失败（网络隔离环境），本进程内标记为不可用，后续直接走代理
+                logger.debug(f"[api] 直连失败，本进程内切换为全代理模式: {_e}")
+                _DIRECT_DISABLED = True
+    _mark_route("proxy")
     r = _SESSION.get(f"{BASE_URL}{path}", params=params, timeout=_api_timeout())
     _note_418(r)
     r.raise_for_status()
@@ -504,7 +528,7 @@ def get_klines(symbol: str, interval: str, limit: int = 100) -> list:
     for attempt in range(max_retry + 1):
         # 本次尝试内：直连失败后再试代理，同样受剩余预算约束
         _pf = _public_proxy_first()
-        for use_direct in ((False, True) if _pf else ((True, False) if not _DIRECT_DISABLED else (False,))):
+        for use_direct in ((False, True) if _pf else ((True, False) if (not _DIRECT_DISABLED or _rs.has_proxy()) else (False,))):
             remaining = deadline - time.monotonic()
             if remaining <= 0.05:
                 break
@@ -521,8 +545,8 @@ def get_klines(symbol: str, interval: str, limit: int = 100) -> list:
                 if _check_418_cooldown() > 0:      # 本次就是 418：不切代理、不再重试
                     deadline = 0
                     break
-                if _pf and not use_direct:
-                    _rs.record_failure("proxy")
+                if _rs.has_proxy():
+                    _rs.record_failure("direct" if use_direct else "proxy")   # 按实际使用的会话归因
                 elif use_direct and not _pf:
                     logger.debug(f"[api] K线直连失败，本进程内切换为全代理模式: {e}")
                     _DIRECT_DISABLED = True
