@@ -28,11 +28,12 @@ def mask_proxy(url) -> str:
 
 
 class ProxyFallback:
-    def __init__(self, proxy, name: str = "ws", retry_sec: float = DEFAULT_RETRY_SEC, clock=time.monotonic):
+    def __init__(self, proxy, name: str = "ws", retry_sec: float = DEFAULT_RETRY_SEC, clock=time.monotonic, route_fn=None):
         self._proxy = (str(proxy).strip() or None) if proxy else None
         self._name = name
         self._retry = float(retry_sec)
         self._clock = clock
+        self._route_fn = route_fn      # 返回 "proxy"/"direct"：路由选择器主动切到直连时，不管握手是否成功都走直连
         self._direct_since = None      # 非 None = 当前降级为直连
         self._opened = False           # 自上次 current() 以来是否握手成功过
 
@@ -45,6 +46,12 @@ class ProxyFallback:
         self._opened = False
         if not self._proxy:
             return None
+        if self._route_fn is not None:
+            try:
+                if self._route_fn() == "direct":
+                    return None
+            except Exception:
+                pass
         if self._direct_since is not None:
             if self._clock() - self._direct_since < self._retry:
                 return None

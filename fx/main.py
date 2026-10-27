@@ -1297,6 +1297,11 @@ async def main() -> None:
     _cfg_req.require_env()   # [fix #39] 必填项缺失直接报错退出
     # ── 启动分批 P1（立即）：API key 校验 + 持仓模式 ────────────────────────
     #   P2/P3/P4 见下文；批次间延迟见 config.STARTUP_BATCH_DELAY_P2/P3/P4
+    try:   # 双通道探测放在 P1 最前：之后的 get_account 等请求就用选出的通道；探测失败只告警，不阻断启动
+        from shared import route_selector as _route
+        await _route.probe_routes(startup=True)
+    except Exception as _re:
+        logger.warning(f"[main] 通道探测异常（忽略，沿用默认通道）: {_re}")
     await _startup_p1_validate_account()
     await _verify_hedge_mode_or_exit()
     # hub 先启动（建 WS 连接），但推迟首次 K 线订阅（订阅即触发历史 K 线 REST 加载），P4 再放开
@@ -1442,6 +1447,15 @@ async def main() -> None:
         asyncio.create_task(_adjust_sl_tp_loop_static(),                       name="adjust_sl_tp"),
         asyncio.create_task(_loop_patrol(300, 30),                             name="patrol"),
     ]
+
+    # 通道复测（仅配置了代理时）：独立 task，不放进 tasks（避免它异常结束触发 WATCHDOG 整体停机）
+    _route_task = None
+    try:
+        from shared import route_selector as _route2
+        if _route2.has_proxy():
+            _route_task = asyncio.create_task(_route2.start_route_monitor(), name="route_monitor")
+    except Exception as _rte:
+        logger.warning(f"[main] 通道复测任务启动失败（忽略）: {_rte}")
 
     # ── 启动分批 P3（P2 之后等待 STARTUP_BATCH_DELAY_P3）：OI 缓存 + 系统性风险 ──
     await _startup_wait("P3", "STARTUP_BATCH_DELAY_P3", 8)
@@ -1600,6 +1614,8 @@ async def main() -> None:
     _bk.start()
 
     async def _stop_all():
+        if _route_task is not None:
+            _route_task.cancel()
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

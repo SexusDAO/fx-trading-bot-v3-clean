@@ -47,9 +47,10 @@ except Exception:
     _WS_PROXY_URL = None
 
 from shared.ws_proxy import ProxyFallback
-_FB_USER = ProxyFallback(_WS_PROXY_URL, name="ws-userData")     # 握手失败 → 降级直连，一段时间后再试代理
-_FB_MARK = ProxyFallback(_WS_PROXY_URL, name="ws-markPrice")
-_FB_FORCE = ProxyFallback(_WS_PROXY_URL, name="ws-forceOrder")
+from shared import route_selector as _rs
+_FB_USER = ProxyFallback(_WS_PROXY_URL, name="ws-userData", route_fn=_rs.ws_route)     # 握手失败 → 降级直连，一段时间后再试代理
+_FB_MARK = ProxyFallback(_WS_PROXY_URL, name="ws-markPrice", route_fn=_rs.ws_route)
+_FB_FORCE = ProxyFallback(_WS_PROXY_URL, name="ws-forceOrder", route_fn=_rs.ws_route)
 
 import config
 from shared import binance_api

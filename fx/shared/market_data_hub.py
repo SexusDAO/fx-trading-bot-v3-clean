@@ -25,6 +25,7 @@ from typing import Callable, Optional
 
 import config
 from shared.ws_proxy import ProxyFallback
+from shared import route_selector as _rs
 
 logger = logging.getLogger("market_data_hub")
 
@@ -610,7 +611,7 @@ class MarketDataHub:
         import websockets
         delay = RECONNECT_BASE
         first = True
-        _fb = ProxyFallback(_PROXY, name="hub")   # 代理握手失败 → 降级直连，一段时间后再试代理
+        _fb = ProxyFallback(_PROXY, name="hub", route_fn=_rs.ws_route)   # 代理握手失败 → 降级直连，一段时间后再试代理
         while not self._stopping:
             if not first:
                 self.reconnect_count += 1
@@ -651,7 +652,7 @@ class MarketDataHub:
         import websockets
         delay = RECONNECT_BASE
         first = True
-        _fb = ProxyFallback(_PROXY, name=f"hub#{idx}")
+        _fb = ProxyFallback(_PROXY, name=f"hub#{idx}", route_fn=_rs.ws_route)
         while not self._stopping:
             if not first:
                 self.market_reconnect_count += 1

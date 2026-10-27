@@ -83,6 +83,26 @@ _SESSION        = _make_session(use_proxy=True)   # 签名接口（代理）
 _SESSION_DIRECT = _make_session(use_proxy=False)  # 公开行情（直连）
 _PROXY_HEALTHY  = True   # 代理健康标志；False 时签名接口也降级直连（告警）
 
+from shared import route_selector as _rs   # 双通道自适应路由（代理/直连）
+_ROUTE_TLS = threading.local()             # 本次调用的临时通道覆盖（失败后立即换另一条重试，不改全局选择）
+
+
+def _effective_route() -> str:
+    if not _rs.has_proxy():
+        return "direct"
+    return getattr(_ROUTE_TLS, "ov", None) or _rs.active_route()
+
+
+def _signed_session():
+    """签名接口用的 Session：配置了代理且当前通道为 direct → 直连 Session；其余（含未配代理）沿用 _SESSION。"""
+    return _SESSION_DIRECT if (_rs.has_proxy() and _effective_route() == "direct") else _SESSION
+
+
+def _public_proxy_first() -> bool:
+    """公开行情是否优先走代理：仅当配置了代理且当前通道为 proxy（否则保持「直连优先」的旧行为）。"""
+    return _rs.has_proxy() and _effective_route() == "proxy"
+
+
 _SESSION_LOCK        = threading.Lock()   # [v3.89 #86] 保护 Session 替换过程，多线程同时 reset 只有一个在换
 _SESSION_RESET_COUNT = 0                  # [v3.89 #86] 累计重建次数（排查连接池反复重建用）
 
@@ -271,7 +291,16 @@ def _retry(fn, *args, **kwargs):
             pass
 
 
-def _retry_impl(fn, *args, retries=None, suppress_codes=None, is_write: bool = False, raise_business: bool = False, **kwargs):
+def _retry_impl(fn, *args, **kw):
+    """包装：保证本次调用结束后清除临时通道覆盖。"""
+    _ROUTE_TLS.ov = None
+    try:
+        return _retry_impl_inner(fn, *args, **kw)
+    finally:
+        _ROUTE_TLS.ov = None
+
+
+def _retry_impl_inner(fn, *args, retries=None, suppress_codes=None, is_write: bool = False, raise_business: bool = False, **kwargs):
     """
     suppress_codes: 包含这些 Binance 错误码时不打 ERROR，直接返回 None
     连接类错误（SOCKS/Timeout）自动重建 Session 后重试，最多降级一次。
@@ -332,6 +361,15 @@ def _retry_impl(fn, *args, retries=None, suppress_codes=None, is_write: bool = F
                 logger.warning(f"[api] 代理连接异常，重建 Session 后重试: {err_str[:120]}")
                 reset_session()
                 _PROXY_HEALTHY = False
+                # 双通道：记一次当前通道失败（连续 N 次才切全局）；本次请求立即换另一条通道重试。
+                #   写请求只在「确定没发出」（连接阶段失败 / SOCKS 握手失败）时才换，避免重复下单。
+                if _rs.has_proxy():
+                    _cur = _effective_route()
+                    _rs.record_failure(_cur)
+                    _safe = (not is_write) or any(x in err_str for x in _NOT_SENT_MARKERS) or "SOCKS" in err_str
+                    if _safe:
+                        _ROUTE_TLS.ov = _rs.other(_cur)
+                        logger.warning(f"[route] 本次请求 {_cur} 失败，立即改用 {_ROUTE_TLS.ov} 重试")
                 time.sleep(0.5)
                 continue
             logger.warning(f"[api] _call 第{attempt+1}次失败: {e}")
@@ -347,6 +385,21 @@ def _get(path, params=None):
     """公开行情接口，优先直连，直连失败后本进程内全部走代理（节省代理配额+避免重复双发）。"""
     global _DIRECT_DISABLED
     _guard_418()
+    if _public_proxy_first():
+        try:
+            r = _SESSION.get(f"{BASE_URL}{path}", params=params, timeout=_api_timeout())
+            _note_418(r)
+            r.raise_for_status()
+            _rs.record_success("proxy")
+            return r.json()
+        except Exception:
+            if _check_418_cooldown() > 0:
+                raise
+            _rs.record_failure("proxy")         # 连续失败达阈值才切换全局通道；本次请求立即退回直连
+            r = _SESSION_DIRECT.get(f"{BASE_URL}{path}", params=params, timeout=_api_timeout())
+            _note_418(r)
+            r.raise_for_status()
+            return r.json()
     if not _DIRECT_DISABLED:
         try:
             r = _SESSION_DIRECT.get(f"{BASE_URL}{path}", params=params, timeout=_api_timeout())
@@ -373,7 +426,7 @@ def _signed_post(path, params: dict):
     clean["signature"] = hmac.new(API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
     headers = {"X-MBX-APIKEY": API_KEY}
     _guard_418()
-    r = _SESSION.post(f"{BASE_URL}{path}", params=clean, headers=headers,
+    r = _signed_session().post(f"{BASE_URL}{path}", params=clean, headers=headers,
                       timeout=_order_timeout() if path in _ORDER_PATHS else _api_timeout())
     _note_418(r)
     if not r.ok:
@@ -397,7 +450,7 @@ def _signed_delete(path, params: dict):
     clean["signature"] = hmac.new(API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
     headers = {"X-MBX-APIKEY": API_KEY}
     _guard_418()
-    r = _SESSION.delete(f"{BASE_URL}{path}", params=clean, headers=headers, timeout=_api_timeout())
+    r = _signed_session().delete(f"{BASE_URL}{path}", params=clean, headers=headers, timeout=_api_timeout())
     _note_418(r)
     r.raise_for_status()
     return r.json()
@@ -411,7 +464,7 @@ def _signed_get(path, params: dict):
     clean["signature"] = hmac.new(API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
     headers = {"X-MBX-APIKEY": API_KEY}
     _guard_418()
-    r = _SESSION.get(f"{BASE_URL}{path}", params=clean, headers=headers, timeout=_api_timeout())
+    r = _signed_session().get(f"{BASE_URL}{path}", params=clean, headers=headers, timeout=_api_timeout())
     _note_418(r)
     r.raise_for_status()
     return r.json()
@@ -450,7 +503,8 @@ def get_klines(symbol: str, interval: str, limit: int = 100) -> list:
     last_err = None
     for attempt in range(max_retry + 1):
         # 本次尝试内：直连失败后再试代理，同样受剩余预算约束
-        for use_direct in ((True, False) if not _DIRECT_DISABLED else (False,)):
+        _pf = _public_proxy_first()
+        for use_direct in ((False, True) if _pf else ((True, False) if not _DIRECT_DISABLED else (False,))):
             remaining = deadline - time.monotonic()
             if remaining <= 0.05:
                 break
@@ -467,7 +521,9 @@ def get_klines(symbol: str, interval: str, limit: int = 100) -> list:
                 if _check_418_cooldown() > 0:      # 本次就是 418：不切代理、不再重试
                     deadline = 0
                     break
-                if use_direct:
+                if _pf and not use_direct:
+                    _rs.record_failure("proxy")
+                elif use_direct and not _pf:
                     logger.debug(f"[api] K线直连失败，本进程内切换为全代理模式: {e}")
                     _DIRECT_DISABLED = True
         if attempt < max_retry and deadline - time.monotonic() > _KLINE_RETRY_SLEEP + 0.05:
@@ -1211,7 +1267,7 @@ def keepalive_listen_key(listen_key: str) -> bool:
     import hmac, hashlib, urllib.parse
     headers = {"X-MBX-APIKEY": API_KEY}
     try:
-        r = _SESSION.put(f"{BASE_URL}/fapi/v1/listenKey",
+        r = _signed_session().put(f"{BASE_URL}/fapi/v1/listenKey",
                          params={"listenKey": listen_key},
                          headers=headers, timeout=_api_timeout())
         r.raise_for_status()
