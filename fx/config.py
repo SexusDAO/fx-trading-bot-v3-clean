@@ -334,6 +334,7 @@ STARTUP_BATCH_DELAY_P3 = 8    # P2 → P3 等待秒数
 STARTUP_BATCH_DELAY_P4 = 12   # P3 → P4 等待秒数
 HUB_NO_MSG_TIMEOUT = 180  # 120→180：给历史加载留余量，减少阻塞引发的假断线； WebSocket 无消息超时（秒），过短会因GIL饿死误触发重连
 KLINE_FETCH_CONCURRENCY = 2  # hub历史K线REST拉取并发上限
+API_418_COOLDOWN_SEC = 60  # 收到 Binance 418 后全局暂停所有 REST 请求的秒数
 HUB_KLINE_FETCH_TIMEOUT = 8.0  # hub 单次历史K线拉取总时限（秒），超时按空结果处理、30s 后重试
 LIQ_PREFETCH_MAX_WORKERS = 2   # 预热线程数；8 线程实测加剧 GIL 竞争，事件循环反复阻塞 2~4s，回退到 4
 LIQ_PREFETCH_SLEEP_SEC   = 0.05 # 每个标的预热后的节流间隔（秒），50ms 防止 API 429 限速

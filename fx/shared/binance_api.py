@@ -125,6 +125,56 @@ class BinanceAPIError(Exception):
         super().__init__(f"BinanceError code={code} msg={msg} http={http}")
 
 
+# ── 418 全局冷却：收到 Binance 418（IP 临时封禁）后，所有 REST 入口在冷却期内直接拒绝，切断「WS 断线 → REST 补偿风暴 → 418 → 更多重试」的负反馈 ──
+_418_COOLDOWN_UNTIL = 0.0
+_418_LOCK = threading.Lock()
+
+
+def _418_cooldown_sec() -> float:
+    try:
+        import config as _c
+        return float(getattr(_c, "API_418_COOLDOWN_SEC", 60))
+    except Exception:
+        return 60.0
+
+
+def _set_418_cooldown() -> None:
+    """收到 418：设置全局冷却截止时间（只延长不缩短），冷却期内所有 REST 请求不再发出。"""
+    global _418_COOLDOWN_UNTIL
+    sec = _418_cooldown_sec()
+    with _418_LOCK:
+        new_until = time.time() + sec
+        first = _418_COOLDOWN_UNTIL <= time.time()
+        if new_until > _418_COOLDOWN_UNTIL:
+            _418_COOLDOWN_UNTIL = new_until
+    if first:   # 只在进入冷却时打一条，避免冷却期内刷屏
+        logger.warning(f"[api] 触发418全局冷却，{sec:g}s内暂停所有REST请求")
+
+
+def _check_418_cooldown() -> float:
+    """返回冷却剩余秒数；不在冷却期返回 0。"""
+    with _418_LOCK:
+        remaining = _418_COOLDOWN_UNTIL - time.time()
+    return remaining if remaining > 0 else 0.0
+
+
+def _guard_418() -> None:
+    """请求发出前调用：冷却期内直接抛 BinanceAPIError(http=418)，不碰网络。
+    _retry_impl 对 http=418 的错误本来就「不重试」；code 用 -1003（限频类，非业务拒绝），调用方按失败处理。"""
+    rem = _check_418_cooldown()
+    if rem > 0:
+        raise BinanceAPIError(-1003, f"418全局冷却中，剩余{rem:.0f}s，请求未发出", 418)
+
+
+def _note_418(r) -> None:
+    """响应到手后调用：状态码 418 → 进入全局冷却。"""
+    try:
+        if getattr(r, "status_code", None) == 418:
+            _set_418_cooldown()
+    except Exception:
+        pass
+
+
 def _is_business_error(e: Exception) -> bool:
     """业务拒绝（参数/余额/价格/持仓状态等，重试无意义）：Binance 负数错误码，
     但 -1000/-1001/-1003/-1006/-1007/-1008/-1015/-1021 属服务端繁忙/限频/时间戳类，不算业务拒绝。"""
@@ -296,16 +346,21 @@ _DIRECT_DISABLED = False   # 直连一旦失败，本进程内全部走代理，
 def _get(path, params=None):
     """公开行情接口，优先直连，直连失败后本进程内全部走代理（节省代理配额+避免重复双发）。"""
     global _DIRECT_DISABLED
+    _guard_418()
     if not _DIRECT_DISABLED:
         try:
             r = _SESSION_DIRECT.get(f"{BASE_URL}{path}", params=params, timeout=_api_timeout())
+            _note_418(r)
             r.raise_for_status()
             return r.json()
         except Exception as _e:
+            if _check_418_cooldown() > 0:     # 418 不是「直连不可用」，别误切换到代理模式，直接向上抛
+                raise
             # 直连失败（网络隔离环境），本进程内标记为不可用，后续直接走代理
             logger.debug(f"[api] 直连失败，本进程内切换为全代理模式: {_e}")
             _DIRECT_DISABLED = True
     r = _SESSION.get(f"{BASE_URL}{path}", params=params, timeout=_api_timeout())
+    _note_418(r)
     r.raise_for_status()
     return r.json()
 
@@ -317,8 +372,10 @@ def _signed_post(path, params: dict):
     qs = urllib.parse.urlencode(clean)
     clean["signature"] = hmac.new(API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
     headers = {"X-MBX-APIKEY": API_KEY}
+    _guard_418()
     r = _SESSION.post(f"{BASE_URL}{path}", params=clean, headers=headers,
                       timeout=_order_timeout() if path in _ORDER_PATHS else _api_timeout())
+    _note_418(r)
     if not r.ok:
         try:
             body = r.json()
@@ -339,7 +396,9 @@ def _signed_delete(path, params: dict):
     qs = urllib.parse.urlencode(clean)
     clean["signature"] = hmac.new(API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
     headers = {"X-MBX-APIKEY": API_KEY}
+    _guard_418()
     r = _SESSION.delete(f"{BASE_URL}{path}", params=clean, headers=headers, timeout=_api_timeout())
+    _note_418(r)
     r.raise_for_status()
     return r.json()
 
@@ -351,7 +410,9 @@ def _signed_get(path, params: dict):
     qs = urllib.parse.urlencode(clean)
     clean["signature"] = hmac.new(API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
     headers = {"X-MBX-APIKEY": API_KEY}
+    _guard_418()
     r = _SESSION.get(f"{BASE_URL}{path}", params=clean, headers=headers, timeout=_api_timeout())
+    _note_418(r)
     r.raise_for_status()
     return r.json()
 
@@ -378,6 +439,10 @@ def get_klines(symbol: str, interval: str, limit: int = 100) -> list:
     其他接口仍走 _retry / _get，不受影响。
     """
     global _DIRECT_DISABLED
+    _rem418 = _check_418_cooldown()
+    if _rem418 > 0:      # 418 冷却期：不发请求，直接按失败返回（调用方本来就处理空列表）
+        logger.debug(f"[api] get_klines {symbol} {interval} 跳过：418全局冷却剩余{_rem418:.0f}s")
+        return []
     (t_conn, t_read), max_retry, total = _kline_cfg()
     deadline = time.monotonic() + total
     params = {"symbol": symbol, "interval": interval, "limit": limit}
@@ -392,12 +457,16 @@ def get_klines(symbol: str, interval: str, limit: int = 100) -> list:
             tmo = (min(t_conn, remaining), min(t_read, remaining))
             try:
                 r = (_SESSION_DIRECT if use_direct else _SESSION).get(url, params=params, timeout=tmo)
+                _note_418(r)
                 r.raise_for_status()
                 d = r.json()
                 _record_api_outcome(True)
                 return d if isinstance(d, list) else []
             except Exception as e:
                 last_err = e
+                if _check_418_cooldown() > 0:      # 本次就是 418：不切代理、不再重试
+                    deadline = 0
+                    break
                 if use_direct:
                     logger.debug(f"[api] K线直连失败，本进程内切换为全代理模式: {e}")
                     _DIRECT_DISABLED = True
