@@ -157,9 +157,18 @@ def test_lite_adds_orphan_and_guards(lite):
 
 
 def test_lite_cleans_local_missing_on_exchange(lite):
-    lite["positions"] = [{"symbol": "BBBUSDT", "direction": "SHORT", "status": "open", "pos_id": "p1"}]
+    # 新规则：非冷却期、连续 2 次查不到才清理。这里模拟「上一轮已记 1 次查不到」，本轮是第 2 次。
+    lite["positions"] = [{"symbol": "BBBUSDT", "direction": "SHORT", "status": "open", "pos_id": "p1",
+                          "open_time": 1700000000000, "_exchange_missing_count": 1}]
     asyncio.run(M._startup_sync_lite())
     assert lite["removed"] == ["p1"]
+
+
+def test_lite_first_miss_does_not_clean(lite):
+    lite["positions"] = [{"symbol": "BBBUSDT", "direction": "SHORT", "status": "open", "pos_id": "p1",
+                          "open_time": 1700000000000}]
+    asyncio.run(M._startup_sync_lite())
+    assert lite["removed"] == []
 
 
 def test_lite_skips_cleanup_when_exchange_query_fails(lite, monkeypatch):

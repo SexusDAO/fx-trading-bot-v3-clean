@@ -778,6 +778,24 @@ async def _check_and_reattach_guards(local: dict, rp: dict, algo_orders=None, op
     return out
 
 
+_SYNC_LITE_COOLDOWN_MS = 5 * 60 * 1000     # 开仓冷却期：刚开/刚成交不足 5 分钟的仓位，交易所查不到也不删
+_SYNC_LITE_MISSING_LIMIT = 2               # 连续多少次 sync_lite 都查不到才清理本地记录
+
+
+def _local_age_ms(ps: dict, now_ms: int):
+    """本地记录自开仓/成交以来的毫秒数；取 open_time 与 fill_time（秒或毫秒）里最新的一个。无法判断返回 None。"""
+    ts = []
+    for k in ("open_time", "fill_time"):
+        try:
+            v = float(ps.get(k) or 0)
+        except (TypeError, ValueError):
+            continue
+        if v <= 0:
+            continue
+        ts.append(v * 1000 if v < 1e12 else v)      # fill_time 部分路径写的是秒
+    return (now_ms - max(ts)) if ts else None
+
+
 async def _startup_sync_lite() -> None:
     """轻量对齐（WS 重连后 / 每 30 分钟）：不补挂 TP、不推送卡片，只做两件事：
       1. 交易所有、本地无 → 孤儿建档 + 补挂保护单；超出当前市场模式持仓上限的，按开仓时间从新到旧只认领能填满上限的，
@@ -810,22 +828,47 @@ async def _startup_sync_lite() -> None:
         positions = [p for p in get_all_positions() if isinstance(p, dict)]
         live_status = ("open", "pending_guard", "patching")
 
-        # 2) 交易所无、本地有 → 清理
+        # 2) 交易所无、本地有 → 清理（保守：冷却期内不动；非冷却期需连续 2 次都查不到才删；查询失败上面已整轮跳过）
+        from shared.state import update_position as _upd
+        _now_ms0 = int(time.time() * 1000)
         for ps in positions:
             if ps.get("status") not in live_status:
                 continue
             key = (ps.get("symbol"), str(ps.get("direction", "")).upper())
-            if key not in real:
-                pid = ps.get("pos_id", ps.get("symbol"))
+            pid = ps.get("pos_id", ps.get("symbol"))
+            if key in real:
+                if ps.get("_exchange_missing_count"):      # 又查到了：计数清零
+                    try:
+                        _upd(pid, {"_exchange_missing_count": 0})
+                    except Exception:
+                        pass
+                continue
+            _age = _local_age_ms(ps, _now_ms0)
+            if _age is not None and _age < _SYNC_LITE_COOLDOWN_MS:
+                logger.info(f"[sync_lite] {key[0]}({key[1]}) 开仓仅 {_age / 1000:.0f}s（冷却期内），交易所暂未查到，"
+                            f"不清理不建孤儿 pos_id={pid}")
+                continue
+            try:
+                _cnt = int(ps.get("_exchange_missing_count") or 0) + 1
+            except (TypeError, ValueError):
+                _cnt = 1
+            if _cnt < _SYNC_LITE_MISSING_LIMIT:
                 try:
-                    from shared.state import update_position as _upd
-                    _upd(pid, {"status": "closed", "close_reason": "sync_lite_missing_on_exchange"})
+                    _upd(pid, {"_exchange_missing_count": _cnt})
                 except Exception:
                     pass
-                from position_manager import _remove_position_checked
-                await asyncio.to_thread(_remove_position_checked, pid, ps.get("symbol", ""))
-                removed += 1
-                logger.warning(f"[sync_lite] 交易所已无持仓，清理本地记录: {ps.get('symbol')}({key[1]})")
+                logger.warning(f"[sync_lite] {key[0]}({key[1]}) 交易所未查到持仓（第{_cnt}/{_SYNC_LITE_MISSING_LIMIT}次），"
+                               f"暂不清理 pos_id={pid}")
+                continue
+            try:
+                _upd(pid, {"status": "closed", "close_reason": "sync_lite_missing_on_exchange"})
+            except Exception:
+                pass
+            from position_manager import _remove_position_checked
+            await asyncio.to_thread(_remove_position_checked, pid, ps.get("symbol", ""))
+            removed += 1
+            logger.warning(f"[sync_lite] 交易所连续{_cnt}次查不到持仓，清理本地记录: {ps.get('symbol')}({key[1]}) "
+                           f"pos_id={pid} 原因=sync_lite_missing_on_exchange")
 
         # 3) 交易所有、本地无 → 孤儿（先按配额筛选）
         orphans = [(k, rp) for k, rp in real.items() if _match_local_position(positions, k[0], k[1]) is None]
