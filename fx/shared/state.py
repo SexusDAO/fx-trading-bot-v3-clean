@@ -147,7 +147,29 @@ def _load_pos() -> list:
     return _read_json(_POS_FILE, [])
 
 
+def _forensic_stack() -> str:
+    """[state-forensic] 取证：当前调用栈最近 6 帧（只用于日志，异常一律吞掉）。"""
+    try:
+        import traceback
+        return "".join(traceback.format_stack()[-6:])
+    except Exception:
+        return "?"
+
+
 def _save_pos(data: list) -> None:
+    # [state-forensic] 只加日志：写入前对比文件里现有 pos_id，发现即将消失的就打调用栈。不改变写入行为。
+    try:
+        try:
+            _before_raw = json.loads(_POS_FILE.read_text(encoding="utf-8")) if _POS_FILE.exists() else []
+        except Exception:
+            _before_raw = []
+        _before = {p.get("pos_id") for p in _before_raw if isinstance(p, dict)}
+        _after = {p.get("pos_id") for p in data if isinstance(p, dict)}
+        _lost = _before - _after
+        if _lost:
+            logger.warning(f"[state-forensic] 写入后以下pos_id将消失: {_lost} 调用栈:\n{_forensic_stack()}")
+    except Exception:
+        pass
     _write_json(_POS_FILE, data)
 
 
@@ -218,6 +240,13 @@ def update_position(pos_id: str, updates: dict) -> bool:
         data = _load_pos()
         for i, p in enumerate(data):
             if p.get("pos_id") == pos_id:
+                try:   # [state-forensic] 只加日志：status 非 closed → closed 时打调用栈
+                    _old_st = p.get("status")
+                    if updates.get("status") == "closed" and _old_st != "closed":
+                        logger.warning(f"[state-forensic] {pos_id} {p.get('symbol')} status {_old_st}→closed "
+                                       f"close_reason={updates.get('close_reason')} 调用栈:\n{_forensic_stack()}")
+                except Exception:
+                    pass
                 data[i].update(updates)
                 _save_pos(data)
                 return True
@@ -242,6 +271,10 @@ def update_pending_order(symbol: str, updates: dict) -> bool:
 
 def remove_position(pos_id: str) -> bool:
     """按 pos_id 删除记录，无论 status 是什么（open/pending/patching 均可删除）。"""
+    try:   # 只加日志；取证代码出错绝不影响删除
+        logger.warning(f"[state-forensic] remove_position pos_id={pos_id} 调用栈:\n{_forensic_stack()}")
+    except Exception:
+        pass
     if _POS_STATE_CORRUPTED:  # [v3.89 #11b]
         logger.error("[state] 持仓文件曾损坏，拒绝写入: remove_position")
         return False

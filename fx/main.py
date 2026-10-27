@@ -941,6 +941,15 @@ async def _startup_sync_lite() -> None:
                 except Exception as _ce:
                     logger.warning(f"[sync_lite] {sym}({pos_side}) 超出上限平仓失败（保留由人工处理）: {_ce}")
                 continue
+            try:   # [sync_lite-forensic] 只加日志：建孤儿前打印本地该标的全部记录（含所有 status）
+                _ex = [p for p in get_all_positions() if isinstance(p, dict) and p.get("symbol") == sym]
+                logger.warning(
+                    f"[sync_lite-forensic] 准备建孤儿 {sym}({pos_side})，"
+                    f"当前本地该标的全部记录(含所有status): "
+                    f"{[{k: p.get(k) for k in ('pos_id', 'status', 'mode', 'source')} for p in _ex]}"
+                )
+            except Exception:
+                pass
             _now_ms = int(time.time() * 1000)
             ps, _notes = _build_orphan_record(sym, pos_side, rp, algo_orders, open_orders, _now_ms)
             ps["source"] = "orphan_recovered_sync_lite"
