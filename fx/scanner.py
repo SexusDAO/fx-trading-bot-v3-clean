@@ -3199,7 +3199,17 @@ def _filter_and_register_signals(
     # ── 市场环境快照：注入所有信号（用于 trade_log 标注）─────────────────────
     try:
         # [fix] 复用本轮批量拉好的 _mark_price_map（资金费率均值不需要最新一刻的数据）；批量失败导致 map 为空时才再请求一次
-        _all_mp = list(_mark_price_map.values()) or (api.get_all_mark_prices() or [])
+        _all_mp = list(_mark_price_map.values())
+        if not _all_mp:
+            if source == "trigger":
+                # 触发器派发路径：只读 hub 内存快照，绝不发全量 REST（3-9s 慢请求）
+                try:
+                    from shared import market_data_hub as _hub_fr
+                    _all_mp = list(_hub_fr.get_all_mark_prices().values()) if _hub_fr.is_ready() else []
+                except Exception:
+                    _all_mp = []
+            else:
+                _all_mp = api.get_all_mark_prices() or []
         _avg_fr = (sum(abs(float(x.get("lastFundingRate", 0))) for x in _all_mp) / len(_all_mp)
                    if _all_mp else 0.0)
     except Exception:

@@ -37,8 +37,12 @@ def test_map_init_is_top_level_in_run_scan_and_before_submit():
 
 
 def test_avg_funding_snapshot_reuses_map():
-    assert "list(_mark_price_map.values()) or (api.get_all_mark_prices() or [])" in SRC
-    assert SRC.count("_all_mp = api.get_all_mark_prices() or []") == 0
+    # 仍然优先复用本轮批量 map；map 为空时：触发器来源只读 hub 内存，其余来源才再请求一次全量 REST
+    assert "_all_mp = list(_mark_price_map.values())" in SRC
+    assert 'if source == "trigger":' in SRC
+    i = SRC.index("_all_mp = list(_mark_price_map.values())")
+    seg = SRC[i:i + 900]
+    assert seg.index('source == "trigger"') < seg.index("api.get_all_mark_prices()")   # REST 只在非触发器分支
 
 
 def test_registration_uses_map_only_when_fresh():

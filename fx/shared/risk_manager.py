@@ -967,6 +967,18 @@ def _warn_peg_unavailable(obs: dict) -> None:
 
 
 
+def _funding_is_adverse(direction: str, funding_rate: float, thresh: float = 0.010) -> bool:
+    """费率对持仓方向不利才视为风险（Operating: 正费率=多头付空头，负费率=空头付多头）：
+    LONG + 正费率 ≥ 阈值：多头付钱 → 不利；SHORT + 负费率 ≤ -阈值：空头付钱 → 不利；
+    反向（收钱方）有利，不告警。"""
+    d = str(direction or "").upper()
+    if d == "LONG" and funding_rate >= thresh:
+        return True
+    if d == "SHORT" and funding_rate <= -thresh:
+        return True
+    return False
+
+
 def check_systemic_risk() -> tuple[bool, str]:
     """
     检查系统性风险事件。返回 (ok, reason)。
@@ -1013,11 +1025,13 @@ def check_systemic_risk() -> tuple[bool, str]:
                 continue
             try:
                 mp = _api2.get_mark_price(pos["symbol"])
-                fr = abs(float(mp.get("lastFundingRate", 0) or 0))
-                if fr > SYSTEMIC_FUNDING_EXTREME_THRESH:
+                fr = float(mp.get("lastFundingRate", 0) or 0)
+                _dir = str(pos.get("direction", "")).upper()
+                if _funding_is_adverse(_dir, fr, SYSTEMIC_FUNDING_EXTREME_THRESH):
+                    _payer = "多头付费" if _dir == "LONG" else "空头付费"
                     return False, (
-                        f"{pos['symbol']} 资金费率极端 {fr*100:.2f}%（非套利仓位），"
-                        f"疑似交易所异常，暂停新开仓"
+                        f"{pos['symbol']} {_dir} 资金费率不利 {fr*100:+.2f}%（{_payer}超阈值），"
+                        f"暂停新开仓"
                     )
             except Exception as _fe:
                 # [fix #29] 单仓位资金费率查询失败 → 拒绝开仓

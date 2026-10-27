@@ -964,7 +964,14 @@ class TriggerDetector:
             return {"analysis_result": "error", "error": "no_hub"}
         kl = [hub.get_klines(symbol, iv, 100) for iv in ("15m", "1h", "4h")]
         tk = hub.get_ticker(symbol)
-        mp = hub.get_mark_price(symbol)
+        mp = hub.get_mark_price(symbol)                 # 内存读取；缺失或 age>5s 返回 None
+        if mp is None:
+            # 仅单标的 REST 兜底（不调用全量 get_all_mark_prices：全量接口实测 3-9s，会拖慢整条派发）
+            try:
+                from shared import binance_api as _api_mp
+                mp = _api_mp.get_mark_price(symbol) or None
+            except Exception:
+                mp = None
         if allow_rest and (not all(kl) or not tk):
             from shared import binance_api as _api
             for i, iv in enumerate(("15m", "1h", "4h")):

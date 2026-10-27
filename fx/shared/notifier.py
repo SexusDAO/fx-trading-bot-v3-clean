@@ -173,13 +173,31 @@ def _socket_send(text: str) -> Optional[str]:
 # 底层：Popen 兜底（最后手段，无 message_id）
 # =============================================================================
 
+_openclaw_missing_warned = False
+
+
+def _openclaw_bin() -> Optional[str]:
+    """openclaw CLI 路径：环境变量 OPENCLAW_BIN 优先，其次 PATH；找不到返回 None。"""
+    import shutil
+    cand = os.environ.get("OPENCLAW_BIN") or "openclaw"
+    return shutil.which(cand)
+
+
 def _popen_send(text: str) -> None:
-    """Fire-and-forget，不等待，不阻塞，拿不到 message_id。"""
+    """Fire-and-forget，不等待，不阻塞，拿不到 message_id。
+    openclaw 不存在时静默跳过，仅首次记录 warning（避免每条通知刷屏），绝不抛异常。"""
+    global _openclaw_missing_warned
     try:
+        _bin = _openclaw_bin()
+        if _bin is None:
+            if not _openclaw_missing_warned:
+                _openclaw_missing_warned = True
+                logger.warning("[notifier] 未找到 openclaw 命令（可用 OPENCLAW_BIN 指定路径），Popen 兜底推送已跳过")
+            return
         env = dict(os.environ)
         env.pop("OPENCLAW_SHELL", None)
         subprocess.Popen(
-            ["openclaw", "message", "send",
+            [_bin, "message", "send",
              "--channel", "jarvis",
              "--target",  _JARVIS_TARGET,
              "--message", text],
