@@ -3751,6 +3751,41 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                     _tp2_exp = float(pos.get("tp2_price") or 0) > 0 and not pos.get("tp2_filled")
                 except (TypeError, ValueError):
                     _tp1_exp = _tp2_exp = False
+                # [fix] 本地期望 TP2 但交易所只剩 1 个 TP（TP2 丢失）：不因「已有 1 个 TP」跳过，强制补挂 TP2。
+                #   只在按价格匹配成功（_by_price）且 tp1 已匹配到单时补挂，避免把「匹配不上」误判为丢失而重复挂。
+                _tp2_retry_failed = False
+                if _tp2_exp and not tp2_id and _by_price and tp1_id:
+                    try:
+                        _prec2 = (await asyncio.to_thread(_get_precision, symbol))
+                        _tp2_px = round(float(pos.get("tp2_price")) / _prec2["tick"]) * _prec2["tick"]
+                        _tp2_q = float(pos.get("tp2_quantity") or 0)
+                        # 数量不得超过「实际持仓 − 已挂 TP1 数量」，防止 reduceOnly 类拒单/超量
+                        _tp1_q = float((_tp1_o or {}).get("origQty") or 0)
+                        if _tp1_q > 0 and fill_qty > _tp1_q:
+                            _tp2_q = min(_tp2_q, fill_qty - _tp1_q) if _tp2_q > 0 else (fill_qty - _tp1_q)
+                        _tp2_q = _round_qty(_tp2_q, _prec2["step"])
+                        if _tp2_q <= 0:
+                            raise ValueError(f"TP2 数量为 0（tp2_quantity={pos.get('tp2_quantity')} fill_qty={fill_qty}）")
+                        _resp2 = await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: _api.place_order(
+                                symbol=symbol,
+                                side="SELL" if direction == "LONG" else "BUY",
+                                order_type="LIMIT",
+                                quantity=_tp2_q,
+                                price=round(_tp2_px, 8),
+                                timeInForce="GTC",
+                                positionSide=pos_side,
+                            )
+                        )
+                        if _resp2 and _resp2.get("orderId"):
+                            tp2_id = int(_resp2["orderId"])
+                            logger.info(f"[pm] {symbol} TP2 丢失，已强制补挂: orderId={tp2_id} @ {_tp2_px} qty={_tp2_q}")
+                        else:
+                            raise RuntimeError(f"place_order 无 orderId: {_resp2}")
+                    except Exception as _tp2_err:
+                        _tp2_retry_failed = True
+                        logger.error(f"[pm] {symbol} TP2 丢失补挂失败（保持 pending_guard，patrol 将重试）: {_tp2_err}")
+
                 _tp_upd: dict = {}
                 _tp_missing: list = []
                 for _slot, _tid, _exp in (("tp1", tp1_id, _tp1_exp), ("tp2", tp2_id, _tp2_exp)):
@@ -3774,7 +3809,7 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
                 # fill_time 补写（时间止损用真实成交时间，原先该分支漏写）。
                 # status 仍按 SL 是否确认存活决定：SL 缺失时保持 pending_guard 由 patrol 重试，不能固定写 open。
                 _skip_ok = (await asyncio.to_thread(update_position, pid, {
-                    "status":        "open" if _sl_ok else "pending_guard",
+                    "status":        "open" if (_sl_ok and not _tp2_retry_failed) else "pending_guard",
                     "fill_price":    fill_price,
                     "fill_time":     int(_time_skip.time()),
                     "quantity":      fill_qty,

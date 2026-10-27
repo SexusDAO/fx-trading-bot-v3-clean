@@ -80,13 +80,21 @@ def test_both_tp_matched_by_price_even_if_exchange_order_is_swapped(env):
     assert u["tp1_order_id"] == 7 and u["tp2_order_id"] == 8 and u["missing_guards"] == []
 
 
-def test_expected_tp_not_found_keeps_local_id_and_reports_missing(env):
+def test_expected_tp_not_found_keeps_local_id_and_reports_missing(env, monkeypatch):
+    # 行为已变更：TP2 丢失会强制补挂；这里模拟补挂失败，验证「不覆盖本地 id、记入 missing_guards、保持 pending_guard」
+    from shared import binance_api as B
+
+    def boom(**kw):
+        raise RuntimeError("place fail")
+
+    monkeypatch.setattr(B, "place_order", boom)
     env["algo"] = [algo(aid=111)]
     env["open_orders"] = [lim(7, "53.23")]                    # 本地有 tp2 期望，交易所只有 tp1
     run_guard(orphan_pos(sl_price=58.57, sl_order_id=111, tp1_price=53.23, tp2_price=50.0, tp2_order_id=99))
     u = env["updates"][-1]
     assert u["tp1_order_id"] == 7 and "tp2_order_id" not in u   # 不覆盖本地 tp2 id
     assert "tp2" in u["missing_guards"] and env["guard_calls"] == []
+    assert u["status"] == "pending_guard"
 
 
 # ── TP 查询失败：不盲挂 ──
