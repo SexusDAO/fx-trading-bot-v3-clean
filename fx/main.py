@@ -641,7 +641,8 @@ def _claim_quota(ts_list, limits: dict, claimed: dict) -> bool:
             and claimed[ts_list[0][1]] < limits[ts_list[0][1]])
 
 
-_LOCAL_LIVE_STATUSES = ("open", "pending", "patching", "pending_guard")
+# recovered：当前代码不会把它写进 status（只写 mode/sig_type），但历史/手工记录可能带；带了就必须算「本地已有」，不能再建一次孤儿
+_LOCAL_LIVE_STATUSES = ("open", "pending", "patching", "pending_guard", "recovered")
 
 
 def _match_local_position(positions, sym: str, pos_side: str):
@@ -852,6 +853,21 @@ async def _startup_sync_lite() -> None:
 
         from position_manager import _补挂保护单
         for (sym, pos_side), rp in orphans:
+            # 建档/配额平仓之前复核（交易所快照与本地读取之间隔着多次 await，仓位可能已被本地处理或已不存在）：
+            #   ① 重读 pos_state，匹配到本地记录 → 不建孤儿；② 单独复查交易所该仓位仍存在，查询失败/已无 → 跳过（失败≠有仓）。
+            try:
+                _fresh = [p for p in get_all_positions() if isinstance(p, dict)]
+                if _match_local_position(_fresh, sym, pos_side) is not None:
+                    logger.info(f"[sync_lite] {sym}({pos_side}) 复核时已有本地记录，不建孤儿")
+                    continue
+                _chk = await asyncio.to_thread(_bapi.get_position, sym)
+                if not any(c.get("symbol") == sym and c.get("positionSide") == pos_side
+                           and abs(float(c.get("positionAmt", 0) or 0)) > 0 for c in (_chk or [])):
+                    logger.info(f"[sync_lite] {sym}({pos_side}) 复核时交易所已无该持仓，不建孤儿")
+                    continue
+            except Exception as _re:
+                logger.warning(f"[sync_lite] {sym}({pos_side}) 建孤儿前复核失败，本轮跳过: {_re}")
+                continue
             _side = pos_side.lower()
             wants = {"total": 1, "long": 1 if _side == "long" else 0, "short": 1 if _side == "short" else 0}
             # (open_ms, symbol) 语义：这里用 0 占位，配额只看方向
