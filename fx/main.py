@@ -1224,6 +1224,37 @@ async def _startup_p1_validate_account() -> None:
     logger.info("[main] P1 API key 校验通过")
 
 
+_STOP_TIMEOUT_SEC = 10.0      # 停止流程总时限（daemon_start 在 15s 后发 SIGKILL）
+_STOP_BACKSTOP_SEC = 12.0     # 独立线程兜底：同步调用把事件循环卡住、wait_for 无法触发时仍能退出
+
+
+def _hard_exit(code: int = 0) -> None:
+    """强制退出进程。用 os._exit 而不是 sys.exit：SystemExit 之后 asyncio.run 仍要等默认线程池，
+    解释器退出时还会 join 线程池工作线程（shutdown(wait=False) 也拦不住），扫描线程在跑时会一直卡到被 SIGKILL。
+    pos_state 是临时文件+原子替换，强退只会留下完整的旧版/新版。atexit 不会执行，这里手动做两件事：清 pid 文件、flush 日志队列。"""
+    try:
+        _cleanup_main_pid()
+    except Exception:
+        pass
+    try:
+        _queue_listener.stop()
+    except Exception:
+        pass
+    os._exit(code)
+
+
+async def _run_stop_sequence(stop_coro, timeout: float = None) -> bool:
+    """带总时限地执行停止流程；超时 → 强制退出（返回前不会再回来，测试里 _hard_exit 被替换时返回 False）。"""
+    timeout = _STOP_TIMEOUT_SEC if timeout is None else timeout
+    try:
+        await asyncio.wait_for(stop_coro, timeout=timeout)
+        return True
+    except asyncio.TimeoutError:
+        logger.warning(f"[main] 停止流程超过 {timeout:g}s，强制退出（扫描线程/阻塞 REST 线程不再等待）")
+        _hard_exit(0)
+        return False
+
+
 async def _startup_wait(batch: str, cfg_name: str, default: float) -> float:
     """[启动分批] 批次间等待；返回实际等待秒数。配置缺失/非法时用默认值，<=0 不等待。"""
     try:
@@ -1558,31 +1589,44 @@ async def main() -> None:
     finally:
         watchdog_task.cancel()
 
-    # 停止
-    for t in tasks:
-        t.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-
-    await pm.stop()
+    # 停止：先立即释放扫描线程池（排队中的任务取消；正在跑的线程取不消，靠总时限兜底），再带总时限执行停止流程
     try:
-        await signal_watcher.stop_gc()
-        await signal_watcher.stop_polling()
-        await signal_watcher.stop_recheck()
-        await signal_watcher.stop_btc_guard()
-    except Exception:
-        pass
-    await ws.stop()
-    if hub is not None:
+        _SCAN_POOL.shutdown(wait=False, cancel_futures=True)
+    except Exception as _spe:
+        logger.warning(f"[main] 扫描线程池关闭异常（忽略）: {_spe}")
+    _bk = threading.Timer(_STOP_BACKSTOP_SEC, lambda: (
+        logger.warning(f"[main] 停止流程 {_STOP_BACKSTOP_SEC:g}s 兜底触发，强制退出"), _hard_exit(0)))
+    _bk.daemon = True
+    _bk.start()
+
+    async def _stop_all():
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        await pm.stop()
         try:
-            hub.stop()
-        except Exception as e:
-            logger.warning(f"[main] market_data_hub 停止异常: {e}")
-        if _aw_stop is not None:
+            await signal_watcher.stop_gc()
+            await signal_watcher.stop_polling()
+            await signal_watcher.stop_recheck()
+            await signal_watcher.stop_btc_guard()
+        except Exception:
+            pass
+        await ws.stop()
+        if hub is not None:
             try:
-                _aw_stop.shutdown()
-            except Exception:
-                pass
-    logger.info("[main] fx 系统已安全停止")
+                hub.stop()
+            except Exception as e:
+                logger.warning(f"[main] market_data_hub 停止异常: {e}")
+            if _aw_stop is not None:
+                try:
+                    _aw_stop.shutdown()
+                except Exception:
+                    pass
+        logger.info("[main] fx 系统已安全停止")
+
+    await _run_stop_sequence(_stop_all())
+    _bk.cancel()
 
 
 if __name__ == "__main__":
@@ -1606,3 +1650,4 @@ if __name__ == "__main__":
         logger.critical(f"[main] 未捕获异常导致退出: {e}", exc_info=True)
         sys.exit(1)
     logger.info("[main] asyncio.run 正常返回，进程退出")
+    _hard_exit(0)    # 跳过解释器退出时对 scan-worker 等线程池线程的 join
