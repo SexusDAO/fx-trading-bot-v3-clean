@@ -19,7 +19,7 @@ def clean(monkeypatch):
 
 def test_config_default():
     import config
-    assert config.LIQ_PREFETCH_FETCH_TIMEOUT_SEC == 5.0
+    assert config.LIQ_PREFETCH_FETCH_TIMEOUT_SEC == 30.0  # [v3.96] 5→30s：排队等限速+pool请求时间需要约16s+
 
 
 def test_fast_fetch_returns_and_caches_in_other_thread(monkeypatch):

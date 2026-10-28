@@ -151,6 +151,6 @@ def test_slow_log_never_breaks_request(quiet, monkeypatch):
 
 def test_config_defaults():
     import config
-    assert config.API_SLOW_LOG_SEC == 3.0
+    assert config.API_SLOW_LOG_SEC == 6.0   # [v3.99c] 3→6s：proxy/direct切换时正常延迟约4-5s，降低告警噪音
     assert config.PATROL_REST_POOL_WORKERS == 2
     assert config.PATROL_REST_TIMEOUT_SEC == 10.0

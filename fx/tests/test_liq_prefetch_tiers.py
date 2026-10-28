@@ -15,41 +15,42 @@ def POOL(n=165):
 def positions(monkeypatch):
     holder = {"pos": []}
     monkeypatch.setattr(L, "_position_symbols", lambda: list(holder["pos"]))
-    monkeypatch.setattr(L, "LIQ_PREFETCH_MAX_SYMBOLS", 30)
+    monkeypatch.setattr(L, "LIQ_PREFETCH_MAX_SYMBOLS", 60)  # [v3.95] 候选池扩大到60
     monkeypatch.setattr(L, "LIQ_PREFETCH_PRIORITY_POSITIONS", True)
     return holder
 
 
 def test_config_defaults():
     import config
-    assert config.LIQ_PREFETCH_MAX_SYMBOLS == 30 and config.LIQ_PREFETCH_PRIORITY_POSITIONS is True
+    assert config.LIQ_PREFETCH_MAX_SYMBOLS == 60 and config.LIQ_PREFETCH_PRIORITY_POSITIONS is True  # [v3.95] 30→60
 
 
 def test_positions_first_then_top_n_and_request_count(positions):
     positions["pos"] = [f"P{i}USDT" for i in range(7)]
     syms, st = L.select_prefetch_symbols(POOL())
-    assert syms[:7] == positions["pos"] and syms[7:] == POOL()[:30]
-    assert len(syms) == 37 and len(syms) * len(L._PREFETCH_RANGES) == 111       # 495 → 111
-    assert st["positions"] == 7 and st["tier2"] == 30 and st["skipped"] == 165 - 30
+    assert syms[:7] == positions["pos"] and syms[7:] == POOL()[:60]  # [v3.95] 上限60
+    # [v3.95] _PREFETCH_RANGES 缩减为1个("7d")，节省2/3 CG配额；上限60
+    assert len(syms) == 67 and len(syms) * len(L._PREFETCH_RANGES) == 67   # 67×1=67
+    assert st["positions"] == 7 and st["tier2"] == 60 and st["skipped"] == 165 - 60  # [v3.95]
 
 
 def test_position_symbol_in_pool_does_not_take_extra_quota(positions):
     positions["pos"] = ["S3USDT", "S100USDT"]                                 # 一个在前30、一个在池尾
     syms, _ = L.select_prefetch_symbols(POOL())
     assert syms[:2] == ["S3USDT", "S100USDT"]
-    assert len(syms) == 2 + 30 and syms.count("S3USDT") == 1
+    assert len(syms) == 2 + 60 and syms.count("S3USDT") == 1  # [v3.95] 上限60
     assert "S29USDT" in syms and "S30USDT" in syms                               # 前30里去掉 S3 后顺延补位，仍凑满30
 
 
 def test_positions_not_limited_by_cap(positions):
     positions["pos"] = [f"P{i}USDT" for i in range(40)]
     syms, _ = L.select_prefetch_symbols(POOL())
-    assert syms[:40] == positions["pos"] and len(syms) == 70
+    assert syms[:40] == positions["pos"] and len(syms) == 100  # [v3.95] 40持仓+60上限=100
 
 
 def test_wanted_symbols_count_inside_cap_and_go_before_pool(positions):
     syms, _ = L.select_prefetch_symbols(POOL(), wanted=["W1USDT", "W2USDT"])
-    assert syms[:2] == ["W1USDT", "W2USDT"] and len(syms) == 30 and syms[2] == "S0USDT"
+    assert syms[:2] == ["W1USDT", "W2USDT"] and len(syms) == 60 and syms[2] == "S0USDT"  # [v3.95] 上限60
 
 
 def test_no_positions_and_empty_pool(positions):

@@ -66,9 +66,11 @@ def test_fetch_timeout_config_default_8s():
 
 
 def test_thread_pool_caps_for_2_core_server():
-    """2核服务器：各线程池上限收紧，避免 GIL 竞争阻塞事件循环。"""
-    assert config.HUB_LOAD_MAX_WORKERS == 2
-    assert config.KLINE_FETCH_CONCURRENCY == 2
+    """2核服务器线程池配置。
+    [v3.99] HUB_LOAD_MAX_WORKERS 4→提升（减少K线批量加载阻塞），
+    KLINE_FETCH_CONCURRENCY 4（hub REST拉取并发提升）。"""
+    assert config.HUB_LOAD_MAX_WORKERS == 4          # [v3.99] 2→4：减少K线批量加载阻塞事件循环
+    assert config.KLINE_FETCH_CONCURRENCY == 4        # [v3.99] 2→4：hub历史K线REST拉取并发提升
     assert config.LIQ_PREFETCH_MAX_WORKERS == 2
     assert config.TRIGGER_DISPATCH_MAX_WORKERS == 1
     assert config.TRIGGER_DISPATCH_WORKERS == 1

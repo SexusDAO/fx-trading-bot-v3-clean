@@ -62,7 +62,9 @@ def test_long_below_ema20_over_20_rejected():
 
 
 def test_short_upper_limit_unchanged_at_15():
-    i = _pb_ind(1.8, gap_pct=-0.6)
+    # [v3.99] EMA_TREND_EMA_GAP_MIN_PCT_SHORT 改为 0.8%，gap_pct=-0.6 不再通过 EMA 排列检查。
+    # 使用 gap_pct=-0.9（明确超过 0.8% 空头阈值），确保能走到价格高于 EMA20 那层判断。
+    i = _pb_ind(1.8, gap_pct=-0.9)
     i["rsi_1h"], i["rsi_4h"] = 40, 40
     ok, out = _judge(i)
     assert ok is False and "SHORT 价格高于 EMA20" in out["reject_reason"] and "1.5%" in out["reject_reason"]
