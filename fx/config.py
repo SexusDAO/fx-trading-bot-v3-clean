@@ -310,8 +310,10 @@ DEFAULT_LEVERAGE = 10
 # 挂单超时
 ORDER_EXPIRE_BREAKOUT_MIN = 30    # 动量突破挂单超时，分钟
 BREAKOUT_OI_GAIN_MIN      = 1.0   # breakout OI 15m 涨幅加分门槛（低/中波动，%）
+BREAKOUT_VOL_MULT_MIN     = 2.5   # [v3.99] 量比门槛 低/中波动（原2.0x→2.5x）
+BREAKOUT_VOL_MULT_HIGH    = 3.0   # [v3.99] 量比门槛 高波动（原2.5x→3.0x）
 BREAKOUT_OI_GAIN_MIN_HIGH = 3.0   # breakout OI 15m 涨幅加分门槛（高波动，%）
-BREAKOUT_MAX_CHASE_ATR = 2.0      # 突破后最多追入2ATR，超过不开仓
+BREAKOUT_MAX_CHASE_ATR = 1.5      # [v3.99] 追入距离 2ATR→1.5ATR，减少追高/追空
 ORDER_EXPIRE_PULLBACK_MIN = 240   # 回踩/反转挂单超时，分钟
 
 # 扫描超时保护
@@ -412,7 +414,7 @@ TP_SL_ADJUST_LOG            = _FX_ROOT / "logs" / "tp_sl_adjust_log.jsonl"
 
 # 时间止损
 TIME_STOP_HOURS            = 8    # breakout/pullback 时间止损
-TIME_STOP_REVERSAL_HOURS   = 12   # reversal 类型允许更长持仓时间
+TIME_STOP_REVERSAL_HOURS   = 8    # [v3.99] 12H→8H，reversal是短期反转不宜久持
 TIME_STOP_HARD_HOURS       = 16   # 硬上限（所有类型）
 TIME_STOP_PROFIT_THRESHOLD = 2.5   # 浮盈超过 ATR×2.5 不触发时间止损
 
@@ -822,6 +824,7 @@ OI_DIV_RSI1H_SHORT_MIN       = 62  # 55→62：与 judge 原写死的有效门�
 
 # ── 评分参数 ──────────────────────────────────────────────────────────────────
 OI_DIV_BASE_STRONG           = 68     # strong 信号 base score（OI 背离 + RSI 极端 + taker 回暖）
+OI_DIVERGENCE_ENABLED        = True   # [v3.99] 开启oi_divergence，样本不足但逻辑合理，观察期
 OI_DIV_BASE_MEDIUM           = 58     # medium 信号 base score（OI 背离 + taker 回暖，RSI 未极端）v3.65: 55→58，配合cg_bonus clip收窄后确保中等质量信号能过50分门槛
 
 # ── OI 历史比较窗口 ───────────────────────────────────────────────────────────
@@ -842,7 +845,8 @@ OI_DIV_ORDER_EXPIRE_MIN      = 60      # oi_divergence 挂单有效期（分钟�
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── 触发门槛 ──────────────────────────────────────────────────────────────────
-EMA_TREND_EMA_GAP_MIN_PCT     = 0.005  # EMA20 > EMA50 至少差距 0.5%（防止刚刚交叉的假多头；影子数据：排列不明确被拒信号 EV 为负，0.3% 已回滚）
+EMA_TREND_EMA_GAP_MIN_PCT     = 0.005  # EMA20 > EMA50 至少差距 0.5%（多头；空头用下方独立参数）
+EMA_TREND_EMA_GAP_MIN_PCT_SHORT = 0.008  # [v3.99] 空头要求更强趋势确认 0.8%，过滤弱势空头
 EMA_TREND_RSI1H_MIN           = 48     # 1H RSI 下限（太低说明已经超卖，走 reversal 更合适）
 EMA_TREND_RSI1H_MAX           = 68     # 1H RSI 上限（太高说明已超买，不是好的回踩入场点）
 EMA_TREND_RSI1H_SHORT_MIN     = 32     # 做空 RSI1H 下限（原沿用做多 48）

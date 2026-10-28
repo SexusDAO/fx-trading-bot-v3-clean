@@ -1431,7 +1431,12 @@ def analyze_one(symbol: str, ticker: dict,
                 _ok, _reason = judge_stop_hunt(k1h, _k4h, k15, ind, chg24, funding)
                 _dir = _reason.get("direction", "LONG").upper()
             elif _route == "oi_divergence":
-                _ok, _reason = judge_oi_divergence(k1h, _k4h, k15, ind, chg24, funding)
+                # [v3.99] oi_divergence 开关（OI_DIVERGENCE_ENABLED，默认True=开启观察）
+                _oi_div_on = getattr(__import__('config'), 'OI_DIVERGENCE_ENABLED', True)
+                if not _oi_div_on:
+                    _ok, _reason = False, {"reject_reason": "oi_divergence disabled"}
+                else:
+                    _ok, _reason = judge_oi_divergence(k1h, _k4h, k15, ind, chg24, funding)
                 _dir = _reason.get("direction", "long").upper()
             elif _route == "ema_trend":
                 _ok, _reason = judge_ema_trend(k1h, _k4h, k15, ind, chg24, funding)

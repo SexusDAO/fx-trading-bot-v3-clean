@@ -1046,7 +1046,12 @@ def _judge_breakout_impl(k1h, k4h, k15, ind, chg24, funding):
         # 收盘价在近10根高低价区间内，没有真正突破
         return False, {"reject_reason": f"收盘价{breakout_close:.4g}未突破近10根区间[{ref_low:.4g},{ref_high:.4g}]"}
 
-    vol_mult_req = 2.5 if tier == "high" else 2.0
+    # [v3.99] 量比门槛读 config（原硬编码 2.0/2.5）
+    try:
+        from config import BREAKOUT_VOL_MULT_MIN as _BVM, BREAKOUT_VOL_MULT_HIGH as _BVMH
+    except Exception:
+        _BVM, _BVMH = 2.5, 3.0
+    vol_mult_req = _BVMH if tier == "high" else _BVM
     # [v3.85 FIX-1] 原写法 `65 if tier=="high" else 65` 两个分支相同，分层是假的，且没有读取配置
     #   （config 里 BREAKOUT_RSI_* 从未被引用）。改为读取配置；配置值已同步为原实际生效值，行为不变。
     from config import (BREAKOUT_RSI_MAX_LONG, BREAKOUT_RSI_MAX_LONG_HIGH,
@@ -3902,12 +3907,14 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
     ema20_4h = ind.get("ema20_4h", 0.0)
     ema50_4h = ind.get("ema50_4h", 0.0)
     _ema_gap_4h = (ema20_4h - ema50_4h) / (ema50_4h + 1e-9) if ema50_4h > 0 else 0
+    # [v3.99] 空头用独立的更严格门槛（0.8% vs 多头0.5%）
+    _ema_gap_short = getattr(_config_mod, 'EMA_TREND_EMA_GAP_MIN_PCT_SHORT', _EMA_GAP * 1.6)
     if _ema_gap_4h >= _EMA_GAP:
         _ema_direction = "long"    # 4H 多头排列
-    elif _ema_gap_4h <= -_EMA_GAP:
-        _ema_direction = "short"   # 4H 空头排列
+    elif _ema_gap_4h <= -_ema_gap_short:
+        _ema_direction = "short"   # 4H 空头排列（差距≥0.8%）
     else:
-        return False, {"reject_reason": f"4H EMA 排列不明确: gap={_ema_gap_4h*100:.2f}% < ±{_EMA_GAP*100:.1f}%"}
+        return False, {"reject_reason": f"4H EMA 排列不明确: gap={_ema_gap_4h*100:.2f}% 多头需≥{_EMA_GAP*100:.1f}% 空头需≤-{_ema_gap_short*100:.1f}%"}
 
     out = {
         "mode":            "ema_trend",
@@ -4119,6 +4126,10 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
         base_score = _BASE_MEDIUM
         pos_cap   = 0.45
 
+    # [v3.99] consistency_score=low 时仓位折半，保留机会但控制亏损
+    _cons = out.get("consistency_score", "")
+    if _cons == "low":
+        pos_cap = round(pos_cap * 0.5, 2)
     out.update({
         "signal_strength":  strength,
         "position_size_cap": pos_cap,
