@@ -809,10 +809,10 @@ RR_MIN_STOP_HUNT             = 0.8    # stop_hunt 专属 RR 要求（入场在 p
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── 触发门槛 ──────────────────────────────────────────────────────────────────
-OI_DIV_PRICE_NEAR_LOW_PCT    = 1.03   # 价格 <= low_24h * 1.03 视为接近新低（3%内）
-OI_DIV_PRICE_NEAR_HIGH_PCT   = 0.97   # 价格 >= high_24h * 0.97 视为接近新高（3%内）
-OI_DIV_OI_RISE_PCT           = 0.10   # LONG：OI 相比 1H 前上升 >= 10% 视为异常拥挤
-OI_DIV_OI_DROP_PCT           = 0.10   # SHORT：OI 相比 1H 前下降 >= 10% 视为多头出逃
+OI_DIV_PRICE_NEAR_LOW_PCT    = 1.08   # [v3.99b] 3%→8%：山寨币背离常在低点8%内形成
+OI_DIV_PRICE_NEAR_HIGH_PCT   = 0.92   # [v3.99b] 3%→8%：山寨币背离常在高点8%内形成
+OI_DIV_OI_RISE_PCT           = 0.07   # [v3.99b] 10%→7%：山寨币OI波动大，7%已是明显信号
+OI_DIV_OI_DROP_PCT           = 0.07   # [v3.99b] 10%→7%：与RISE对称
 OI_DIV_TAKER_RECOVERY_MIN    = 0.48   # LONG：taker_buy_ratio_now >= 此值视为买方回暖（从极度悲观恢复）
 OI_DIV_TAKER_WEAK_MAX        = 0.52   # SHORT：taker_buy_ratio_now <= 此值视为买方转弱
 

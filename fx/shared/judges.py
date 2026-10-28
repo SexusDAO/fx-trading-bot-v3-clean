@@ -3368,7 +3368,7 @@ def _judge_oi_divergence_impl(k1h, k4h, k15, ind, chg24, funding):
         "atr_ratio":        round(atr_r, 4),
         "direction":        None,
         "signal_strength":  "medium",
-        "position_size_cap": 0.5,
+        "position_size_cap": 0.3,  # [v3.99b] 观察期保守仓位，样本积累后可提高
         "oi_divergence_type": None,   # "oi_squeeze_long" / "oi_bleed_short"
         "oi_change_pct":    0.0,
         "taker_ratio_now":  ind.get("taker_buy_ratio_now", 0.5),
@@ -3377,7 +3377,12 @@ def _judge_oi_divergence_impl(k1h, k4h, k15, ind, chg24, funding):
         "reject_reason":    None,
     }
 
-    # ── 0. 波动率前置检查（过滤无波动横盘）──────────────────────────────────
+    # ── 0. 流动性 + 波动率前置检查 ─────────────────────────────────────────
+    # [v3.99b] 24H 成交额 < 300 万 USD：低流动性币 OI 数据易失真
+    _vol24 = ind.get("vol24_usd", 0)
+    if 0 < _vol24 < 3_000_000:
+        out["reject_reason"] = f"流动性过低: vol24={_vol24/1e6:.1f}M<3M，OI数据易失真"
+        return False, out
     if atr_r < _ATR_MID_MIN:
         out["reject_reason"] = f"波动率过低: ATR_ratio={atr_r:.2f}%<{_ATR_MID_MIN}%，不适合 OI 背离策略"
         return False, out
