@@ -2251,8 +2251,8 @@ class SignalWatcher:
                     try:
                         from shared.calc_sl_tp import calc_sl_tp as _cst_sw
                         from shared.liq_cache import get_liq_zones_cached as _lgc
-                        _liq_long  = await loop.run_in_executor(None, lambda: _lgc(sym, 'LONG',  mark_mp, range_='24h'))
-                        _liq_short = await loop.run_in_executor(None, lambda: _lgc(sym, 'SHORT', mark_mp, range_='24h'))
+                        _liq_long  = await loop.run_in_executor(None, lambda: _lgc(sym, 'LONG',  mark_mp, range_='7d'  # [v3.98] 预热只缓存7d，与缓存key对齐))
+                        _liq_short = await loop.run_in_executor(None, lambda: _lgc(sym, 'SHORT', mark_mp, range_='7d'  # [v3.98] 预热只缓存7d，与缓存key对齐))
                         _new_sig   = dict(entry.signal)
                         _new_params = _cst_sw(
                             signal=_new_sig, mark_price=mark_mp, atr=atr_v,
@@ -2307,7 +2307,7 @@ class SignalWatcher:
         # ── B. 清算区位移检查（仅 reversal SHORT，清算区锚点定价的场景）────────
         if mode == 'reversal' and direction == 'SHORT':
             liq_short = await loop.run_in_executor(
-                None, lambda: get_liq_zones_cached(sym, 'SHORT', mark_mp, range_='24h')
+                None, lambda: get_liq_zones_cached(sym, 'SHORT', mark_mp, range_='7d'  # [v3.98] 预热只缓存7d，与缓存key对齐)
             )
             z = _nearest_liq_above(mark_mp, atr_v, liq_short, dist_min=0.3, dist_max=5.0)
             if z:
@@ -2340,7 +2340,7 @@ class SignalWatcher:
                     try:
                         from shared.calc_sl_tp import calc_sl_tp as _cst
                         liq_long = await loop.run_in_executor(
-                            None, lambda: get_liq_zones_cached(sym, 'LONG', mark_mp, range_='24h')
+                            None, lambda: get_liq_zones_cached(sym, 'LONG', mark_mp, range_='7d'  # [v3.98] 预热只缓存7d，与缓存key对齐)
                         )
                         new_params = _cst(
                             signal=new_sig, mark_price=mark_mp, atr=atr_v,
@@ -2354,7 +2354,7 @@ class SignalWatcher:
                         logger.debug(f'[recheck] {sym} 重算 sl_tp 失败: {_pe}')
 
                     liq_long_r = await loop.run_in_executor(
-                        None, lambda: get_liq_zones_cached(sym, 'LONG', mark_mp, range_='24h')
+                        None, lambda: get_liq_zones_cached(sym, 'LONG', mark_mp, range_='7d'  # [v3.98] 预热只缓存7d，与缓存key对齐)
                     )
                     e_low, e_high, e_p = compute_entry_range(
                         new_sig, mark_mp, liq_long=liq_long_r, liq_short=liq_short

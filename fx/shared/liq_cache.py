@@ -166,12 +166,7 @@ def _fetch_from_clawby(symbol: str, current_price: float,
     except Exception as e:
         logger.debug(f"[liq_cache] {symbol} CG heatmap 失败: {e}")
 
-    # 降级1：ByKaranteli（CG 失败时兜底）
-    result = _fetch_from_bykaranteli(symbol, current_price)
-    if result:
-        logger.debug(f"[liq_cache] {symbol} CG失败，兜底用 BYK")
-        return result
-
+    # 降级1：ByKaranteli 已移除（token耗尽，每次超时3s纯浪费）[v3.98]
     # 降级2：Coinglass liq_orders
     try:
         from shared.coinglass_api import get_liq_orders
