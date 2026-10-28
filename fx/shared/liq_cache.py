@@ -147,7 +147,7 @@ def _fetch_from_clawby(symbol: str, current_price: float,
     # 主路径：Coinglass heatmap（权威来源，精度最高，支持 range_）
     try:
         from shared.clawby_adapter import get_liq_density
-        density = get_liq_density(symbol, range_=range_)
+        density = get_liq_density(symbol, exchange="Binance", range_=range_)  # [v3.100] 中转站要求必传 exchange
         if density:
             long_zones  = []
             short_zones = []
