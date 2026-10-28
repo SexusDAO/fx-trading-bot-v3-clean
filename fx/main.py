@@ -643,7 +643,7 @@ def _claim_quota(ts_list, limits: dict, claimed: dict) -> bool:
 
 
 # recovered：当前代码不会把它写进 status（只写 mode/sig_type），但历史/手工记录可能带；带了就必须算「本地已有」，不能再建一次孤儿
-_LOCAL_LIVE_STATUSES = ("open", "pending", "patching", "pending_guard", "recovered")
+_LOCAL_LIVE_STATUSES = ("open", "pending", "pending_entry", "patching", "pending_guard", "recovered")
 
 
 def _match_local_position(positions, sym: str, pos_side: str):
@@ -1068,6 +1068,46 @@ async def _sync_positions_on_startup() -> None:
         logger.error(f"[startup_sync] orphan patching 清理失败（非致命）: {_op_e}")
 
     try:
+        # ── [v3.94] pending_entry 处理：已成交但SL/TP未挂 ─────────────────────
+        try:
+            from shared.state import get_all_positions as _gap
+            _pentry_list = [p for p in _gap()
+                            if p.get("status") == "pending_entry"]
+            for _pe in _pentry_list:
+                _pe_sym  = _pe.get("symbol", "")
+                _pe_pid  = _pe.get("pos_id", "")
+                _pe_oid  = _pe.get("open_order_id")
+                _pe_fp   = float(_pe.get("entry_price") or 0)
+                _pe_qty  = float(_pe.get("quantity") or 0)
+                logger.warning(f"[startup_sync] {_pe_sym} 发现 pending_entry 记录 {_pe_pid}，"
+                               f"成交价={_pe_fp} qty={_pe_qty}，开始补挂SL/TP")
+                if not _pe_fp or not _pe_qty:
+                    logger.warning(f"[startup_sync] {_pe_sym} pending_entry 缺少成交价/数量，跳过")
+                    continue
+                try:
+                    from shared.state import update_position as _upd2
+                    await asyncio.to_thread(_upd2, _pe_pid, {"status": "patching"})
+                    from executor import _place_guards_async, _get_precision
+                    _pe_prec = await _get_precision(_pe_sym)
+                    _pe_guard = await _place_guards_async(
+                        _pe_sym, _pe.get("direction","").upper(), _pe_qty,
+                        _pe.get("sl_price", 0), _pe.get("tp1_price", 0), _pe.get("tp2_price"),
+                        _pe_prec, sig_id=_pe.get("_sig_id", ""),
+                    )
+                    await asyncio.to_thread(_upd2, _pe_pid, {
+                        "status":       "open",
+                        "sl_order_id":  _pe_guard.get("sl_id"),
+                        "tp1_order_id": _pe_guard.get("tp1_id"),
+                        "tp2_order_id": _pe_guard.get("tp2_id"),
+                        "tp_mode":      _pe_guard.get("tp_mode", "single"),
+                    })
+                    logger.warning(f"[startup_sync] {_pe_sym} pending_entry 补挂完成，升级为 open")
+                except Exception as _pe_e:
+                    await asyncio.to_thread(_upd2, _pe_pid, {"status": "pending_entry"})
+                    logger.error(f"[startup_sync] {_pe_sym} pending_entry 补挂失败: {_pe_e}")
+        except Exception as _pe_all:
+            logger.warning(f"[startup_sync] pending_entry 处理异常（非致命）: {_pe_all}")
+
         # ── 拉取真实持仓 ──────────────────────────────────────────────────────
         # [fix #2] 查询失败（ApiQueryError）≠ 交易所无持仓：直接中止对齐，不做任何清理
         try:

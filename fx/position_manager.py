@@ -2197,6 +2197,20 @@ async def _check_pending_expire_static(pos: dict, now_ms: int):
     if pos.get("status") == "patching":
         logger.debug(f"[pm] {symbol} status=patching,跳过 pending 检查")
         return
+    # [v3.94] pending_entry：已成交但SL/TP未挂，复用相同的补挂路径
+    if pos.get("status") == "pending_entry":
+        fp  = float(pos.get("entry_price") or 0)
+        qty = float(pos.get("quantity") or 0)
+        if fp and qty:
+            logger.warning(f"[pm] {symbol} patrol 发现 pending_entry {pid}，触发补挂")
+            (await asyncio.to_thread(update_position, pid, {"status": "patching"}))
+            mark_system_order_update(symbol)
+            try:
+                await _补挂保护单(pos, fp, qty, pid, symbol)
+            except Exception as _ge:
+                (await asyncio.to_thread(update_position, pid, {"status": "pending_entry"}))
+                logger.error(f"[pm] {symbol} pending_entry 补挂失败: {_ge}")
+        return
 
     # ── 实时核验:检查订单是否已在交易所消失(取消/过期)─────────────────────
     if order_id:

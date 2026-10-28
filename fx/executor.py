@@ -1437,8 +1437,19 @@ def _write_position(
         "_sig_id":              signal.get("_sig_id", ""),
     }
     _pos_rec["initial_sl_distance"] = abs(float(_pos_rec["entry_price"]) - float(_pos_rec["sl_price"]))
-    if not _persist_position_record(_pos_rec, "position"):
-        return None   # [v3.89 #52] 未落盘：不写交易日志/冷却，不返回假 pos_id
+    # [v3.94] 如果 pending_entry 已写入，直接 update 升级为 open（原子替换，不需要 add）
+    # 注意：_write_pos_record 是同步函数，不能 await，用同步 update_position 直接写
+    _pentry_id_ref = locals().get("_pentry_id")
+    if _pentry_id_ref:
+        from shared.state import update_position as _upd_pos
+        _upd_ok = _upd_pos(_pentry_id_ref, _pos_rec)  # 同步调用
+        if not _upd_ok:
+            logger.warning(f"[executor] {symbol} pending_entry升级open失败，回退到add_position")
+            if not _persist_position_record(_pos_rec, "position"):
+                return None
+    else:
+        if not _persist_position_record(_pos_rec, "position"):
+            return None   # [v3.89 #52] 未落盘：不写交易日志/冷却，不返回假 pos_id
     _append_trade_log(pos_id, signal, fill_price, fill_qty, params)
     # v3.44: 写入同方向开仓冷協（防止同标的同方向短时间内连开）
     try:
@@ -1496,6 +1507,48 @@ def _append_trade_log(
             f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as _te:
         logger.warning(f"[executor] trade_log 写入失败: {_te}")
+
+
+async def _write_pending_entry(signal: dict, order_id: int, params: dict,
+                               leverage: int, fill_price: float, fill_qty: float,
+                               atr: float = 0.0) -> str | None:
+    """[v3.94] 成交后、挂SL/TP前立即写 pending_entry 记录。
+    重启后 startup_sync / patrol 能识别并补挂保护单，不会建孤儿。
+    写入失败返回 None（不中断主流程）。"""
+    pos_id = str(uuid.uuid4())[:8]
+    rec = {
+        "pos_id":             pos_id,
+        "symbol":             signal["symbol"],
+        "direction":          signal["direction"].lower(),
+        "mode":               signal.get("mode", "pullback"),
+        "sig_type":           signal.get("sig_type", signal.get("mode", "pullback")),
+        "volatility_tier":    signal.get("volatility_tier", "mid"),
+        "entry_price":        fill_price,        # 实际成交价
+        "sl_price":           params["sl_price"],
+        "tp1_price":          params["tp1_price"],
+        "tp2_price":          params.get("tp2_price"),
+        "leverage":           leverage,
+        "open_order_id":      order_id,
+        "sl_order_id":        None,   # 还没挂，startup_sync/patrol 会补挂
+        "tp1_order_id":       None,
+        "tp2_order_id":       None,
+        "quantity":           fill_qty,
+        "quantity_remaining": fill_qty,
+        "liq_data_available": params.get("liq_data_available", False),
+        "sl_degraded":        params.get("sl_degraded", False),
+        "signal_strength":    signal.get("signal_strength", "medium"),
+        "position_size_cap":  signal.get("position_size_cap", 0.5),
+        "judge_detail":       signal.get("judge_detail", {}),
+        "atr_at_entry":       atr,
+        "status":             "pending_entry",   # 区别于 pending（未成交挂单）
+        "open_time":          int(time.time() * 1000),
+        "fill_time":          int(time.time() * 1000),
+        "_sig_id":            signal.get("_sig_id", ""),
+    }
+    if not _persist_position_record(rec, "pending_entry"):
+        return None
+    logger.info(f"[executor] {signal['symbol']} pending_entry 已写入 pos_id={pos_id}，等待SL/TP挂单")
+    return pos_id
 
 
 async def _write_pending(signal: dict, order_id: int, params: dict,
@@ -2136,6 +2189,12 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
         return True   # 信号处理完成，不进入正常持仓流程
 
     # HOLD 路径：继续挂止损止盈
+
+    # ── 步骤8.7：成交后立即写 pending_entry（挂单前建档，防止断连变孤儿）─────
+    _pentry_id = await _write_pending_entry(signal, order_id, params, leverage,
+                                            fill_price, fill_qty, atr)
+    if _pentry_id is None:
+        logger.warning(f"[executor] {symbol} pending_entry 写入失败，继续挂保护单（不中断流程）")
 
     # ── 步骤9：并发提交止损止盈单 ─────────────────────────────────────────────
     guard = await _place_guards_async(
