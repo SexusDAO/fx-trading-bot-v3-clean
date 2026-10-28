@@ -219,7 +219,7 @@ try:
 except Exception:
     _aw_stop = None
 
-_SCAN_POOL = _cfu.ThreadPoolExecutor(max_workers=1, thread_name_prefix="scan-worker")
+_SCAN_POOL = _cfu.ThreadPoolExecutor(max_workers=2, thread_name_prefix="scan-worker")  # 从1提升，避免单扫描任务堵死
 
 # ───────────────────────────────────────────────────────────────────────────────
 # 定时任务（异步版）
