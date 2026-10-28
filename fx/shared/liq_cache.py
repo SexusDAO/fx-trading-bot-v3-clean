@@ -56,7 +56,7 @@ _INFLIGHT_WAIT = 30.0   # 等待他人在途请求的上限（秒）
 _FAIL_CACHE: dict = {}
 _FAIL_TTL = 30.0           # 负缓存时长（秒）
 _ALERT_LAST: dict = {}
-_ALERT_INTERVAL = 1800.0   # 同一标的告警最小间隔（秒）
+_ALERT_INTERVAL = 7200.0   # 同一标的告警最小间隔（秒，2小时降噪）
 _bg_started = False
 _bg_lock    = threading.Lock()
 

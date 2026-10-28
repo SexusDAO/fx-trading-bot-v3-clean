@@ -534,7 +534,8 @@ def cg_get(path: str, params: dict = None, timeout: int = 8) -> "list | dict | N
         _sent_at = time.time()
         try:
             r = requests.get(url, params=params or {}, headers=CG_HEADERS,
-                             timeout=timeout, proxies=_PROXIES)
+                             timeout=timeout, proxies={"http": None, "https": None},
+                             trust_env=False)  # 强制直连，不读系统代理环境变量
         except requests.exceptions.RequestException as e:
             logger.warning(f"[cg_get] {path} 请求异常: {e}")
             return None
