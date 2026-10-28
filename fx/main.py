@@ -1722,6 +1722,9 @@ async def main() -> None:
     except Exception as _spe:
         logger.warning(f"[main] 扫描线程池关闭异常（忽略）: {_spe}")
     # 兜底：通常已在信号到达时武装；这里再 request() 一次覆盖「非信号触发的停止」（如内部 WATCHDOG 置位 stop_event）。
+    # [v3.100] _bk 必须在 try 之前初始化，否则 stop_backstart 成功时 _bk 未赋值，
+    #   finally 里 _bk.cancel() 会报 UnboundLocalError 导致进程崩溃退出。
+    _bk = None
     try:
         from shared import stop_backstop as _sb2
         _sb2.start(lambda: _STOP_BACKSTOP_SEC, _backstop_fire)     # 幂等；上面安装失败时在此补上
@@ -1760,7 +1763,8 @@ async def main() -> None:
         logger.info("[main] fx 系统已安全停止")
 
     await _run_stop_sequence(_stop_all())
-    _bk.cancel()
+    if _bk is not None:
+        _bk.cancel()
 
 
 if __name__ == "__main__":
