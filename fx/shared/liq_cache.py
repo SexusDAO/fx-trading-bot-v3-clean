@@ -147,7 +147,12 @@ def _fetch_from_clawby(symbol: str, current_price: float,
     # 主路径：Coinglass heatmap（权威来源，精度最高，支持 range_）
     try:
         from shared.clawby_adapter import get_liq_density
-        density = get_liq_density(symbol, exchange="Binance", range_=range_)  # [v3.100] 中转站要求必传 exchange
+        # ⚠️  [v3.100] exchange="Binance" 必须显式传入！
+        #   CG 中转站 vip2.coinglass.site 要求 heatmap 接口必须带 exchange 参数，
+        #   漏传会返回 business_code=400 "Required String parameter exchange is not present"，
+        #   导致三级全部降级到 ATR 公式止损。get_liq_density 有默认值 exchange="Binance"
+        #   但只有调用方显式传入才能保证不丢失（Python 默认参数在中间层可能被绕过）。
+        density = get_liq_density(symbol, exchange="Binance", range_=range_)
         if density:
             long_zones  = []
             short_zones = []

@@ -731,8 +731,13 @@ def _sym_base(symbol: str) -> str:
 
 def get_liq_heatmap(symbol: str, exchange: str = "Binance",
                     range_: str = "3d") -> dict | None:
-    """清算热力图 → CG中转 GET（实时性更好，已验证可用）
+    """清算热力图 → CG中转站 vip2.coinglass.site GET
     返回 {"y_axis": [...prices], "liquidation_leverage_data": [...], ...}
+
+    ⚠️  exchange 参数为中转站必填字段，默认值 "Binance" 即可。
+       调用方（liq_cache._fetch_from_clawby）必须显式传入，不能依赖默认值在中间层透传，
+       否则漏传会得到 business_code=400，触发三级全失败降级为 ATR 公式止损。
+       认证头：X-API-Key（不是 CG-API-KEY），地址：vip2.coinglass.site（不是 open-api-v3.coinglass.com）
     """
     sym = _sym_full(symbol)
     key = f"heatmap:{sym}:{range_}"
