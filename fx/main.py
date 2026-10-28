@@ -1014,6 +1014,7 @@ async def _periodic_sync_loop(interval_sec: int = 1800) -> None:
         await asyncio.sleep(interval_sec)
 
 
+_sync_positions_on_startup._align_fail_ts = 0.0  # [v3.99] 对齐失败通知限速
 async def _sync_positions_on_startup() -> None:
     """
     启动时对齐持仓状态：
@@ -1085,24 +1086,13 @@ async def _sync_positions_on_startup() -> None:
                     logger.warning(f"[startup_sync] {_pe_sym} pending_entry 缺少成交价/数量，跳过")
                     continue
                 try:
-                    from shared.state import update_position as _upd2
-                    await asyncio.to_thread(_upd2, _pe_pid, {"status": "patching"})
-                    from executor import _place_guards_async, _get_precision
-                    _pe_prec = await asyncio.to_thread(_get_precision, _pe_sym)  # [v3.97] _get_precision是同步函数，用to_thread
-                    _pe_guard = await _place_guards_async(
-                        _pe_sym, _pe.get("direction","").upper(), _pe_qty,
-                        _pe.get("sl_price", 0), _pe.get("tp1_price", 0), _pe.get("tp2_price"),
-                        _pe_prec, sig_id=_pe.get("_sig_id", ""),
-                    )
-                    await asyncio.to_thread(_upd2, _pe_pid, {
-                        "status":       "open",
-                        "sl_order_id":  _pe_guard.get("sl_id"),
-                        "tp1_order_id": _pe_guard.get("tp1_id"),
-                        "tp2_order_id": _pe_guard.get("tp2_id"),
-                        "tp_mode":      _pe_guard.get("tp_mode", "single"),
-                    })
-                    logger.warning(f"[startup_sync] {_pe_sym} pending_entry 补挂完成，升级为 open")
+                    # [v3.99] 改用 _补挂保护单 统一路径：复用互斥锁+重入检查+状态管理，
+                    #   避免直接 await _place_guards_async 在网络抖动时因 await 异常死循环
+                    from position_manager import _补挂保护单 as _patch_guards
+                    await _patch_guards(_pe, _pe_fp, _pe_qty, _pe_pid, _pe_sym)
+                    logger.warning(f"[startup_sync] {_pe_sym} pending_entry 补挂完成（交由_补挂保护单处理）")
                 except Exception as _pe_e:
+                    from shared.state import update_position as _upd2
                     await asyncio.to_thread(_upd2, _pe_pid, {"status": "pending_entry"})
                     logger.error(f"[startup_sync] {_pe_sym} pending_entry 补挂失败: {_pe_e}")
         except Exception as _pe_all:
@@ -1116,8 +1106,13 @@ async def _sync_positions_on_startup() -> None:
         except Exception as _qe:
             logger.error(f"[startup_sync] 查询交易所持仓/挂单失败，本次对齐中止（不清理、不补挂）: {_qe}")
             try:
-                from shared.notifier import notify_async
-                await notify_async(f"⚠️ 持仓对齐中止：交易所持仓/挂单查询失败，未做任何清理\n{str(_qe)[:120]}")
+                import time as _time_sync
+                _now_sync = _time_sync.time()
+                # [v3.99] 限速：网络抖动时 WS 每10s断一次，不要每次都推通知；5分钟内只推一次
+                if _now_sync - _sync_positions_on_startup._align_fail_ts > 300:
+                    _sync_positions_on_startup._align_fail_ts = _now_sync
+                    from shared.notifier import notify_async
+                    await notify_async(f"⚠️ 持仓对齐中止：交易所持仓/挂单查询失败，未做任何清理\n{str(_qe)[:120]}")
             except Exception:
                 pass
             return
