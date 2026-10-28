@@ -40,7 +40,8 @@ except ImportError:   # 与 config.py 默认值一致
 
 # ── 缓存存储 ───────────────────────────────────────────────────────────────
 _CACHE: dict[str, dict] = {}
-_CACHE_TTL = 15 * 60   # 15 分钟
+_CACHE_TTL     = 60 * 60   # [v3.97] 60分钟：30次/分配额足够覆盖，清算区域变化慢
+_POS_TTL      = 30 * 60   # [v3.97] 持仓标的单独30分钟刷新（更频繁但仍节约配额）
 _CACHE_LOCK = threading.Lock()
 # [v3.89 #34] 容量上限：_CACHE 最多保留 500 个 key（key=「标的:区间」），写入后超出时按 ts 淘汰最旧的。
 #   TTL 只决定数据是否需要刷新，不会删除条目；标的池长期变化时过期条目会一直驻留内存。
@@ -354,13 +355,21 @@ def _drain_wanted() -> list:
     return out
 
 
-def _needs_refresh(sym: str, ranges=_PREFETCH_RANGES) -> bool:
-    """任一 range 的缓存年龄 >= TTL*0.8 即需要刷新（与 _prefetch_one 原判断一致）。"""
+def _needs_refresh(sym: str, ranges=_PREFETCH_RANGES, _pos_syms: set | None = None) -> bool:
+    """任一 range 的缓存年龄 >= TTL*0.8 即需要刷新。[v3.97] 持仓标的用 _POS_TTL。"""
+    if _pos_syms is None:
+        try:
+            from shared.state import get_all_positions as _gap
+            _pos_syms = {p["symbol"] for p in _gap() if p.get("status") in ("open","patching","pending_guard")}
+        except Exception:
+            _pos_syms = set()
     for r in ranges:
         with _CACHE_LOCK:
             entry = _CACHE.get(f"{sym}:{r}")
             ts = entry.get("ts", 0) if entry else 0
-        if time.time() - ts >= _CACHE_TTL * 0.8:
+        # [v3.97] 持仓标的用更短的 TTL 保持新鲜，候选池用 _CACHE_TTL
+        _ttl = _POS_TTL if sym in _pos_syms else _CACHE_TTL
+        if time.time() - ts >= _ttl * 0.8:
             return True
     return False
 

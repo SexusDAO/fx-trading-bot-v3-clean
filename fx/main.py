@@ -1088,7 +1088,7 @@ async def _sync_positions_on_startup() -> None:
                     from shared.state import update_position as _upd2
                     await asyncio.to_thread(_upd2, _pe_pid, {"status": "patching"})
                     from executor import _place_guards_async, _get_precision
-                    _pe_prec = await _get_precision(_pe_sym)
+                    _pe_prec = await asyncio.to_thread(_get_precision, _pe_sym)  # [v3.97] _get_precision是同步函数，用to_thread
                     _pe_guard = await _place_guards_async(
                         _pe_sym, _pe.get("direction","").upper(), _pe_qty,
                         _pe.get("sl_price", 0), _pe.get("tp1_price", 0), _pe.get("tp2_price"),
