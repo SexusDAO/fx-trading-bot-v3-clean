@@ -1704,8 +1704,9 @@ def _prefetch_liq(symbol: str, price: float) -> dict:
             from shared.liq_cache import get_liq_zones_nowait as _g
     except Exception:
         return out
-    for key, (d, r) in (("long", ("LONG", "3d")), ("short", ("SHORT", "3d")),
-                        ("long_24h", ("LONG", "24h")), ("short_24h", ("SHORT", "24h"))):
+    # [v3.95] 统一只读 7d（覆盖最宽），节省 CG 配额；3d/24h 字段复用 7d 数据
+    for key, (d, r) in (("long", ("LONG", "7d")), ("short", ("SHORT", "7d")),
+                        ("long_24h", ("LONG", "7d")), ("short_24h", ("SHORT", "7d"))):
         try:
             out[key] = list(_g(symbol, d, price, range_=r) or [])
         except Exception:
@@ -3356,8 +3357,8 @@ def _filter_and_register_signals(
                         _range = "24h" if mode in ("reversal","funding_arb") else                                  "7d"  if mode == "breakout" else "3d"
                         params = _calc_sl_tp(
                             signal=sig, mark_price=mark_p, atr=atr_v,
-                            liq_zones={"long":  _liq_zones(sym,"LONG", mark_p, range_=_range),
-                                       "short": _liq_zones(sym,"SHORT",mark_p, range_=_range)},
+                            liq_zones={"long":  _liq_zones(sym,"LONG", mark_p, range_="7d"),  # [v3.95] 统一用7d
+                                       "short": _liq_zones(sym,"SHORT",mark_p, range_="7d")},
                             k1h=k1h, ema20=ema20,
                         )
                         if "error" not in params:

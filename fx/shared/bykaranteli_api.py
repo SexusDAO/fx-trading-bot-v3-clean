@@ -87,7 +87,7 @@ def _get(path: str, params: dict | None = None, ttl: int = _CACHE_TTL) -> Any:
         api_key = _pick_key()
         headers = {"X-API-Key": api_key}
         try:
-            r = requests.get(f"{_BASE}{path}", params=params, headers=headers, timeout=12)
+            r = requests.get(f"{_BASE}{path}", params=params, headers=headers, timeout=3)  # [v3.95] BYK长期超时，快速失败进三级
             if r.status_code == 200:
                 data = r.json()
                 _cache[key_str] = (now, data)
