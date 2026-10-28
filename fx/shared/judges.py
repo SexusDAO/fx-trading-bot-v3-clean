@@ -3913,7 +3913,11 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
     ema50_4h = ind.get("ema50_4h", 0.0)
     _ema_gap_4h = (ema20_4h - ema50_4h) / (ema50_4h + 1e-9) if ema50_4h > 0 else 0
     # [v3.99] 空头用独立的更严格门槛（0.8% vs 多头0.5%）
-    _ema_gap_short = getattr(_config_mod, 'EMA_TREND_EMA_GAP_MIN_PCT_SHORT', _EMA_GAP * 1.6)
+    try:
+        import config as _cm_gap
+        _ema_gap_short = getattr(_cm_gap, 'EMA_TREND_EMA_GAP_MIN_PCT_SHORT', _EMA_GAP * 1.6)
+    except Exception:
+        _ema_gap_short = _EMA_GAP * 1.6  # 默认0.8%
     if _ema_gap_4h >= _EMA_GAP:
         _ema_direction = "long"    # 4H 多头排列
     elif _ema_gap_4h <= -_ema_gap_short:
