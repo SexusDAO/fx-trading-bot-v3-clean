@@ -358,7 +358,7 @@ KLINE_HUB_SYMBOLS_MAX = 165  # 对应候选池上限 SCAN_POOL_MAX=165；连接�
 KLINE_REQUEST_TOTAL_SEC = 8.0     # 单次 get_klines 调用总时限（秒，含重试、重试间隔、直连失败后改走代理）
 API_REQUEST_TIMEOUT     = (3, 5)    # 全局 REST 接口超时 (connect_s, read_s)：公开行情 _get 与签名查询/撤单/杠杆等
 API_REQUEST_MAX_RETRY   = 1         # 全局 REST 接口最多重试次数（_retry 总尝试 = 1 + 此值）
-API_SLOW_LOG_SEC        = 3.0       # [慢请求诊断] _retry 单次调用总耗时(含重试/退避)超过该秒数记 warning，便于看慢请求分布
+API_SLOW_LOG_SEC        = 6.0       # [v3.99c] 3s→6s：proxy/direct切换时正常延迟约4-5s，降低告警噪音
 PATROL_REST_POOL_WORKERS = 2        # patrol 路径读请求专用线程池大小（避免慢请求占满默认 executor）
 PATROL_REST_TIMEOUT_SEC  = 10.0     # patrol 读请求在池内的等待上限（秒）；超时按「查询失败」处理，本轮跳过
 ORDER_REQUEST_TIMEOUT   = (5, 10)   # 下单类接口（order / batchOrders / algoOrder）超时，比查询宽松
