@@ -2251,8 +2251,8 @@ class SignalWatcher:
                     try:
                         from shared.calc_sl_tp import calc_sl_tp as _cst_sw
                         from shared.liq_cache import get_liq_zones_cached as _lgc
-                        _liq_long  = await loop.run_in_executor(None, lambda: _lgc(sym, 'LONG',  mark_mp, range_='7d'  # [v3.98] 预热只缓存7d，与缓存key对齐))
-                        _liq_short = await loop.run_in_executor(None, lambda: _lgc(sym, 'SHORT', mark_mp, range_='7d'  # [v3.98] 预热只缓存7d，与缓存key对齐))
+                        _liq_long  = await loop.run_in_executor(None, lambda: _lgc(sym, 'LONG',  mark_mp, range_='7d')  # [v3.98] 预热只缓存7d，与缓存key对齐
+                        _liq_short = await loop.run_in_executor(None, lambda: _lgc(sym, 'SHORT', mark_mp, range_='7d')  # [v3.98] 预热只缓存7d，与缓存key对齐
                         _new_sig   = dict(entry.signal)
                         _new_params = _cst_sw(
                             signal=_new_sig, mark_price=mark_mp, atr=atr_v,
