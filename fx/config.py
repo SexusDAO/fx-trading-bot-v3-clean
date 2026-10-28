@@ -880,6 +880,7 @@ EMA_RETEST_ENABLED   = True    # 总开关；False 时退化为普通 pullback�
 EMA_RETEST_TOUCH_PCT = 0.003   # 触碰容差：近3根K线最低/高价与EMA20的距离 <= EMA20 × 0.3%
 EMA_RETEST_SIZE_CAP  = 0.65    # Retest 命中时仓位上限（仅提升 medium 信号）
 RECOVERED_MAX_HOLD_HOURS     = 8      # 孤儿(recovered)仓位最大持有时间（小时；原写死 12）
+RECOVERED_EMA_FILTER         = True   # recovered 认领时检查 1H EMA 方向：逆势仓位跳过认领（数据失败时降级允许）
                                       # 4H 趋势追踪，比 pullback 的 8H 宽松，比 reversal 的 12H 宽松
 
 # ── Signal Analytics（信号分析系统）─────────────────────────────────────────

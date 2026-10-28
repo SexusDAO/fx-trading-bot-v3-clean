@@ -950,6 +950,34 @@ async def _startup_sync_lite() -> None:
                 )
             except Exception:
                 pass
+            # ── [v3.92] recovered EMA 方向过滤：逆势孤儿跳过认领 ────────────────
+            try:
+                import config as _cfg_rec
+                if getattr(_cfg_rec, "RECOVERED_EMA_FILTER", True):
+                    from shared.market_data_hub import get_klines as _get_kl
+                    _kl1h = _get_kl(sym, "1h", 60)
+                    if _kl1h and len(_kl1h) >= 50:
+                        _cls = [float(k[4]) for k in _kl1h]
+                        def _ema_s(xs, n):
+                            k2 = 2/(n+1); v = xs[0]
+                            for x in xs[1:]: v = x*k2 + v*(1-k2)
+                            return v
+                        _ema20 = _ema_s(_cls, 20)
+                        _ema50 = _ema_s(_cls, 50)
+                        _dir = pos_side.upper()
+                        if _dir == "SHORT" and _ema20 > _ema50 * 1.001:
+                            logger.warning(
+                                f"[sync_lite] {sym}({pos_side}) recovered EMA过滤: "
+                                f"1H多头排列(EMA20={_ema20:.5g}>EMA50={_ema50:.5g})，跳过认领逆势空单")
+                            continue
+                        elif _dir == "LONG" and _ema20 < _ema50 * 0.999:
+                            logger.warning(
+                                f"[sync_lite] {sym}({pos_side}) recovered EMA过滤: "
+                                f"1H空头排列(EMA20={_ema20:.5g}<EMA50={_ema50:.5g})，跳过认领逆势多单")
+                            continue
+            except Exception as _ef:
+                logger.debug(f"[sync_lite] {sym} recovered EMA过滤取数失败，降级允许认领: {_ef}")
+            # ─────────────────────────────────────────────────────────────────────
             _now_ms = int(time.time() * 1000)
             ps, _notes = _build_orphan_record(sym, pos_side, rp, algo_orders, open_orders, _now_ms)
             ps["source"] = "orphan_recovered_sync_lite"
@@ -1111,6 +1139,33 @@ async def _sync_positions_on_startup() -> None:
             ps    = _match_local_position(_local_all, sym, pos_side)
 
             if ps is None:
+                # ── [v3.92] recovered EMA 方向过滤 ─────────────────────────────
+                try:
+                    import config as _cfg_rec2
+                    if getattr(_cfg_rec2, "RECOVERED_EMA_FILTER", True):
+                        from shared.market_data_hub import get_klines as _get_kl2
+                        _kl1h2 = _get_kl2(sym, "1h", 60)
+                        if _kl1h2 and len(_kl1h2) >= 50:
+                            _cls2 = [float(k[4]) for k in _kl1h2]
+                            def _ema_s2(xs, n):
+                                k2 = 2/(n+1); v = xs[0]
+                                for x in xs[1:]: v = x*k2 + v*(1-k2)
+                                return v
+                            _e20 = _ema_s2(_cls2, 20); _e50 = _ema_s2(_cls2, 50)
+                            _dir2 = pos_side.upper()
+                            if _dir2 == "SHORT" and _e20 > _e50 * 1.001:
+                                logger.warning(
+                                    f"[startup_sync] {sym}({pos_side}) recovered EMA过滤: "
+                                    f"1H多头排列(EMA20={_e20:.5g}>EMA50={_e50:.5g})，跳过认领逆势空单")
+                                continue
+                            elif _dir2 == "LONG" and _e20 < _e50 * 0.999:
+                                logger.warning(
+                                    f"[startup_sync] {sym}({pos_side}) recovered EMA过滤: "
+                                    f"1H空头排列(EMA20={_e20:.5g}<EMA50={_e50:.5g})，跳过认领逆势多单")
+                                continue
+                except Exception as _ef2:
+                    logger.debug(f"[startup_sync] {sym} recovered EMA过滤取数失败，降级允许认领: {_ef2}")
+                # ──────────────────────────────────────────────────────────────
                 _now_ms = int(_time.time() * 1000)
                 ps, _orphan_notes = _build_orphan_record(sym, pos_side, rp, _algo_orders, open_orders, _now_ms)
                 if len(_orphan_notes) and any("歧义" in _n for _n in _orphan_notes):
