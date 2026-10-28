@@ -338,7 +338,7 @@ API_418_COOLDOWN_SEC = 60  # 收到 Binance 418 后全局暂停所有 REST 请�
 HUB_KLINE_FETCH_TIMEOUT = 8.0  # hub 单次历史K线拉取总时限（秒），超时按空结果处理、30s 后重试
 LIQ_PREFETCH_MAX_WORKERS = 2   # 预热线程数；8 线程实测加剧 GIL 竞争，事件循环反复阻塞 2~4s，回退到 4
 LIQ_PREFETCH_SLEEP_SEC   = 2.0  # [v3.95] 每标的节流间隔=CG限速间隔(30次/分)，后台慢速填充不抢扫描配额
-LIQ_PREFETCH_FETCH_TIMEOUT_SEC = 15.0 # [v3.95] 单次拉取上限提升，给CG响应更多时间
+LIQ_PREFETCH_FETCH_TIMEOUT_SEC = 30.0 # [v3.96] 排队等限速(2s)+请求(~2s)×pool(4)=需要16s+，改为30s
 LIQ_PREFETCH_MAX_SYMBOLS = 60            # [v3.95] 候选池扩大到60，2s/次 × 60 = 120s跑完一轮，缓存TTL30min覆盖率足够
 LIQ_PREFETCH_PRIORITY_POSITIONS = True   # 持仓标的优先且必预热（不受上限限制）；False 时回退为旧行为（全池预热）
 LIQ_PRESCAN_PREFETCH_ENABLED     = False  # 扫描前同步预热（已改为后台持续预热，扫描只读缓存；True=恢复旧行为，扫描会等 Clawby）

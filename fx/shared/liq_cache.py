@@ -377,7 +377,7 @@ def _fetch_pool():
         with _FETCH_POOL_LOCK:
             if _FETCH_POOL is None:
                 from concurrent.futures import ThreadPoolExecutor as _TPE
-                _FETCH_POOL = _TPE(max_workers=4, thread_name_prefix="liq-fetch")
+                _FETCH_POOL = _TPE(max_workers=8, thread_name_prefix="liq-fetch")  # [v3.96] 4→8，减少排队深度
     return _FETCH_POOL
 
 
