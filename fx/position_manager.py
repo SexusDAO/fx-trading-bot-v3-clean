@@ -151,6 +151,39 @@ def is_system_order_update(symbol: str) -> bool:
     return False
 
 # ─────────────────────────────────────────────────────────────────────────────
+# [v3.93] 孤儿仓位保护单撤销（executor precheck 调用，新开仓替换孤儿前清理）
+# ─────────────────────────────────────────────────────────────────────────────
+async def _cancel_guards_for_orphan(pos: dict) -> None:
+    """撤销 recovered 孤儿仓位的 SL/TP 保护单，供新开仓替换孤儿时调用。
+    只做撤单，不删 pos_state（由 add_position 原子替换）。
+    失败不抛异常，只记日志。"""
+    symbol  = pos.get("symbol", "")
+    sl_id   = pos.get("sl_order_id")
+    tp1_id  = pos.get("tp1_order_id")
+    tp2_id  = pos.get("tp2_order_id")
+    pid     = pos.get("pos_id", symbol)
+    logger.info(f"[pm] {symbol} 撤孤儿保护单: sl={sl_id} tp1={tp1_id} tp2={tp2_id} (orphan={pid})")
+    import asyncio
+    from shared.binance_api import cancel_order, cancel_algo_order
+    async def _try(oid, is_algo):
+        if not oid:
+            return
+        try:
+            if is_algo:
+                await asyncio.to_thread(cancel_algo_order, symbol, int(oid))
+            else:
+                await asyncio.to_thread(cancel_order, symbol, int(oid))
+            logger.info(f"[pm] {symbol} 孤儿保护单 {oid} 已撤")
+        except Exception as e:
+            logger.debug(f"[pm] {symbol} 孤儿保护单 {oid} 撤销失败（可能已成交/不存在）: {e}")
+    await asyncio.gather(
+        _try(sl_id,  is_algo=True),
+        _try(tp1_id, is_algo=False),
+        _try(tp2_id, is_algo=False),
+        return_exceptions=True,
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 内存状态(浮盈水位线、告警节流)
 # ─────────────────────────────────────────────────────────────────────────────
 _last_1h_close: dict[str, tuple] = {}   # pos_id → (最近已收盘1H收盘价, 该K线开盘时间ms, 检查时的小时桶)；仅内存，不落盘，重启后从下一根1H收盘起生效

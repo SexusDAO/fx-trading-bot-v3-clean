@@ -220,8 +220,16 @@ def add_position(record: dict) -> bool:
         existing = [p for p in data if p.get("symbol") == sym
                     and p.get("status") in ("open", "pending", "patching", "pending_guard")]
         if existing:
-            logger.error(f"[state] add_position 拒绝：{sym} 已有记录")
-            return False
+            # [v3.93] recovered 孤儿可被新开仓替换：自动删除孤儿记录，写入新仓
+            recovered_only = all(p.get("mode") == "recovered" for p in existing)
+            if recovered_only:
+                rec_ids = [p.get("pos_id") for p in existing]
+                data = [p for p in data if p.get("pos_id") not in rec_ids]
+                logger.warning(f"[state] add_position {sym}: 已有 recovered 孤儿记录 {rec_ids}，"
+                               f"新开仓替换孤儿（孤儿记录已删除）")
+            else:
+                logger.error(f"[state] add_position 拒绝：{sym} 已有非孤儿记录")
+                return False
         data.append(record)
         _save_pos(data)
     return True

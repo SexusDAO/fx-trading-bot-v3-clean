@@ -198,6 +198,23 @@ def _precheck(signal: dict) -> tuple[bool, str]:
         if p["symbol"] == symbol:
             status = p.get("status", "")
             if status in ("open", "pending", "patching", "pending_guard"):
+                # [v3.93] recovered 孤儿不阻止新开仓：异步撤保护单+删记录，由 add_position 原子替换
+                if p.get("mode") == "recovered":
+                    pid = p.get("pos_id", symbol)
+                    logger.warning(f"[executor] {symbol} _precheck: 发现 recovered 孤儿 {pid}，"
+                                   f"新开仓将替换孤儿（保护单由 pm 在成交后重新挂）")
+                    # 撤孤儿保护单（异步，不阻塞 precheck）
+                    try:
+                        import asyncio as _aio
+                        from position_manager import _cancel_guards_for_orphan
+                        loop = _aio.get_event_loop()
+                        if loop.is_running():
+                            _aio.ensure_future(_cancel_guards_for_orphan(p))
+                        else:
+                            loop.run_until_complete(_cancel_guards_for_orphan(p))
+                    except Exception as _ce:
+                        logger.debug(f"[executor] {symbol} 孤儿保护单撤销失败（非致命）: {_ce}")
+                    continue  # 允许新开仓继续，add_position 会原子替换
                 return False, f"{symbol} 已有机器人{'持仓' if status=='open' else ('补挂中' if status=='patching' else '挂单')}"
 
     # 1-2: 检查 pending/patching orders（兼容不同字段名）
