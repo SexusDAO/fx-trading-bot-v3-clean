@@ -1186,3 +1186,6 @@ LOOP_DEBUG_SLOW_CALLBACK = False # True 时 asyncio 会记录所有超过 LOOP_S
 # ── [refactor-B2] 扫描计算移出主进程 ────────────────────────────────────────
 SCAN_PROCESS_WORKERS = 1   # 分析进程数上限；2 核机器建议 1（主进程独占另一个核）
 POOL_OI_WORKERS      = 2   # OI 拉取线程数（原 6）
+
+# ── [refactor-B3] 日志后台写入 ──────────────────────────────────────────────
+BG_LOG_WRITER = True   # trade_log / advisor_log 追加写改由后台线程完成；False=原同步写

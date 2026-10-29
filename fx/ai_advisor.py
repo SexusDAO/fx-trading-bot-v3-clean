@@ -408,8 +408,8 @@ def _log_result(log_path: Path, date_str: str, report: str,
         # 用户决策在此追加（由外部写入）
         "user_decision": None,
     }
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    from shared.trade_log_io import append_jsonl_bg as _bg_append   # [refactor-B3] 后台写入
+    _bg_append(log_path, entry)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

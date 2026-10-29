@@ -116,3 +116,55 @@ def update_jsonl_field(path, match_key: str, match_val, field: str, value) -> bo
         tmp.write_text("\n".join(new) + "\n")
         os.replace(tmp, p)
     return hit
+
+
+# ── [refactor-B3] 后台写入：调用方只把记录放进队列立即返回，由单独线程按顺序追加写盘 ──
+import queue as _queue
+_BG_Q: "_queue.Queue" = _queue.Queue(maxsize=10000)
+_BG_THREAD = None
+_BG_START_LOCK = threading.Lock()
+
+
+def _bg_worker() -> None:
+    while True:
+        path, record, encoding = _BG_Q.get()
+        try:
+            append_jsonl(path, record, encoding)
+        except Exception as e:
+            logger.error(f"[trade_log_io] 后台写入失败 {path}: {e}")
+        finally:
+            _BG_Q.task_done()
+
+
+def append_jsonl_bg(path, record: dict, encoding: str | None = "utf-8") -> None:
+    """非阻塞追加。开关 BG_LOG_WRITER=False、或队列满时，退回同步写，保证不丢记录。"""
+    global _BG_THREAD
+    try:
+        import config as _c
+        enabled = bool(getattr(_c, "BG_LOG_WRITER", True))
+    except Exception:
+        enabled = True
+    if not enabled:
+        return append_jsonl(path, record, encoding)
+    if _BG_THREAD is None or not _BG_THREAD.is_alive():
+        with _BG_START_LOCK:
+            if _BG_THREAD is None or not _BG_THREAD.is_alive():
+                _BG_THREAD = threading.Thread(target=_bg_worker, daemon=True, name="log-writer")
+                _BG_THREAD.start()
+    try:
+        _BG_Q.put_nowait((path, record, encoding))
+    except _queue.Full:
+        append_jsonl(path, record, encoding)
+
+
+def flush_bg(timeout: float = 5.0) -> bool:
+    """等待后台队列写完（退出前调用）。返回是否在超时前写完。"""
+    import time as _t
+    end = _t.monotonic() + timeout
+    while _BG_Q.unfinished_tasks and _t.monotonic() < end:
+        _t.sleep(0.05)
+    return not _BG_Q.unfinished_tasks
+
+
+import atexit as _atexit
+_atexit.register(flush_bg, 5.0)   # [refactor-B3] 正常退出前把队列里的记录写完

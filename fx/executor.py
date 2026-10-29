@@ -1503,8 +1503,8 @@ def _append_trade_log(
         }
         log_path = pathlib.Path(__file__).parent / "logs" / "trade_log.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "a") as f:
-            f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
+        from shared.trade_log_io import append_jsonl_bg as _bg_append   # [refactor-B3] 后台写入
+        _bg_append(log_path, entry, None)
     except Exception as _te:
         logger.warning(f"[executor] trade_log 写入失败: {_te}")
 
