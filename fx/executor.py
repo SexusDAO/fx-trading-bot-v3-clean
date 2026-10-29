@@ -759,7 +759,8 @@ def _place_open_order(symbol: str, direction: str, mode: str,
                        precision: dict,
                        notional: float = 0.0,
                        entry_mode_hint: str = "immediate",
-                       expire_ts: int | None = None) -> tuple[int | None, str]:
+                       expire_ts: int | None = None,
+                       intent: dict | None = None) -> tuple[int | None, str]:
     """
     提交开仓限价单，返回 (orderId, error_reason)。
     失败直接返回 None，不重试。
@@ -791,12 +792,27 @@ def _place_open_order(symbol: str, direction: str, mode: str,
         #   参数校验失败时会抛 TypeError（被外层吞掉或中断本次开仓流程）。改为返回 (None, 原因)，与其它失败出口一致。
         return None, f"下单参数校验失败: {_val_reason}"
 
+    # [refactor-B5] 提交前先写开仓意图账本（fsync），并给开仓单打上可识别的 clientOrderId
+    _ent_kw = {}
+    try:
+        import config as _cfg_l
+        if getattr(_cfg_l, "ENTRY_LEDGER_ENABLED", True):
+            from shared import entry_ledger as _el
+            _cid = _el.new_entry_client_id()
+            _ent_kw = {"newClientOrderId": _cid}
+            _el.record_intent({**(intent or {}), "symbol": symbol, "direction": direction.upper(),
+                               "mode": mode, "client_order_id": _cid,
+                               "price": float(price_str), "qty": float(qty_str)})
+    except Exception as _le:
+        logger.warning(f"[executor] {symbol} 开仓意图账本写入异常（不影响下单）: {_le}")
+        _ent_kw = {}
     try:
         if mode == "breakout":
             # v3.6: expire_ts 由外层 _execute_async 统一计算并传入，不在此重复计算
             order = api.place_order(
                 symbol=symbol, side=side,
                 order_type="LIMIT",
+                **_ent_kw,
                 quantity=float(qty_str),
                 price=float(price_str),
                 timeInForce="GTD",
@@ -809,6 +825,7 @@ def _place_open_order(symbol: str, direction: str, mode: str,
             order = api.place_order(
                 symbol=symbol, side=side,
                 order_type="LIMIT",
+                **_ent_kw,
                 quantity=float(qty_str),
                 price=float(price_str),
                 timeInForce="GTX",
@@ -818,6 +835,7 @@ def _place_open_order(symbol: str, direction: str, mode: str,
             order = api.place_order(
                 symbol=symbol, side=side,
                 order_type="LIMIT",
+                **_ent_kw,
                 quantity=float(qty_str),
                 price=float(price_str),
                 timeInForce="GTD",
@@ -827,6 +845,7 @@ def _place_open_order(symbol: str, direction: str, mode: str,
             order = api.place_order(
                 symbol=symbol, side=side,
                 order_type="LIMIT",
+                **_ent_kw,
                 quantity=float(qty_str),
                 price=float(price_str),
                 timeInForce="GTC",
@@ -2071,6 +2090,12 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
         notional=notional,
         entry_mode_hint=entry_mode,
         expire_ts=expire_ts,
+        intent={   # [refactor-B5] 账本里带上原始止损止盈，孤儿认领时沿用
+            "sl_price":  params.get("sl_price"),
+            "tp1_price": params.get("tp1_price"),
+            "tp2_price": params.get("tp2_price"),
+            "sig_id":    signal.get("_sig_id", ""),
+        } if params else None,
     )
     if order_id is None:
         logger.error(f"[executor] {symbol} 开仓单提交失败: {err}")

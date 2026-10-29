@@ -1189,3 +1189,7 @@ POOL_OI_WORKERS      = 2   # OI 拉取线程数（原 6）
 
 # ── [refactor-B3] 日志后台写入 ──────────────────────────────────────────────
 BG_LOG_WRITER = True   # trade_log / advisor_log 追加写改由后台线程完成；False=原同步写
+
+# ── [refactor-B5] 开仓意图账本（根治「系统自己开的仓被当成孤儿」）────────────────
+ENTRY_LEDGER_ENABLED  = True   # 下单前写 logs/entry_intents.jsonl；对账时命中即按系统仓位认领。False=原逻辑
+ENTRY_LEDGER_MAX_AGE_H = 48    # 账本记录有效期（小时）

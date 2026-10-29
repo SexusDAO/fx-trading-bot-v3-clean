@@ -636,6 +636,29 @@ def _build_orphan_record(sym: str, pos_side: str, rp: dict, algo_orders, open_or
 _sync_lite_busy = False       # 防止 WS 重连回调与定时任务重叠执行
 
 
+def _b5_alert_unclaimed(sym: str, pos_side: str, rp: dict, reason: str) -> None:
+    """[refactor-B5] 未被认领的交易所仓位：写审计文件 + 钉钉提醒（每标的每方向 30 分钟最多一次）。"""
+    try:
+        import time as _t
+        key = (sym, pos_side)
+        last = _b5_alert_unclaimed._last.get(key, 0)
+        rec = {"ts": _t.time(), "symbol": sym, "side": pos_side, "reason": reason,
+               "qty": rp.get("positionAmt"), "entry": rp.get("entryPrice"), "updateTime": rp.get("updateTime")}
+        from shared.trade_log_io import append_jsonl_bg
+        append_jsonl_bg(Path(__file__).parent / "logs" / "orphan_audit.jsonl", rec)
+        if _t.time() - last < 1800:
+            return
+        _b5_alert_unclaimed._last[key] = _t.time()
+        from shared.notifier import notify_async
+        asyncio.get_running_loop().create_task(notify_async(f"⚠️ 交易所有仓位未被系统认领：{sym} {pos_side} 数量={rp.get('positionAmt')} "
+                     f"均价={rp.get('entryPrice')}\n原因：{reason}\n请在 App 确认是否有止损"))
+    except Exception as _e:
+        logger.warning(f"[sync_lite] 未认领仓位提醒失败: {_e}")
+
+
+_b5_alert_unclaimed._last = {}
+
+
 def _claim_quota(ts_list, limits: dict, claimed: dict) -> bool:
     """孤儿仓位认领配额判断。ts_list = [(open_ms, symbol)]，claimed = {"total":n, "long":n, "short":n}（已含本地持仓）。"""
     return (claimed["total"] < limits["total"]
@@ -929,8 +952,21 @@ async def _startup_sync_lite() -> None:
                 continue
             _side = pos_side.lower()
             wants = {"total": 1, "long": 1 if _side == "long" else 0, "short": 1 if _side == "short" else 0}
+            # [refactor-B5] 查开仓意图账本：命中 = 系统自己开的仓，直接认领，不走配额平仓 / 均线过滤
+            _intent = None
+            try:
+                import config as _cfg_l5
+                if getattr(_cfg_l5, "ENTRY_LEDGER_ENABLED", True):
+                    from shared import entry_ledger as _el5
+                    _intent = _el5.find_intent(sym, pos_side,
+                                               float(getattr(_cfg_l5, "ENTRY_LEDGER_MAX_AGE_H", 48)))
+            except Exception as _ile:
+                logger.warning(f"[sync_lite] {sym}({pos_side}) 读开仓意图账本失败: {_ile}")
+            if _intent is not None:
+                logger.warning(f"[sync_lite] {sym}({pos_side}) 账本命中：系统开仓 cid={_intent.get('client_order_id')}，"
+                               f"按系统仓位认领")
             # (open_ms, symbol) 语义：这里用 0 占位，配额只看方向
-            if not _claim_quota([(0, _side)], limits, claimed):
+            if _intent is None and not _claim_quota([(0, _side)], limits, claimed):
                 qty = abs(float(rp.get("positionAmt", 0) or 0))
                 try:
                     _close_side = "SELL" if pos_side == "LONG" else "BUY"
@@ -954,7 +990,7 @@ async def _startup_sync_lite() -> None:
             # ── [v3.92] recovered EMA 方向过滤：逆势孤儿跳过认领 ────────────────
             try:
                 import config as _cfg_rec
-                if getattr(_cfg_rec, "RECOVERED_EMA_FILTER", True):
+                if _intent is None and getattr(_cfg_rec, "RECOVERED_EMA_FILTER", True):
                     from shared.market_data_hub import get_klines as _get_kl
                     _kl1h = _get_kl(sym, "1h", 60)
                     if _kl1h and len(_kl1h) >= 50:
@@ -970,11 +1006,13 @@ async def _startup_sync_lite() -> None:
                             logger.warning(
                                 f"[sync_lite] {sym}({pos_side}) recovered EMA过滤: "
                                 f"1H多头排列(EMA20={_ema20:.5g}>EMA50={_ema50:.5g})，跳过认领逆势空单")
+                            _b5_alert_unclaimed(sym, pos_side, rp, "均线过滤跳过（无开仓账本）")
                             continue
                         elif _dir == "LONG" and _ema20 < _ema50 * 0.999:
                             logger.warning(
                                 f"[sync_lite] {sym}({pos_side}) recovered EMA过滤: "
                                 f"1H空头排列(EMA20={_ema20:.5g}<EMA50={_ema50:.5g})，跳过认领逆势多单")
+                            _b5_alert_unclaimed(sym, pos_side, rp, "均线过滤跳过（无开仓账本）")
                             continue
             except Exception as _ef:
                 logger.debug(f"[sync_lite] {sym} recovered EMA过滤取数失败，降级允许认领: {_ef}")
@@ -982,6 +1020,14 @@ async def _startup_sync_lite() -> None:
             _now_ms = int(time.time() * 1000)
             ps, _notes = _build_orphan_record(sym, pos_side, rp, algo_orders, open_orders, _now_ms)
             ps["source"] = "orphan_recovered_sync_lite"
+            if _intent is not None:   # [refactor-B5] 系统仓位：沿用开仓时算好的止损止盈与策略类型
+                ps["source"] = "ledger_reclaimed"
+                ps["ledger_client_order_id"] = _intent.get("client_order_id")
+                for _k in ("sl_price", "tp1_price", "tp2_price"):
+                    if not ps.get(_k) and _intent.get(_k):
+                        ps[_k] = float(_intent[_k])
+                if _intent.get("mode"):
+                    ps["intent_mode"] = _intent["mode"]
             if not add_position(ps):
                 logger.warning(f"[sync_lite] {sym}({pos_side}) 孤儿建档失败")
                 continue
