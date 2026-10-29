@@ -632,10 +632,13 @@ class MarketDataHub:
                     self._connected = True
                     delay = RECONNECT_BASE
                     logger.info("[hub] WS 已连接")
-                    while not self._stopping:
-                        # 30 秒无消息 → 超时异常 → 走断线重连
-                        raw = await asyncio.wait_for(ws.recv(), timeout=NO_MSG_TIMEOUT)
-                        self._handle_frame(raw)
+                    if getattr(config, "HUB_DECOUPLED_RECV", True):   # [refactor-B10] 收/解析拆开
+                        await self._pump(ws, self._handle_frame, "markPrice流")
+                    else:
+                        while not self._stopping:
+                            # 30 秒无消息 → 超时异常 → 走断线重连
+                            raw = await asyncio.wait_for(ws.recv(), timeout=NO_MSG_TIMEOUT)
+                            self._handle_frame(raw)
             except asyncio.CancelledError:
                 raise
             except asyncio.TimeoutError:
@@ -646,6 +649,73 @@ class MarketDataHub:
                 _fb.failed()          # 仅「握手前」失败才降级；连上之后的断线不算代理故障
                 self._on_disconnect()
 
+
+    async def _pump(self, ws, handler, name: str) -> None:
+        """[refactor-B10] 收消息与解析拆开。
+        背景：原来在同一个循环里「收一帧 → 解析一帧」。全市场行情 + 一百多个币的 K 线数据量大，
+          2 核机器上解析一慢，websockets 的接收缓冲（max_queue=32/64）很快满，库会暂停从 socket 读数据，
+          币安服务器发现客户端长时间不读，直接切断连接 → 日志里的「no close frame received or sent」。
+        做法：读协程只负责 ws.recv() 把原始帧放进本地缓冲（deque），立刻继续读；
+          解析协程从缓冲里取帧调用原来的 handler（_handle_frame / _handle_market_frame，逻辑不变），
+          每解析 HUB_PARSE_YIELD_EVERY 帧让出一次事件循环。
+          缓冲满（HUB_RX_BUFFER，默认 2000 帧）时丢最旧的帧并计数告警——行情帧只关心最新值，
+          K 线断档由原有的「断线增量补缺」兜底。
+        30 秒无消息超时（NO_MSG_TIMEOUT）保持原行为：仍由读协程抛 TimeoutError，走原有断线重连。
+        关闭：config.HUB_DECOUPLED_RECV = False，回到原来的边收边解析。"""
+        import collections
+        try:
+            cap = int(getattr(config, "HUB_RX_BUFFER", 2000))
+            yield_every = max(1, int(getattr(config, "HUB_PARSE_YIELD_EVERY", 20)))
+        except Exception:
+            cap, yield_every = 2000, 20
+        buf: collections.deque = collections.deque()
+        has_data = asyncio.Event()
+        dropped = {"n": 0, "last_log": time.monotonic()}
+
+        async def _parser():
+            n = 0
+            while True:
+                await has_data.wait()
+                while buf:
+                    raw = buf.popleft()
+                    try:
+                        handler(raw)
+                    except Exception as e:   # 单帧解析失败不影响后续帧
+                        logger.debug(f"[hub] {name} 解析帧失败: {e}")
+                    n += 1
+                    if n % yield_every == 0:
+                        await asyncio.sleep(0)
+                has_data.clear()
+
+        parser_task = asyncio.ensure_future(_parser())
+        try:
+            while not self._stopping:
+                raw = await asyncio.wait_for(ws.recv(), timeout=NO_MSG_TIMEOUT)
+                if len(buf) >= cap:
+                    buf.popleft()
+                    dropped["n"] += 1
+                buf.append(raw)
+                has_data.set()
+                # [refactor-B10] 自测发现：websockets 缓冲里有现成帧时 recv() 不让出事件循环，
+                #   读协程会连续读光缓冲、解析协程一直轮不到。每读一帧让出一次，保证两边交替执行。
+                await asyncio.sleep(0)
+                if dropped["n"] and time.monotonic() - dropped["last_log"] >= 60:
+                    logger.warning(f"[hub] {name} 解析跟不上，过去 60s 丢弃 {dropped['n']} 帧（缓冲上限 {cap}）")
+                    dropped["n"] = 0
+                    dropped["last_log"] = time.monotonic()
+                if parser_task.done():   # 解析协程意外退出 → 交给外层重连
+                    raise RuntimeError(f"{name} 解析协程退出: {parser_task.exception()}")
+        finally:
+            # [refactor-B10] 退出前给解析协程最多 2 秒把已收到的帧处理完，避免断线时丢掉缓冲里的数据
+            if buf and not parser_task.done():
+                _end = time.monotonic() + 2.0
+                while buf and time.monotonic() < _end and not parser_task.done():
+                    await asyncio.sleep(0.01)
+            parser_task.cancel()
+            try:
+                await parser_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def _market_loop(self, idx: int = 0) -> None:
         """第 idx 条 /market/stream 组合流连接（连接 0 带 miniTicker；每条连接各自承载一部分 K 线）：连上后 SUBSCRIBE；断线清缓存并退避重连。"""
@@ -674,9 +744,12 @@ class MarketDataHub:
                     delay = RECONNECT_BASE
                     logger.info(f"[hub] 组合流#{idx} 已连接")
                     await self._on_market_connected(ws, idx)
-                    while not self._stopping:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=NO_MSG_TIMEOUT)
-                        self._handle_market_frame(raw)
+                    if getattr(config, "HUB_DECOUPLED_RECV", True):   # [refactor-B10] 收/解析拆开
+                        await self._pump(ws, self._handle_market_frame, f"组合流#{idx}")
+                    else:
+                        while not self._stopping:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=NO_MSG_TIMEOUT)
+                            self._handle_market_frame(raw)
             except asyncio.CancelledError:
                 raise
             except asyncio.TimeoutError:

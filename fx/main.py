@@ -1551,6 +1551,13 @@ async def main() -> None:
 
     # ── 临时诊断（定位后删除）────────────────────────────────────────────────
     # 启动事件循环看门狗线程：检测阻塞 > 2s 时 dump 所有线程堆栈
+    # [refactor-B9] 看门狗误报修复：心跳协程原来在启动完成后（P2/P3 之后）才创建，
+    #   但看门狗线程在这里就开始计时，心跳时间戳还停留在模块导入时刻 → 启动期间必然报「阻塞 N 秒」，
+    #   实际事件循环并没有卡（04:06:11 报 6.2s、04:06:21 报 16.2s 即此原因）。
+    #   现在与看门狗同时启动心跳，并先刷新一次时间戳。后面原有的 heartbeat 任务改为不重复创建。
+    global _loop_heartbeat_ts
+    _loop_heartbeat_ts = time.monotonic()
+    _hb_task_early = asyncio.create_task(_loop_heartbeat(), name="heartbeat")
     _wd = threading.Thread(target=_watchdog_thread_fn, daemon=True, name="watchdog")
     _wd.start()
     logger.info("[main] 事件循环看门狗线程已启动（阻塞 > 2s dump 堆栈）")
@@ -1637,15 +1644,48 @@ async def main() -> None:
             _main_loop = asyncio.get_running_loop()
             _pending = {"task": None}
 
+            # [refactor-B10] 重连对齐防抖。
+            #   背景：hub 每次重连都立刻触发一次 _startup_sync_lite（查全部持仓 + 挂单 + 保护单）。
+            #   断线连续发生时（如 04:17/04:18/04:19），对齐一轮接一轮排队，日志出现「上一次重连对齐仍未结束」，
+            #   REST 请求和 CPU 都被占住，反过来让 WS 更容易断。
+            #   做法：重连后等 HUB_SYNC_DEBOUNCE_SEC 秒（默认 20s）再对齐；这段时间内又重连就重新计时，
+            #   多次重连只对齐一次。另外两次对齐至少间隔 HUB_SYNC_MIN_INTERVAL_SEC（默认 60s），
+            #   不足则推迟到满间隔时再做——推迟而不是丢弃，保证断线后一定会对齐一次。
+            #   userData 流断线/重连触发的对齐（_on_ws_reconnect / _on_ws_disconnect）不受影响，仍立即执行。
+            #   关闭：HUB_SYNC_DEBOUNCE_SEC = 0 且 HUB_SYNC_MIN_INTERVAL_SEC = 0，即回到原来的立即对齐。
+            _pending["timer"] = None
+            _pending["last_start"] = 0.0
+            try:
+                import config as _cfg_db
+                _db_sec = float(getattr(_cfg_db, "HUB_SYNC_DEBOUNCE_SEC", 20))
+                _min_iv = float(getattr(_cfg_db, "HUB_SYNC_MIN_INTERVAL_SEC", 60))
+            except Exception:
+                _db_sec, _min_iv = 20.0, 60.0
+
+            def _run_sync_now():
+                _pending["timer"] = None
+                t = _pending["task"]
+                if t is not None and not t.done():
+                    logger.info("[sync_lite] 上一次重连对齐仍未结束，合并本次")
+                    return
+                wait_more = _min_iv - (time.monotonic() - _pending["last_start"])
+                if wait_more > 0:   # 距上次对齐不足最小间隔 → 推迟，不丢弃
+                    _pending["timer"] = _main_loop.call_later(wait_more, _run_sync_now)
+                    return
+                _pending["last_start"] = time.monotonic()
+                logger.info("[main] market_data_hub WS 已恢复，触发轻量对齐...")
+                _pending["task"] = asyncio.ensure_future(_startup_sync_lite())
+
             def _on_ws_hub_reconnect():
                 # hub 回调在其后台线程/task 中执行，转发回主事件循环
                 def _spawn():
-                    t = _pending["task"]
-                    if t is not None and not t.done():
-                        logger.info("[sync_lite] 上一次重连对齐仍未结束，合并本次")
+                    if _db_sec <= 0 and _min_iv <= 0:   # 防抖关闭 → 原行为
+                        _run_sync_now()
                         return
-                    logger.info("[main] market_data_hub WS 已恢复，触发轻量对齐...")
-                    _pending["task"] = asyncio.ensure_future(_startup_sync_lite())
+                    if _pending["timer"] is not None:   # 防抖窗口内又重连 → 重新计时
+                        _pending["timer"].cancel()
+                        logger.info(f"[sync_lite] 防抖窗口内再次重连，{_db_sec:g}s 后统一对齐")
+                    _pending["timer"] = _main_loop.call_later(max(_db_sec, 0.0), _run_sync_now)
                 try:
                     _main_loop.call_soon_threadsafe(_spawn)
                 except Exception as _re:
@@ -1680,7 +1720,7 @@ async def main() -> None:
     # ── 持仓维护任务（P2 内启动：止损/止盈/巡检；自带首次 sleep）──
     tasks = [
         # ── 临时诊断（定位后删除）────────────────────────────────────────────
-        asyncio.create_task(_loop_heartbeat(),                                  name="heartbeat"),
+        _hb_task_early,   # [refactor-B9] 心跳已在看门狗启动时创建，这里复用同一个任务
         # ── 优先级 1：持仓维护（止损/止盈/巡检） ───────────────────────────────
         asyncio.create_task(_adjust_sl_tp_loop_static(),                       name="adjust_sl_tp"),
         asyncio.create_task(_loop_patrol(300, 30),                             name="patrol"),
