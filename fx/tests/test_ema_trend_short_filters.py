@@ -5,7 +5,7 @@ import shared.judges as j
 
 def _ind(direction="short", **kw):
     ema50 = 100.0
-    gap = -0.01 if direction == "short" else 0.01          # 4H 差距 1%
+    gap = -0.016 if direction == "short" else 0.01         # [v3.101] 空头 EMA gap 门槛 1.5%，测试用 -1.6% 确保能过 EMA 排列层
     price = 100.0 * (1 + gap)                              # 价格贴近 4H EMA20（回踩区内）
     ind = {"price": price, "atr_1h": price * 0.015, "rsi_1h": 44.0 if direction == "short" else 55.0,
            "rsi_4h": 40.0 if direction == "short" else 55.0,
