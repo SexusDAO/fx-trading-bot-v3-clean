@@ -138,6 +138,12 @@ def parse_trade_log(start: datetime, end: datetime) -> dict:
     if not TRADE_LOG.exists():
         return result
 
+    # [v3.103] 累计统计（不受时间窗口限制，读全量）
+    result["all_win"] = 0
+    result["all_loss"] = 0
+    result["all_pnl"] = 0.0
+    result["by_mode_market"] = defaultdict(lambda: defaultdict(lambda: {"win": 0, "loss": 0, "pnl": 0.0, "count": 0}))
+
     start_ms = int(start.timestamp() * 1000)
     end_ms   = int(end.timestamp() * 1000)
 
@@ -174,6 +180,21 @@ def parse_trade_log(start: datetime, end: datetime) -> dict:
                 result["by_direction"][dire]["count"] += 1
                 result["by_direction"][dire]["pnl"]   += pnl
                 result["by_direction"][dire]["win" if won else "loss"] += 1
+                # [v3.103] 按市场状态分组
+                mstate = t.get("btc_trend") or t.get("market_mode") or "unknown"
+                if mstate in ("up", "bull"): mstate = "趋势多"
+                elif mstate in ("down", "bear"): mstate = "趋势空"
+                elif mstate in ("neutral", "ranging"): mstate = "震荡"
+                result["by_mode_market"][mode][mstate]["count"] += 1
+                result["by_mode_market"][mode][mstate]["pnl"] += pnl
+                result["by_mode_market"][mode][mstate]["win" if won else "loss"] += 1
+
+            # [v3.103] 累计统计（全量）
+            if t.get("close_time") and t.get("pnl_usdt") is not None:
+                _pnl_all = float(t.get("pnl_usdt", 0))
+                result["all_pnl"] += _pnl_all
+                if _pnl_all > 0: result["all_win"] += 1
+                else: result["all_loss"] += 1
 
             if start_ms <= open_ts <= end_ms:
                 result["opened"].append(t)
@@ -282,6 +303,30 @@ def format_daily_report(scan: dict, trade: dict, date_str: str) -> str:
                 f"  {mode:12s}  {n}笔  胜率{wr_:.0f}%  盈亏{d['pnl']:+.2f}U"
             )
 
+    lines.append("")
+
+    # ── 6. 累计胜率 ─────────────────────────────────────────────────────
+    all_t = trade.get("all_win", 0) + trade.get("all_loss", 0)
+    all_wr = trade.get("all_win", 0) / all_t * 100 if all_t else 0
+    lines.append(f"**⑥ 累计表现**（共 {all_t} 笔）")
+    _all_pnl_v = trade.get("all_pnl", 0)
+    _all_win_v = trade.get("all_win", 0)
+    _all_loss_v = trade.get("all_loss", 0)
+    lines.append(f"  总盈亏: {_all_pnl_v:+.2f}U  胜率: {all_wr:.0f}%  盈{_all_win_v}/亏{_all_loss_v}")
+    lines.append("")
+
+    # ── 7. 策略 × 市场状态矩阵 ──────────────────────────────────────────
+    by_mm = trade.get("by_mode_market", {})
+    if any(by_mm.values()):
+        lines.append("**⑦ 策略 × 市场状态**")
+        for mode, states in sorted(by_mm.items()):
+            parts = []
+            for st, d in sorted(states.items()):
+                n_ = d["count"]
+                wr_ = d["win"] / n_ * 100 if n_ else 0
+                parts.append(f"{st}:{wr_:.0f}%({n_}笔)")
+            lines.append(f"  {mode:12s}  " + "  ".join(parts))
+        lines.append("  💡 样本 <5 笔的格子仅供参考")
     lines.append("")
     lines.append("─" * 30)
     lines.append("⚠️ 胜率数据 <10 笔仅供参考，需累积更多样本")

@@ -1544,6 +1544,10 @@ async def _write_pending_entry(signal: dict, order_id: int, params: dict,
         "open_time":          int(time.time() * 1000),
         "fill_time":          int(time.time() * 1000),
         "_sig_id":            signal.get("_sig_id", ""),
+        # [v3.103] 开仓时市场状态标签，供复盘分析各策略在不同市场状态下的表现
+        "btc_trend":          signal.get("market_env", {}).get("btc_trend", ""),
+        "market_mode":        signal.get("market_env", {}).get("market_mode", ""),
+        "market_volatility":  signal.get("market_env", {}).get("market_volatility", 0.0),
     }
     if not _persist_position_record(rec, "pending_entry"):
         return None
@@ -1583,6 +1587,10 @@ async def _write_pending(signal: dict, order_id: int, params: dict,
         # ── v3.69 触发时快照（供 maintain_pending_order 构造 WatchEntry 存活检查）─
         "ema20_at_open":   signal.get("ind", {}).get("ema20_1h", 0),
         "rsi_at_entry":    signal.get("ind", {}).get("rsi_1h", 50.0),
+        # [v3.103] 市场状态标签
+        "btc_trend":          signal.get("market_env", {}).get("btc_trend", ""),
+        "market_mode":        signal.get("market_env", {}).get("market_mode", ""),
+        "market_volatility":  signal.get("market_env", {}).get("market_volatility", 0.0),
         "status":             "pending",
         "expire_ts":          expire_ts,
         "open_time":          int(time.time() * 1000),
