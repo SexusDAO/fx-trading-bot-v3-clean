@@ -2220,6 +2220,14 @@ def refresh_pool() -> list:
         tickers  = api.get_ticker_24h()
         mp_list  = api.get_all_mark_prices()   # 含资金费率
 
+        # [v3.100] 拉取失败（API 静默返回空列表）时直接退出，不覆盖缓存
+        if not tickers:
+            logger.warning("[scanner] refresh_pool: get_ticker_24h 返回空，跳过本次刷新（保留旧候选池）")
+            return []
+        if not mp_list:
+            logger.warning("[scanner] refresh_pool: get_all_mark_prices 返回空，跳过本次刷新（保留旧候选池）")
+            return []
+
         # 资金费率 map
         fr_map = {}
         for mp in (mp_list or []):
@@ -2339,6 +2347,17 @@ def refresh_pool() -> list:
         logger.info(f"[scanner] 候选池评分: 粗筛通过 {len(coarse)}，合格 {len(usdt)}，入池 {len(pool)}，"
                     f"其中评分>0 {sum(1 for t in _ranked if _scores[t['symbol']] > 0)} 个"
                     f"（评分>0 共 {len(pool_scored)}，0 分补入 {max(0, len(pool) - len(pool_scored))}）")
+
+        # [v3.100] 粗筛结果为 0 时，检查是否上次有有效池——若有则保留，不覆盖
+        if not pool:
+            try:
+                _old = json.loads(POOL_CACHE_FILE.read_text()).get("pool", [])
+            except Exception:
+                _old = []
+            if _old:
+                logger.warning(f"[scanner] refresh_pool: 本次粗筛结果为 0，保留上次候选池（{len(_old)} 个），跳过写入")
+                return _old
+            logger.warning("[scanner] refresh_pool: 粗筛结果为 0 且无历史池，候选池将被清空")
 
         POOL_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         POOL_CACHE_FILE.write_text(json.dumps({
