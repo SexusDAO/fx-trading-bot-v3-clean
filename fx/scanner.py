@@ -938,11 +938,11 @@ def _is_oi_divergence(ind: dict) -> bool:
         return False
     # 波动率前置过滤（尽量快）
     atr_r = ind.get("atr_ratio", 0.0)
-    if atr_r < 0.5:
+    if atr_r < 0.8:   # [v3.100] 0.5%→0.8%: 过滤低波动死鱼币，扫描/触发器对齐
         return False
-    # OI 变化幅度前置检查（8% 粗阳闹）
+    # OI 变化幅度前置检查（[v3.100] 8%→6.5%，与触发器4.5%保持差距）
     oi_change = abs(oi_now - oi_1h_ago) / (oi_1h_ago + 1e-9)
-    if oi_change < 0.08:
+    if oi_change < 0.065:
         return False
     # 价格位置：必须按近新高或新低
     near_low  = price <= low_24h  * 1.03
@@ -4103,6 +4103,17 @@ def run_scan(dry_run: bool = False, signal_watcher=None) -> dict:
     # 阶段3：judge 通过的原始信号落盘，供影子触发器对账（无信号也写一行；失败不影响扫描）
     try:
         from shared.trigger_detector import write_scan_signals as _wss
+        # [v3.100] 统一冷却去重：通知触发器本轮扫描已分析过的 (symbol, strategy)
+        try:
+            from shared import trigger_detector as _tdm
+            _det = _tdm._GLOBAL_DETECTOR
+            if _det is not None:
+                for _sig in (avail or []):
+                    _tdm_strat = _sig.get("sig_type") or _sig.get("mode", "")
+                    if _tdm_strat:
+                        _det.notify_scan_analyzed(_sig["symbol"], _tdm_strat)
+        except Exception:
+            pass
         _wss([{"symbol": r.get("symbol"), "sig_type": r.get("sig_type"), "direction": r.get("direction"),
                "route_quality": _ROUTE_QUALITY.get(r.get("symbol"))} for r in signals_raw])
     except Exception:

@@ -167,6 +167,7 @@ def _default_positions():
 
 # ── 后台写文件 ───────────────────────────────────────────────────────────────
 _DISPATCH_POOL = None
+_GLOBAL_DETECTOR = None   # [v3.100] 模块级实例引用，供 scanner 通知扫描冷却
 
 
 def _dispatch_pool():
@@ -236,6 +237,8 @@ class TriggerDetector:
         self._tlog, self._slog, self._sfile = Path(trigger_log), Path(scan_log), Path(state_file)
         self._writer = _Writer()
         self._ver = _config_version()
+        # [v3.100] 统一冷却去重：记录扫描最近分析过的 (symbol, strategy) 及时间戳
+        self._scan_analyzed_ts: dict = {}  # key=(sym,strat) val=ts
         now = clock()
         self._start_ts = now
         self._st = {}            # (sym, strategy, dir_key) -> _St
@@ -279,6 +282,18 @@ class TriggerDetector:
             return get_hub()
         except Exception:
             return None
+
+    def notify_scan_analyzed(self, symbol: str, strategy: str) -> None:
+        """[v3.100] 扫描完成一次分析后调用，触发器在冷却窗口内跳过同(symbol,strategy)。"""
+        self._scan_analyzed_ts[(symbol, strategy)] = self._clock()
+
+    def _scan_recently_analyzed(self, symbol: str, strategy: str) -> bool:
+        """[v3.100] 扫描冷却窗口内（扫描冷却时长的50%）已分析过 → 触发器跳过。"""
+        ts = self._scan_analyzed_ts.get((symbol, strategy), 0.0)
+        if ts <= 0:
+            return False
+        cd = cooldown(strategy) * 0.5  # 触发器在扫描冷却的50%窗口内去重
+        return self._clock() - ts < cd
 
     def is_cooling_down(self, symbol, strategy, direction) -> bool:
         now, cd = self._clock(), cooldown(strategy)
@@ -573,7 +588,16 @@ class TriggerDetector:
             was, st.triggered = st.triggered, bool(cond)
             if not cond:
                 continue
-            cooling = now - st.last_trigger_ts < cooldown(strat)
+            # [v3.100] ema_trend 动态冷却：已有持仓时用 POST_OPEN 冷却（4H），否则用基础冷却（90min）
+            if strat == "ema_trend":
+                _ema_opened = any(
+                    p.get("sig_type") == "ema_trend" and p.get("status") == "open"
+                    for p in self._pos_cache
+                ) if hasattr(self, "_pos_cache") and self._pos_cache else False
+                _cd = self._ema_cool(_ema_opened)
+            else:
+                _cd = cooldown(strat)
+            cooling = now - st.last_trigger_ts < _cd
             if first:
                 if not self._loaded or was or cooling:
                     continue
@@ -747,6 +771,13 @@ class TriggerDetector:
         r = f"ema20_4h={e20:.6g} ema50_4h={e50:.6g} pb={pb*100:+.2f}%"
         return lg, sh, r
 
+    @staticmethod
+    def _ema_cool(opened: bool) -> float:
+        """[v3.100] 动态冷却：首次触发90min；触发后已开仓则延长至4H。"""
+        post = _cfg("TRIGGER_COOL_EMA_TREND_POST_OPEN", 14400)
+        base = _cfg("TRIGGER_COOL_EMA_TREND", 5400)
+        return float(post if opened else base)
+
     def _ema_trend(self, sym, now, ctx, ind, out):
         lg, sh, r = self._ema_conds(ind, ctx)
         self._run(sym, "ema_trend", now, ctx, out, [("LONG", lg, r), ("SHORT", sh, r)], edge=False)
@@ -872,6 +903,11 @@ class TriggerDetector:
         sym = rec["symbol"]
         if self.is_analyzing(sym):
             self._dispatch_done(rec, "skipped", None, "analyzing")
+            return
+        # [v3.100] 统一冷却去重：扫描刚分析过同 (symbol, strategy) 则跳过，避免两套系统重复分析
+        strat = rec.get("sig_type", "")
+        if strat and self._scan_recently_analyzed(sym, strat):
+            self._dispatch_done(rec, "skipped", None, "scan_dedup")
             return
         if self._watcher is not None:
             try:
@@ -1106,11 +1142,12 @@ def get_detector() -> Optional[TriggerDetector]:
 
 def create(**kwargs) -> Optional[TriggerDetector]:
     """开关关闭返回 None；打开时创建（不启动），由 main 以 asyncio task 运行 det.run()。"""
-    global _default
+    global _default, _GLOBAL_DETECTOR
     if not _cfg("TRIGGER_DETECTOR_ENABLED", False):
         return None
     if _default is None:
         _default = TriggerDetector(**kwargs)
+        _GLOBAL_DETECTOR = _default  # [v3.100] 暴露给 scanner 做扫描冷却去重
     return _default
 
 

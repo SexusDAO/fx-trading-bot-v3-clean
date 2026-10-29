@@ -287,9 +287,9 @@ def test_chg24_hysteresis(env):
 
 def test_breakout_direction_matches_chg24(env):
     e = env
-    e["hub"].set("AAAUSDT", flat(), price=100.0, chg24=4.0)   # h20=101，atr≈2 → 距离阈值 0.6
+    e["hub"].set("AAAUSDT", flat(), price=100.0, chg24=4.5)   # [v3.100] 门槛改4%，用4.5%触发; h20=101，atr≈2
     e["det"].poll_once()
-    e["hub"].price("AAAUSDT", 100.5)
+    e["hub"].price("AAAUSDT", 100.7)  # [v3.100] ATR_DIST改0.2: 需>=101-0.2*2=100.6，用100.7
     assert ("breakout", "LONG") in fired(poll(e))
     det2 = e["make"]()
     e["hub"].set("BBBUSDT", flat(), price=100.0, chg24=-4.0)
@@ -300,7 +300,7 @@ def test_breakout_direction_matches_chg24(env):
 
 def test_breakout_by_closed_1h_close(env):
     e = env
-    e["hub"].set("AAAUSDT", flat(), price=101.0, chg24=-4.0)  # l20=99，初始未满足
+    e["hub"].set("AAAUSDT", flat(), price=101.0, chg24=-4.5)  # [v3.100] 门槛改4%，用4.5%触发; l20=99，初始未满足
     e["det"].poll_once()
     advance(e["hub"], "AAAUSDT", "1h", close=98.0)          # 已收盘 close <= l20
     e["hub"].price("AAAUSDT", 99.5)                         # 当前价距 l20 0.5 ≤ 0.6 也满足
@@ -389,7 +389,7 @@ def test_oi_divergence_from_cache(env):
     e = env
     e["hub"].set("AAAUSDT", flat(), price=100.0, chg24=6.0, hi24=102.0, lo24=80.0)   # 价格门槛：chg24≥5% 才检查 OI 背离
     e["det"].poll_once()
-    e["oi"]["v"] = (96.0, 100.0, 0.0)                       # 1H -4% + 距高点 1.96%
+    e["oi"]["v"] = (94.0, 100.0, 0.0)                       # [v3.100] 门槛改4.5%，用-6%触发; 距高点 1.96%
     recs = poll(e)
     assert ("oi_divergence", "SHORT") in fired(recs)
     assert "oi_src=cache" in [r for r in recs if r["strategy"] == "oi_divergence"][0]["reason"]
