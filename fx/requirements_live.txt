@@ -43,3 +43,6 @@ uvloop==0.23.0
 websocket-client==1.9.2
 websockets==15.0.1
 yarl==1.25.1
+python-socks[asyncio]
+aiohttp
+websockets
