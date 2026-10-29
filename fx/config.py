@@ -268,7 +268,7 @@ RR_MIN_TP1      = 2.0   # TP1 盈亏比要求（low/mid tier）
 TP1_DEGRADED_ATR_CAP = 3.5  # [v3.102] tp_degraded 时 TP1 最大距离 = ATR × 3.5
                              # 防止主流大币（ETH/BTC）SL 被结构止损撑宽后 TP1 拉到不合理位置
                              # 仅对 mid/low tier 且 ATR绝对值 < 30 生效；high tier 山寨币不受限
-RR_MIN_TP1_REVERSAL = 1.2   # reversal 专属 TP1 盈亏比要求
+RR_MIN_TP1_REVERSAL = 1.5   # reversal 专属 TP1 盈亏比要求
                               # 低于通用 2.0，因为 reversal 目标就是清算区，
                               # 强行要求 2.0 会系统性过滤掉最近的清算区
 RR_MIN_TP1_HIGH = 1.5   # TP1 盈亏比要求（high tier，SL 较宽故放宽 RR）
@@ -787,7 +787,7 @@ STOP_HUNT_FUNDING_THRESHOLD  = 0.0001 # 资金费率门槛 0.01%
 STOP_HUNT_RETEST_EXPIRE_MIN  = 90     # 二探等待有效期（分钟，默认値 / low tier）
 STOP_HUNT_RETEST_EXPIRE_HIGH = 30     # high tier 二探有效期（高波动币二探快，超时说明未真正二探）
 STOP_HUNT_RETEST_EXPIRE_MID  = 60     # mid tier 二探有效期
-RR_MIN_STOP_HUNT             = 0.8    # stop_hunt 专属 RR 要求（入场在 pivot 附近，胜率高，放宽 RR）
+RR_MIN_STOP_HUNT             = 1.0    # stop_hunt 专属 RR 要求（入场在 pivot 附近，胜率高，放宽 RR）
 
 # ── tier 差异化参数预留（基于历史统计 2026-06-04 ~ 2026-10-18）───────────────
 # 统计方法：15M K线刺穿前高/前低且收回事件，三层共 2556 个事件
