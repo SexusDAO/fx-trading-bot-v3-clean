@@ -949,6 +949,8 @@ async def _startup_sync_lite() -> None:
                     continue
             except Exception as _re:
                 logger.warning(f"[sync_lite] {sym}({pos_side}) 建孤儿前复核失败，本轮跳过: {_re}")
+                # [refactor-B6] 原来只记日志、等下一轮（最长 30 分钟）。现在同时提醒你：这段时间该仓位无人维护。
+                _b5_alert_unclaimed(sym, pos_side, rp, f"对账复核查询失败，本轮未认领（{str(_re)[:60]}）")
                 continue
             _side = pos_side.lower()
             wants = {"total": 1, "long": 1 if _side == "long" else 0, "short": 1 if _side == "short" else 0}
@@ -977,6 +979,8 @@ async def _startup_sync_lite() -> None:
                     logger.warning(f"[sync_lite] {sym}({pos_side}) 超出持仓上限，超出部分市价平仓 qty={qty}")
                 except Exception as _ce:
                     logger.warning(f"[sync_lite] {sym}({pos_side}) 超出上限平仓失败（保留由人工处理）: {_ce}")
+                    # [refactor-B6] 原来写着「保留由人工处理」却没有通知人工。现在发钉钉提醒。
+                    _b5_alert_unclaimed(sym, pos_side, rp, f"超出持仓上限，市价平仓失败（{str(_ce)[:60]}）")
                 continue
             try:   # [sync_lite-forensic] 只加日志：建孤儿前打印本地该标的全部记录（含所有 status）
                 _ex = [p for p in get_all_positions() if isinstance(p, dict) and p.get("symbol") == sym]
@@ -1252,10 +1256,31 @@ async def _sync_positions_on_startup() -> None:
             ps    = _match_local_position(_local_all, sym, pos_side)
 
             if ps is None:
+                # ── [refactor-B6] 开机对齐也查开仓意图账本（B5 只接了定时对齐 / WS 重连对齐）────
+                # 背景：程序崩溃重启后，第一次对齐就是这里。如果成交发生在崩溃期间，本地没有记录，
+                #   旧逻辑会把系统自己开的仓当作「来历不明的孤儿」：方向与 1H 均线相反就直接跳过（不建档、
+                #   不补止损、不通知），仓位从此无人维护。
+                # 做法：先按 symbol + 方向查 logs/entry_intents.jsonl（executor 下单前写入并 fsync）。
+                #   · 查到 → 确认是系统开仓：跳过均线过滤，正常建档，并沿用开仓时算好的 SL/TP；
+                #   · 查不到 → 保持原有均线过滤逻辑不变；但被过滤跳过时，额外发钉钉 + 写 orphan_audit.jsonl。
+                # 关闭：config.ENTRY_LEDGER_ENABLED = False，本段不生效，行为与改动前完全一致。
+                _intent_s = None
+                try:
+                    import config as _cfg_l6
+                    if getattr(_cfg_l6, "ENTRY_LEDGER_ENABLED", True):
+                        from shared import entry_ledger as _el6
+                        _intent_s = _el6.find_intent(sym, pos_side,
+                                                     float(getattr(_cfg_l6, "ENTRY_LEDGER_MAX_AGE_H", 48)))
+                except Exception as _il6:
+                    logger.warning(f"[startup_sync] {sym}({pos_side}) 读开仓意图账本失败（按原逻辑处理）: {_il6}")
+                if _intent_s is not None:
+                    logger.warning(f"[startup_sync] {sym}({pos_side}) 账本命中：系统开仓 "
+                                   f"cid={_intent_s.get('client_order_id')}，跳过均线过滤，按系统仓位认领")
                 # ── [v3.92] recovered EMA 方向过滤 ─────────────────────────────
                 try:
                     import config as _cfg_rec2
-                    if getattr(_cfg_rec2, "RECOVERED_EMA_FILTER", True):
+                    # [refactor-B6] 账本命中的系统仓位不做均线过滤（_intent_s is None 才过滤）
+                    if _intent_s is None and getattr(_cfg_rec2, "RECOVERED_EMA_FILTER", True):
                         from shared.market_data_hub import get_klines as _get_kl2
                         _kl1h2 = _get_kl2(sym, "1h", 60)
                         if _kl1h2 and len(_kl1h2) >= 50:
@@ -1270,17 +1295,31 @@ async def _sync_positions_on_startup() -> None:
                                 logger.warning(
                                     f"[startup_sync] {sym}({pos_side}) recovered EMA过滤: "
                                     f"1H多头排列(EMA20={_e20:.5g}>EMA50={_e50:.5g})，跳过认领逆势空单")
+                                # [refactor-B6] 原来这里静默跳过；现在额外提醒，避免仓位无人维护而你不知道
+                                _b5_alert_unclaimed(sym, pos_side, rp, "开机对齐：均线过滤跳过（无开仓账本）")
                                 continue
                             elif _dir2 == "LONG" and _e20 < _e50 * 0.999:
                                 logger.warning(
                                     f"[startup_sync] {sym}({pos_side}) recovered EMA过滤: "
                                     f"1H空头排列(EMA20={_e20:.5g}<EMA50={_e50:.5g})，跳过认领逆势多单")
+                                # [refactor-B6] 原来这里静默跳过；现在额外提醒，避免仓位无人维护而你不知道
+                                _b5_alert_unclaimed(sym, pos_side, rp, "开机对齐：均线过滤跳过（无开仓账本）")
                                 continue
                 except Exception as _ef2:
                     logger.debug(f"[startup_sync] {sym} recovered EMA过滤取数失败，降级允许认领: {_ef2}")
                 # ──────────────────────────────────────────────────────────────
                 _now_ms = int(_time.time() * 1000)
                 ps, _orphan_notes = _build_orphan_record(sym, pos_side, rp, _algo_orders, open_orders, _now_ms)
+                # [refactor-B6] 账本命中：标记来源，并在交易所没读到保护单价格时，沿用开仓时算好的 SL/TP。
+                #   只填空缺字段，交易所上已存在的保护单（_build_orphan_record 读到的）优先，不覆盖。
+                if _intent_s is not None:
+                    ps["source"] = "ledger_reclaimed_startup"
+                    ps["ledger_client_order_id"] = _intent_s.get("client_order_id")
+                    for _k6 in ("sl_price", "tp1_price", "tp2_price"):
+                        if not ps.get(_k6) and _intent_s.get(_k6):
+                            ps[_k6] = float(_intent_s[_k6])
+                    if _intent_s.get("mode"):
+                        ps["intent_mode"] = _intent_s["mode"]
                 if len(_orphan_notes) and any("歧义" in _n for _n in _orphan_notes):
                     logger.warning(f"[startup_sync] {sym}({pos_side}) {'; '.join(_orphan_notes)}")
                 if not add_position(ps):
