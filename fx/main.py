@@ -1584,7 +1584,7 @@ async def main() -> None:
     _route_task = None
     try:
         from shared import route_selector as _route2
-        if _route2.has_proxy():
+        if False and _route2.has_proxy():  # 已关闭竞速探测，减少SSL线程GIL争抢
             _route_task = asyncio.create_task(_route2.start_route_monitor(), name="route_monitor")
     except Exception as _rte:
         logger.warning(f"[main] 通道复测任务启动失败（忽略）: {_rte}")
