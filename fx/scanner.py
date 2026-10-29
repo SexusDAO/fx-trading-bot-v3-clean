@@ -2020,7 +2020,11 @@ _POOL_SCORE_MOVER = 25            # 涨幅 Top / 跌幅 Top（20→25）
 _POOL_SCORE_FUNDING = 25          # 资金费率绝对值 > POOL_FUNDING_EXTREME_MIN（20→25）
 _POOL_SCORE_LIQ = 20              # CG 清算量 Top
 # v3.xx: 候选池 OI 过滤已停用，以下两个常量仅供 _pool_filter_by_oi 恢复时使用
-_POOL_OI_WORKERS = 6
+try:   # [refactor-B2] OI 拉取线程数可配置（原 6），2 核机器减少线程争抢
+    import config as _cfg_oi
+    _POOL_OI_WORKERS = max(1, int(getattr(_cfg_oi, "POOL_OI_WORKERS", 2)))
+except Exception:
+    _POOL_OI_WORKERS = 2
 _POOL_OI_TOTAL_TIMEOUT_SEC = 90.0
 
 

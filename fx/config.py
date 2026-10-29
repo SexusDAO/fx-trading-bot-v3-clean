@@ -324,7 +324,7 @@ SCAN_SYMBOL_TIMEOUT_SEC   = 10    # 单标的分析超时（秒），超时跳�
 SCAN_TOTAL_TIMEOUT_SEC    = 180   # 整轮扫描总超时（秒）；v3.26: 240→120，并发25线程理论8~12s
 SCAN_MAX_WORKERS          = 2     # [2核服务器收紧 4→2] 并行分析线程数（10→4：降低 GIL 竞争导致事件循环阻塞）；v3.82: 25→10，控制并发内存峰值（25线程×11MB=275MB峰值，pymalloc不归还导致水位积累至3.5GB）
 FUNDING_ARB_SCAN_WORKERS = 2  # funding_arb并发扫描线程数，降低SSL并发防止阻塞事件循环
-SCAN_USE_PROCESS_POOL     = False  # True：并行分析走 spawn 进程池（shared/analysis_worker.py）；False：保持线程池（默认）
+SCAN_USE_PROCESS_POOL     = True   # [refactor-B2] 原 False；改回 False 即回到线程池  # True：并行分析走 spawn 进程池（shared/analysis_worker.py）；False：保持线程池（默认）
 SCAN_KLINE_TIMING       = True  # 是否统计 K 线请求耗时（每轮 info 一条汇总），生产环境建议开启
 KLINE_CACHE_ENABLED     = True  # 是否启用 K 线 REST 缓存（按收盘时间失效；False 时每轮直接 REST）
 KLINE_CACHE_INTERVALS   = ["1h", "4h", "15m"]  # 缓存哪些周期
@@ -1182,3 +1182,7 @@ WS_MP_FLUSH_SEC        = 0.25    # 合并分发间隔（秒）
 LOOP_SLOW_CALLBACK_SEC = 0.5     # 单个价格回调超过该耗时即记录 warning
 IO_POOL_WORKERS        = 16      # 默认线程池大小（原约 6）；0 = 不修改，沿用 Python 默认
 LOOP_DEBUG_SLOW_CALLBACK = False # True 时 asyncio 会记录所有超过 LOOP_SLOW_CALLBACK_SEC 的回调（有少量开销）
+
+# ── [refactor-B2] 扫描计算移出主进程 ────────────────────────────────────────
+SCAN_PROCESS_WORKERS = 1   # 分析进程数上限；2 核机器建议 1（主进程独占另一个核）
+POOL_OI_WORKERS      = 2   # OI 拉取线程数（原 6）

@@ -136,9 +136,11 @@ def worker_count() -> int:
     try:
         import config
         base = int(getattr(config, "SCAN_MAX_WORKERS", 4))
+        # [refactor-B2] 进程数单独上限：2 核机器默认只开 1 个分析进程，给主进程留一个核
+        cap = int(getattr(config, "SCAN_PROCESS_WORKERS", _MAX_WORKERS_CAP) or _MAX_WORKERS_CAP)
     except Exception:
-        base = 4
-    return max(1, min(base, os.cpu_count() or 1, _MAX_WORKERS_CAP))
+        base, cap = 4, _MAX_WORKERS_CAP
+    return max(1, min(base, os.cpu_count() or 1, _MAX_WORKERS_CAP, cap))
 
 
 def _make_pool():

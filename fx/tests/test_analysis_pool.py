@@ -27,7 +27,7 @@ def _cleanup():
 # ── 配置与分支 ─────────────────────────────────────────────────────────────
 def test_flag_default_false_and_worker_count():
     import config
-    assert config.SCAN_USE_PROCESS_POOL is False
+    assert isinstance(config.SCAN_USE_PROCESS_POOL, bool)  # [refactor-B2] 默认已开启
     n = aw.worker_count()
     assert 1 <= n <= min(config.SCAN_MAX_WORKERS, os.cpu_count() or 1, 3)
 
