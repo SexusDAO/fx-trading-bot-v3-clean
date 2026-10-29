@@ -547,7 +547,17 @@ class SignalWatcher:
         self._ind_cache: Dict[str, dict] = {}
         self._open_pos_cache: list = []
         self._open_pos_ts: float = 0.0
-        self._sl_breach_alerted: Dict[str, float] = {}
+        # [v3.104] SL-BREACH 쿨다운 영구화 - 초기화 시 파일에서 로드
+        try:
+            import pathlib as _pl_sbi, json as _json_sbi, time as _time_sbi
+            _sbi_file = _pl_sbi.Path(__file__).parent.parent / 'logs' / '_sw_sl_breach.json'
+            _sbi_now = _time_sbi.time()
+            _sbi_data = _json_sbi.loads(_sbi_file.read_text()) if _sbi_file.exists() else {}
+            self._sl_breach_alerted: Dict[str, float] = {
+                k: float(v) for k, v in _sbi_data.items() if _sbi_now - float(v) < 300
+            }
+        except Exception:
+            self._sl_breach_alerted: Dict[str, float] = {}
         self._notified_exit: Dict[str, float] = {}     # entry_id -> 首次发送退出通知的时间；GC 时清理超过 1 小时的
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1220,6 +1230,13 @@ class SignalWatcher:
             if now - self._sl_breach_alerted.get(symbol, 0) < 300:
                 continue
             self._sl_breach_alerted[symbol] = now
+            try:
+                import pathlib as _pl_sl, json as _json_sl
+                _sl_file = _pl_sl.Path(__file__).parent.parent / 'logs' / '_sw_sl_breach.json'
+                _sl_clean = {k: v for k, v in self._sl_breach_alerted.items() if now - v < 300}
+                _sl_file.write_text(_json_sl.dumps(_sl_clean))
+            except Exception:
+                pass
             logger.error(f"[SL-BREACH] {symbol} 止损价已被越过，请检查仓位 (price={price} sl={sl} dir={d})")
             try:
                 from shared.notifier import notify as _ntf
@@ -1894,16 +1911,28 @@ class SignalWatcher:
                 return
             # 同一条目只发一次退出通知（btc_1h_crash_guard / recheck 可能先后处理同一条目）
             _ne = self.__dict__.setdefault("_notified_exit", {})     # 兼容不经 __init__ 构造的实例
-            # [v3.102] 持久化已通知的 entry_id，防止重启后重复推送退出监控消息
+            # [v3.102/v3.104] 持久化已通知的 entry_id，防止重启后重复推送退出监控消息
             import pathlib as _pl2, json as _json2
             _ne_file = _pl2.Path(__file__).parent.parent / 'logs' / '_sw_exit_notified.json'
-            try:
-                _ne_persisted = _json2.loads(_ne_file.read_text()) if _ne_file.exists() else {}
-                _ne.update(_ne_persisted)
-            except Exception:
-                pass
-            if entry.entry_id in _ne:
+            # [v3.104] 파일은 첫 번째 호출 시 한 번만 로드 (매 호출마다 읽지 않음)
+            if not getattr(self, '_ne_file_loaded', False):
+                self._ne_file_loaded = True
+                try:
+                    _ne_persisted = _json2.loads(_ne_file.read_text()) if _ne_file.exists() else {}
+                    _ne.update(_ne_persisted)
+                except Exception:
+                    pass
+            # [v3.104] stable dedup key: symbol+direction+mode+expire+added_ts_rounded
+            # added_ts를 포함해서 다른 entry는 다른 key (同一 signal 재등록은 added_ts 다름)
+            # 재시작 후 복원된 동일 시그널은 expire_ts는 같지만 added_ts도 다르므로 별도 통지
+            _d_dir = entry.signal.get("direction", "LONG").upper()
+            _d_mode = entry.mode or entry.signal.get("sig_type", "")
+            _d_exp = int(min(entry.expire_ts, 9e15) // 3600)
+            _d_added = int(getattr(entry, 'added_ts', 0) // 60)  # 1분 단위 (재시작 시 근사 일치)
+            _stable_key = f"{sym}:{_d_dir}:{_d_mode}:{_d_exp}:{_d_added}"
+            if _stable_key in _ne or entry.entry_id in _ne:
                 return
+            _ne[_stable_key] = time.time()
             _ne[entry.entry_id] = time.time()
             # 写回文件，GC 超过 2 小时的旧条目
             try:
