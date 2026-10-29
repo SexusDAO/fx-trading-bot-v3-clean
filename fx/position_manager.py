@@ -3034,7 +3034,10 @@ async def _pyramid_replace_tp(pos: dict, new_avg_entry: float, new_remaining: fl
             "fill_price": new_avg_entry,                       # 关键：以新均价为基准
             "tp1_buffer_locked": pos.get("tp1_liq_buffer_atr"),
         }
-        params = calc_sl_tp(signal=fake_signal, mark_price=mark_price, atr=atr,
+        # [refactor-B7] 埋雷修复：calc_sl_tp 内部会同步请求订单簿（get_order_book，最长数秒）并做纯 Python 计算，
+        #   原来在 async 函数里直接调用 → 整个事件循环停住，WS 心跳发不出 → 断联。改为放到线程池执行，
+        #   入参和返回值完全不变，交易逻辑零改动。
+        params = await asyncio.to_thread(calc_sl_tp, signal=fake_signal, mark_price=mark_price, atr=atr,
                             liq_zones={"long": liq_long, "short": liq_short},
                             k1h=k1h, ema20=_calc_ema(closes, 20))
         if "error" in params:
@@ -4435,7 +4438,10 @@ async def _adjust_sl_tp_once(pos: dict, force: bool = False) -> dict | None:
         liq_short = await asyncio.get_running_loop().run_in_executor(
             None, lambda: get_liq_zones_cached(symbol, "SHORT", mark_price, range_=_adj_range)
         )
-        new_params = calc_sl_tp(
+        # [refactor-B7] 埋雷修复：calc_sl_tp 内部会同步请求订单簿（get_order_book，最长数秒）并做纯 Python 计算，
+        #   原来在 async 函数里直接调用 → 整个事件循环停住，WS 心跳发不出 → 断联。改为放到线程池执行，
+        #   入参和返回值完全不变，交易逻辑零改动。
+        new_params = await asyncio.to_thread(calc_sl_tp,
             signal    = fake_signal,
             mark_price= mark_price,
             atr       = atr,
@@ -5501,7 +5507,10 @@ async def _check_pending_health_static(pos: dict) -> None:
     sig_copy["mode"]      = mode
     sig_copy["direction"] = direction
     sig_copy["symbol"]    = symbol
-    new_params = calc_sl_tp(sig_copy, mark_price, atr, liq_zones, k1h, ema20_1h)
+    # [refactor-B7] 埋雷修复：calc_sl_tp 内部会同步请求订单簿（get_order_book，最长数秒）并做纯 Python 计算，
+    #   原来在 async 函数里直接调用 → 整个事件循环停住，WS 心跳发不出 → 断联。改为放到线程池执行，
+    #   入参和返回值完全不变，交易逻辑零改动。
+    new_params = await asyncio.to_thread(calc_sl_tp, sig_copy, mark_price, atr, liq_zones, k1h, ema20_1h)
     if "error" in new_params:
         logger.debug(f"[pending_health] {symbol} calc_sl_tp 失败: {new_params['error']}")
         return

@@ -1766,7 +1766,10 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
         liq_zones = {"long": [], "short": []}
 
     # ── 步骤4：计算入场参数 ───────────────────────────────────────────────────
-    params = calc_sl_tp(
+    # [refactor-B7] 埋雷修复：calc_sl_tp 内部会同步请求订单簿（get_order_book，最长数秒）并做纯 Python 计算，
+    #   原来在 async 函数里直接调用 → 整个事件循环停住，WS 心跳发不出 → 断联。改为放到线程池执行，
+    #   入参和返回值完全不变，交易逻辑零改动。
+    params = await asyncio.to_thread(calc_sl_tp,
         signal=signal,
         mark_price=mark_price,
         atr=atr,
