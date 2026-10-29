@@ -1894,9 +1894,24 @@ class SignalWatcher:
                 return
             # 同一条目只发一次退出通知（btc_1h_crash_guard / recheck 可能先后处理同一条目）
             _ne = self.__dict__.setdefault("_notified_exit", {})     # 兼容不经 __init__ 构造的实例
+            # [v3.102] 持久化已通知的 entry_id，防止重启后重复推送退出监控消息
+            import pathlib as _pl2, json as _json2
+            _ne_file = _pl2.Path(__file__).parent.parent / 'logs' / '_sw_exit_notified.json'
+            try:
+                _ne_persisted = _json2.loads(_ne_file.read_text()) if _ne_file.exists() else {}
+                _ne.update(_ne_persisted)
+            except Exception:
+                pass
             if entry.entry_id in _ne:
                 return
             _ne[entry.entry_id] = time.time()
+            # 写回文件，GC 超过 2 小时的旧条目
+            try:
+                _now2 = time.time()
+                _ne_clean = {k: v for k, v in _ne.items() if _now2 - v < 7200}
+                _ne_file.write_text(_json2.dumps(_ne_clean))
+            except Exception:
+                pass
         try:
             from shared.notifier import discard_signal, notify, _hhmm
             sid = entry.signal.get("_sig_id", "")

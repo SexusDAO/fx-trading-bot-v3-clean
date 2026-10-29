@@ -1108,8 +1108,19 @@ async def _sync_positions_on_startup() -> None:
                 import time as _time_sync
                 _now_sync = _time_sync.time()
                 # [v3.99] 限速：网络抖动时 WS 每10s断一次，不要每次都推通知；5分钟内只推一次
-                if _now_sync - _sync_positions_on_startup._align_fail_ts > 300:
+                # [v3.102] 持久化最后通知时间到文件，防止重启后 _align_fail_ts 归零导致重复推送
+                import pathlib as _pl
+                _align_ts_file = _pl.Path(__file__).parent / 'logs' / '_align_fail_ts.txt'
+                try:
+                    _last_notify_ts = float(_align_ts_file.read_text().strip()) if _align_ts_file.exists() else 0.0
+                except Exception:
+                    _last_notify_ts = 0.0
+                if _now_sync - _last_notify_ts > 300:
                     _sync_positions_on_startup._align_fail_ts = _now_sync
+                    try:
+                        _align_ts_file.write_text(str(_now_sync))
+                    except Exception:
+                        pass
                     from shared.notifier import notify_async
                     await notify_async(f"⚠️ 持仓对齐中止：交易所持仓/挂单查询失败，未做任何清理\n{str(_qe)[:120]}")
             except Exception:
