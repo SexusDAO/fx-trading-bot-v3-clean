@@ -1427,6 +1427,21 @@ async def main() -> None:
                 f"loop={type(asyncio.get_running_loop()).__name__}")
     import config as _cfg_req
     _cfg_req.require_env()   # [fix #39] 必填项缺失直接报错退出
+    # [refactor-B1] 扩大默认线程池（to_thread / run_in_executor(None) 共用），并开启慢回调记录
+    try:
+        import concurrent.futures as _cf
+        _io_workers = int(getattr(_cfg_req, "IO_POOL_WORKERS", 16) or 0)
+        _loop_b1 = asyncio.get_running_loop()
+        if _io_workers > 0:
+            _loop_b1.set_default_executor(
+                _cf.ThreadPoolExecutor(max_workers=_io_workers, thread_name_prefix="io-default"))
+            logger.info(f"[main] 默认线程池已设为 {_io_workers} 线程")
+        _slow = float(getattr(_cfg_req, "LOOP_SLOW_CALLBACK_SEC", 0) or 0)
+        if _slow > 0:
+            _loop_b1.slow_callback_duration = _slow
+            _loop_b1.set_debug(bool(getattr(_cfg_req, "LOOP_DEBUG_SLOW_CALLBACK", False)))
+    except Exception as _b1e:
+        logger.warning(f"[main] 默认线程池/慢回调设置失败（忽略，沿用默认）: {_b1e}")
     # ── 启动分批 P1（立即）：API key 校验 + 持仓模式 ────────────────────────
     #   P2/P3/P4 见下文；批次间延迟见 config.STARTUP_BATCH_DELAY_P2/P3/P4
     try:   # 双通道探测放在 P1 最前：之后的 get_account 等请求就用选出的通道；探测失败只告警，不阻断启动

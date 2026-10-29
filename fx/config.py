@@ -1175,3 +1175,10 @@ STOCK_TOKENS_CN = {
     "CXMTUSDT","UNITREEUSDT",
 }
 STOCK_TOKENS_CN_HOURS_UTC = (1, 7)  # 允许开仓的UTC小时范围 [1, 7)
+
+# ── [refactor-B1] 事件循环减负（关闭任一开关即回到原行为）──────────────────────
+WS_MP_COALESCE         = True    # markPrice 合并分发：每标的只保留最新帧，定时批量回调；False=原逐帧分发
+WS_MP_FLUSH_SEC        = 0.25    # 合并分发间隔（秒）
+LOOP_SLOW_CALLBACK_SEC = 0.5     # 单个价格回调超过该耗时即记录 warning
+IO_POOL_WORKERS        = 16      # 默认线程池大小（原约 6）；0 = 不修改，沿用 Python 默认
+LOOP_DEBUG_SLOW_CALLBACK = False # True 时 asyncio 会记录所有超过 LOOP_SLOW_CALLBACK_SEC 的回调（有少量开销）

@@ -72,6 +72,10 @@ except ImportError:
 
 _MP_MAX_INFLIGHT = 32          # markPrice 同时在途的 dispatch 任务上限，超出直接丢帧
 _MP_DROP_LOG_SEC = 60.0        # 丢帧统计 warning 的输出间隔
+# [refactor-B1] markPrice 合并分发：每个标的只保留最新一帧，定时批量回调。关闭即回到原逐帧分发。
+_MP_COALESCE   = bool(getattr(config, "WS_MP_COALESCE", True))
+_MP_FLUSH_SEC  = float(getattr(config, "WS_MP_FLUSH_SEC", 0.25))
+_MP_SLOW_CB_SEC = float(getattr(config, "LOOP_SLOW_CALLBACK_SEC", 0.5))
 
 RECONNECT_BASE       = getattr(config, "WS_RECONNECT_BASE",        3)        # 秒
 RECONNECT_MAX        = getattr(config, "WS_RECONNECT_MAX",         60)       # 秒
@@ -121,6 +125,9 @@ class WsOrderListener:
         self._mp_drop_count:    int   = 0
         self._mp_drop_last_log: float = time.monotonic()
         self._mp_tasks:         set   = set()   # 持有任务引用，避免被 GC 提前回收
+        # [refactor-B1] 合并分发缓冲：{symbol: (mark_price, ts)}
+        self._mp_latest:        Dict[str, tuple] = {}
+        self._mp_flush_task:    Optional[asyncio.Task] = None
 
         # listenKey 缓存
         self._listen_key: Optional[str] = None
@@ -276,6 +283,8 @@ class WsOrderListener:
         self._mark_price_task  = asyncio.create_task(self._mark_price_loop(),   name="ws_mark_price")
         self._keepalive_task   = asyncio.create_task(self._keepalive_loop(),    name="ws_keepalive")
         self._force_order_task = asyncio.create_task(self._force_order_loop(),  name="ws_force_order")
+        if _MP_COALESCE:
+            self._mp_flush_task = asyncio.create_task(self._mp_flush_loop(), name="ws_mp_flush")
         logger.info("[ws] WsOrderListener 已启动（含强平事件流）")
 
     async def stop(self) -> None:
@@ -286,6 +295,7 @@ class WsOrderListener:
             self._keepalive_task, self._force_order_task,
             self._compensation_task,   # [v3.89 #3]
             self._health_task,
+            self._mp_flush_task,      # [refactor-B1]
         ):
             if task and not task.done():
                 task.cancel()
@@ -463,7 +473,10 @@ class WsOrderListener:
                             break  # 退出内层循环，重新连接
                         # [fix] 有限并发分发：最多 _MP_MAX_INFLIGHT 个 dispatch 同时在途，超出直接丢弃（只保留最新价）
                         # 避免回调慢时任务无限堆积，同时不阻塞接收循环
-                        self._mp_try_dispatch(raw)
+                        if _MP_COALESCE:
+                            self._mp_coalesce(raw)
+                        else:
+                            self._mp_try_dispatch(raw)
 
             except asyncio.CancelledError:
                 return
@@ -479,6 +492,53 @@ class WsOrderListener:
                 delay = min(delay * 2, RECONNECT_MAX)
             finally:
                 ws_conn = None
+
+    def _mp_coalesce(self, raw: str) -> None:
+        """[refactor-B1] 只解析并记录每个标的最新价，不在接收循环里执行回调。"""
+        try:
+            msg = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return
+        data = msg.get("data", msg) if isinstance(msg, dict) else None
+        if not isinstance(data, dict) or data.get("e") != "markPriceUpdate":
+            return
+        symbol = data.get("s", "")
+        try:
+            mark_price = float(data.get("p", 0))
+            ts = int(data.get("E", 0))
+        except (TypeError, ValueError):
+            return
+        if symbol and mark_price > 0:
+            self._mp_latest[symbol] = (mark_price, ts)
+
+    async def _mp_flush_loop(self) -> None:
+        """[refactor-B1] 每 _MP_FLUSH_SEC 秒用各标的最新价调用一次回调；单个回调慢于阈值时记录名字。"""
+        while not self._stop_flag:
+            try:
+                await asyncio.sleep(_MP_FLUSH_SEC)
+                if not self._mp_latest:
+                    continue
+                batch, self._mp_latest = self._mp_latest, {}
+                for symbol, (mark_price, ts) in batch.items():
+                    for cb in self._price_callbacks:
+                        t0 = time.monotonic()
+                        try:
+                            await cb(symbol, mark_price, ts)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            logger.error(f"[ws] price_callback 异常: {e}")
+                        dt = time.monotonic() - t0
+                        if dt >= _MP_SLOW_CB_SEC:
+                            logger.warning(
+                                f"[ws] 慢价格回调 {getattr(cb, '__qualname__', cb)} "
+                                f"{symbol} 耗时 {dt:.2f}s"
+                            )
+                    await asyncio.sleep(0)   # 每个标的之间让出事件循环
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.error(f"[ws] markPrice 合并分发异常: {e}")
 
     def _mp_try_dispatch(self, raw: str) -> None:
         """有空余槽位才创建 dispatch 任务；槽位满则丢弃该帧（markPrice 高频流，下一帧很快就来）。"""
