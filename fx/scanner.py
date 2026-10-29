@@ -224,8 +224,9 @@ def _get_all_mark_prices_list() -> list:
                     logger.debug(f"[hub] 批量标记价 {len(snap)} 个标的（来自 WS 缓存）")
                     return list(snap.values())
         except Exception as e:
-            logger.debug(f"[hub] 批量读取失败，回落 REST: {e}")
-    return api.get_all_mark_prices()
+            logger.debug(f"[hub] 批量读取失败，跳过本轮: {e}")
+    # hub未就绪时返回空，不fallback REST（避免WS断线时触发大量慢请求）
+    return []
 
 
 _HUB_SUBSCRIBE_HOLD = False   # 启动分批：P4 之前为 True，暂缓首次 K 线订阅（订阅会触发历史 K 线 REST 加载）
@@ -2218,7 +2219,18 @@ def refresh_pool() -> list:
     """
     try:
         tickers  = api.get_ticker_24h()
-        mp_list  = api.get_all_mark_prices()   # 含资金费率
+        # hub优先，未就绪时用REST兜底（refresh_pool非高频，偶尔REST可接受）
+        try:
+            from shared import market_data_hub as _hub_rp
+            if _hub_rp.is_ready():
+                _snap = _hub_rp.get_all_mark_prices()
+                mp_list = list(_snap.values()) if _snap else None
+            else:
+                mp_list = None
+        except Exception:
+            mp_list = None
+        if not mp_list:
+            mp_list = api.get_all_mark_prices()   # 含资金费率
 
         # [v3.100] 拉取失败（API 静默返回空列表）时直接退出，不覆盖缓存
         if not tickers:
@@ -4535,7 +4547,18 @@ def run_funding_arb_scan(dry_run: bool = False, signal_watcher=None) -> dict:
     # Coinglass 经常返回全 0 数据，不再依赖它作为主数据源
     candidates = []
     try:
-        all_mp = api.get_all_mark_prices()
+        # hub优先获取标记价/费率，未就绪才fallback REST
+        try:
+            from shared import market_data_hub as _hub_arb
+            if _hub_arb.is_ready():
+                _snap = _hub_arb.get_all_mark_prices()
+                all_mp = list(_snap.values()) if _snap else None
+            else:
+                all_mp = None
+        except Exception:
+            all_mp = None
+        if not all_mp:
+            all_mp = api.get_all_mark_prices()
         fr_list = [
             (item["symbol"], float(item.get("lastFundingRate", 0)))
             for item in all_mp
