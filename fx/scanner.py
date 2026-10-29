@@ -2654,12 +2654,20 @@ def _filter_and_register_signals(
         if _btc_trend == "down":
             # 熊市顺势空，仅要求不是极端负费率
             # v3.41.1: 门槛从 -0.05% 放宽到 BTC_BEAR_SHORT_MIN_FUNDING (-0.15%)
-            # 日报会记录被拒标的和费率，供人工复查是否需要进一步放宽
+            # [v3.101] 4H 多头排列 gap > 8% 时：即使熊市顺势，也要求至少 1/2 衰竭证据
+            #          防止在强趋势逆势下盲目做空。gap <= 8% 不受影响，正常放行。
             try:
                 from config import BTC_BEAR_SHORT_MIN_FUNDING as _bear_short_min_fr
             except ImportError:
                 _bear_short_min_fr = -0.0015
-            if funding >= _bear_short_min_fr:
+            _4h_bull_gap_sc = float((sig.get("judge_detail") or sig.get("reason") or ind).get("4h_ema_bull_gap", 0) or 0)
+            _exhaust_ev_sc  = (sig.get("judge_detail") or sig.get("reason") or {}).get("exhaustion_evidence", [])
+            _bear_4h_blocked = _4h_bull_gap_sc > 8.0 and len(_exhaust_ev_sc) < 1
+            if _bear_4h_blocked:
+                result["rejected"].append({"symbol": sig["symbol"],
+                    "reason": f"熊市顺势但4H多头排列过强(gap={_4h_bull_gap_sc:.1f}%>8%)且衰竭证据不足({len(_exhaust_ev_sc)}/1)，拒绝"})
+                logger.info(f"[scanner] {sig['symbol']} 熊市顺势但4H gap过强被拒: gap={_4h_bull_gap_sc:.1f}% exhaust={_exhaust_ev_sc}")
+            elif funding >= _bear_short_min_fr:
                 filtered_shorts.append(sig)
                 logger.info(f"[scanner] {sig['symbol']} 空单熊市顺势通过: funding={funding:.5f} rsi4h={rsi_4h:.1f}")
             else:

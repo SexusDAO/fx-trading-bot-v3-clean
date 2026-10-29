@@ -3952,11 +3952,14 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
             "fill_time":   int(_time_fill.time()),  # v3.39: 补挂路径补写 fill_time,时间止损用真实成交时间
             "quantity":    fill_qty,
             "sl_order_id": _sl_id_final,
-            "tp1_order_id":guard.get("tp1_id"),
-            "tp2_order_id":guard.get("tp2_id"),
-            "sl_price":    sl_price,
-            "tp1_price":   tp1_price,
-            "tp2_price":   tp2_price,
+            "tp1_order_id":  guard.get("tp1_id"),
+            "tp2_order_id":  guard.get("tp2_id"),
+            "sl_price":      sl_price,
+            "tp1_price":     tp1_price,
+            "tp2_price":     tp2_price,
+            # [v3.101] 补写数量字段，防止 patrol 读不到 tp1_quantity/tp2_quantity
+            "tp1_quantity":  guard.get("tp1_qty") or None,
+            "tp2_quantity":  guard.get("tp2_quantity") or None,
             "missing_guards": _missing,
             **_heal_fields,
         }
