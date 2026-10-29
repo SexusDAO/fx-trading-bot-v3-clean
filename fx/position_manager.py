@@ -3656,10 +3656,29 @@ async def _补挂保护单(pos: dict, fill_price: float, fill_qty: float, pid: s
             )
             real_qty = abs(float(real_pos.get("positionAmt", 0))) if real_pos else 0.0
             if real_qty <= 0:
-                logger.info(f"[pm] {symbol} 交易所实际持仓为0(已被平仓),跳过补挂")
-                (await asyncio.to_thread(update_position, pid, {"status": "closed", "close_reason": "already_closed"}))
-                (await asyncio.to_thread(_remove_position_checked, pid))
-                return
+                # 二次确认：慢请求可能返回空数据，等3秒再查一次，两次都是0才删
+                await asyncio.sleep(3)
+                try:
+                    real_positions2 = await _run_patrol(lambda: _api.get_position(symbol)) or []
+                    real_pos2 = next(
+                        (p for p in real_positions2
+                         if p.get("positionSide","").upper() == pos_side),
+                        None
+                    )
+                    real_qty2 = abs(float(real_pos2.get("positionAmt", 0))) if real_pos2 else 0.0
+                except Exception:
+                    real_qty2 = -1  # 查询失败，不删
+                if real_qty2 <= 0 and real_qty2 >= 0:
+                    logger.info(f"[pm] {symbol} 交易所实际持仓为0(二次确认，已被平仓),跳过补挂")
+                    (await asyncio.to_thread(update_position, pid, {"status": "closed", "close_reason": "already_closed"}))
+                    (await asyncio.to_thread(_remove_position_checked, pid))
+                    return
+                elif real_qty2 > 0:
+                    logger.warning(f"[pm] {symbol} 第一次查询持仓为0但二次确认有持仓{real_qty2}，可能是慢请求误判，继续补挂")
+                    fill_qty = real_qty2
+                else:
+                    logger.warning(f"[pm] {symbol} 二次确认查询失败，跳过本次补挂")
+                    return
             # 使用交易所实际量覆盖本地记录(防止部分成交导致数量偏差)
             if abs(real_qty - fill_qty) / max(fill_qty, 1e-9) > 0.01:
                 logger.info(f"[pm] {symbol} 实际持仓量 {real_qty} 与成交量 {fill_qty} 有偏差,以实际量为准")
