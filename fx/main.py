@@ -1014,7 +1014,6 @@ async def _periodic_sync_loop(interval_sec: int = 1800) -> None:
         await asyncio.sleep(interval_sec)
 
 
-_sync_positions_on_startup._align_fail_ts = 0.0  # [v3.99] 对齐失败通知限速
 async def _sync_positions_on_startup() -> None:
     """
     启动时对齐持仓状态：
@@ -1270,6 +1269,7 @@ async def _sync_positions_on_startup() -> None:
         logger.error(f"[startup_sync] 对齐失败: {e}", exc_info=True)
 
 
+_sync_positions_on_startup._align_fail_ts = 0.0  # [v3.99] 对齐失败通知限速
 async def _verify_hedge_mode_or_exit() -> None:
     """[fix #16] 启动时向交易所确认对冲模式；确认非对冲 → 拒绝启动；无法确认 → 告警后继续。
     （代码按对冲模式编写：positionSide=LONG/SHORT，单向模式下对账与保护单会全部错位。）"""
