@@ -1015,6 +1015,27 @@ async def _periodic_sync_loop(interval_sec: int = 1800) -> None:
 
 
 async def _sync_positions_on_startup() -> None:
+    # [v3.103] CORRUPTED 마커 자동 클리어
+    # pos_state가 현재 정상적으로 읽히면 이전 크래시의 CORRUPTED 마커를 삭제
+    # 마커가 있으면 state.py가 _POS_STATE_CORRUPTED=True로 설정해 모든 pos_state 쓰기를 막음
+    try:
+        import pathlib as _pl_cs, json as _json_cs
+        _pos_file = _pl_cs.Path(__file__).parent / 'logs' / 'pos_state.json'
+        _corrupt_marker = _pos_file.with_name(_pos_file.name + '.CORRUPTED')
+        if _corrupt_marker.exists():
+            _content = _pos_file.read_text(encoding='utf-8').strip() if _pos_file.exists() else ''
+            if _content and _content != '[]':
+                _json_cs.loads(_content)  # 파싱 성공 = 정상
+                _corrupt_marker.unlink(missing_ok=True)
+                # state 모듈의 메모리 플래그도 리셋
+                try:
+                    import shared.state as _st_cs
+                    _st_cs._POS_STATE_CORRUPTED = False
+                except Exception:
+                    pass
+                logger.info('[startup_sync] pos_state.json.CORRUPTED 마커 자동 클리어 완료 (파일 정상)')
+    except Exception as _cc_e:
+        logger.warning(f'[startup_sync] CORRUPTED 마커 클리어 실패 (무시): {_cc_e}')
     """
     启动时对齐持仓状态：
     1. 拉取交易所真实持仓和开放挂单
