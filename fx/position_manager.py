@@ -2264,6 +2264,18 @@ async def _check_pending_expire_static(pos: dict, now_ms: int):
         (await asyncio.to_thread(_remove_position_checked, pid))
         return
 
+    # 撤单前先查订单状态：已成交的不能撤，直接走成交流程
+    try:
+        _od_pre = await asyncio.to_thread(api.get_order, symbol, int(order_id))
+        if _od_pre and _od_pre.get('status') == 'FILLED':
+            logger.warning(f'[pm] {symbol} 挂单 {order_id} 已FILLED但状态仍pending，尝试恢复')
+            if await _recover_partial_fill(pos, _od_pre, pid, symbol):
+                return
+            logger.error(f'[pm] {symbol} FILLED订单恢复失败，保留记录等下轮重试')
+            return
+    except Exception as _pre_e:
+        logger.warning(f'[pm] {symbol} 撤单前查询订单失败（继续尝试撤单）: {_pre_e}')
+
     for attempt in range(2):
         try:
             (await asyncio.to_thread(api.cancel_order, symbol, int(order_id)))
