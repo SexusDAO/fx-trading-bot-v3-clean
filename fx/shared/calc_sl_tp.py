@@ -898,7 +898,28 @@ def _calc_tp(entry: float, sl: float, atr: float, direction: str,
 
         if tp1 is None:
             _ctx_tp.pop("tp1_buffer_used", None)   # [v3.88] 未锚定清算区，不记录缓冲
-            tp1 = (entry + sl_dist * _TP1_MIN_RR) if direction == "LONG"                   else (entry - sl_dist * _TP1_MIN_RR)
+            # [v3.102] tp_degraded 时用 sl_dist × RR 基础值，但对主流大币（mid/low tier
+            #   且 ATR绝对值 < 30）用 ATR × CAP 封顶，防止结构止损撑宽后 TP1 失真
+            try:
+                from config import TP1_DEGRADED_ATR_CAP as _DEG_ATR_CAP
+            except Exception:
+                _DEG_ATR_CAP = 3.5
+            _tp1_raw = (entry + sl_dist * _TP1_MIN_RR) if direction == "LONG" \
+                       else (entry - sl_dist * _TP1_MIN_RR)
+            _is_large_cap_mid = tier in ("mid", "low") and atr < 30.0
+            if _is_large_cap_mid:
+                _tp1_atr_cap = entry - atr * _DEG_ATR_CAP if direction == "SHORT" \
+                               else entry + atr * _DEG_ATR_CAP
+                if direction == "SHORT":
+                    tp1 = max(_tp1_raw, _tp1_atr_cap)  # SHORT取较大值（离入场较近）
+                else:
+                    tp1 = min(_tp1_raw, _tp1_atr_cap)  # LONG取较小值（离入场较近）
+                if tp1 != _tp1_raw:
+                    import logging as _lg; _lg.getLogger("fx.calc_sl_tp").debug(
+                        f"[calc_sl_tp] {symbol} tp_degraded ATR封顶: "
+                        f"sl_dist×RR={abs(_tp1_raw-entry):.1f} → ATR×{_DEG_ATR_CAP}={atr*_DEG_ATR_CAP:.1f} (ATR={atr:.1f})")
+            else:
+                tp1 = _tp1_raw
             degraded = True
 
         # TP2：仅当有 2 处以上清算区时才设

@@ -265,6 +265,9 @@ SL_MULT_HIGH = 2.0
 
 # 盈亏比要求（复盘优化：益亏比 0.61→2.0+）
 RR_MIN_TP1      = 2.0   # TP1 盈亏比要求（low/mid tier）
+TP1_DEGRADED_ATR_CAP = 3.5  # [v3.102] tp_degraded 时 TP1 最大距离 = ATR × 3.5
+                             # 防止主流大币（ETH/BTC）SL 被结构止损撑宽后 TP1 拉到不合理位置
+                             # 仅对 mid/low tier 且 ATR绝对值 < 30 生效；high tier 山寨币不受限
 RR_MIN_TP1_REVERSAL = 1.2   # reversal 专属 TP1 盈亏比要求
                               # 低于通用 2.0，因为 reversal 目标就是清算区，
                               # 强行要求 2.0 会系统性过滤掉最近的清算区
