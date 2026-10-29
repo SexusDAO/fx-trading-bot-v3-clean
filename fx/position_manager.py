@@ -1438,7 +1438,7 @@ class PositionManager:
             # 开仓时间：优先 open_time，缺失用 fill_time；统一成毫秒（<1e12 视为秒）。
             #   两者都缺/无法解析 → 无法判断持仓时长，跳过本次（原先缺失时按 0 计算，会得到「持仓几十年」而立刻误平仓）。
             _ot = None
-            for _k in ("open_time", "fill_time"):
+            for _k in ("first_seen_time", "open_time", "fill_time"):
                 try:
                     _v = float(pos.get(_k) or 0)
                 except (TypeError, ValueError):

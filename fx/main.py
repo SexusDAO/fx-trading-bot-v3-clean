@@ -612,7 +612,7 @@ def _build_orphan_record(sym: str, pos_side: str, rp: dict, algo_orders, open_or
         "quantity":           qty,
         "quantity_remaining": qty,
         "leverage":           int(float(rp.get("leverage", 0) or 0)),
-        "open_time":          now_ms,
+        "open_time":          int(float(rp.get("updateTime") or now_ms)),
         "fill_time":          now_ms,
         "first_seen_time":    int(float(rp.get("updateTime") or now_ms)),  # [v3.93] 交易所首次发现时间，重启不清零
         "tp1_filled":         False,
