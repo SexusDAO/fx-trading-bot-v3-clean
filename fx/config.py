@@ -310,7 +310,7 @@ DEFAULT_LEVERAGE = 10
 # 挂单超时
 ORDER_EXPIRE_BREAKOUT_MIN = 30    # 动量突破挂单超时，分钟
 BREAKOUT_OI_GAIN_MIN      = 1.0   # breakout OI 15m 涨幅加分门槛（低/中波动，%）
-BREAKOUT_VOL_MULT_MIN     = 2.5   # [v3.99] 量比门槛 低/中波动（原2.0x→2.5x）
+BREAKOUT_VOL_MULT_MIN     = 3.0   # [v3.101] 量比门槛 低/中波动 2.5→3.0，与高波动档对齐，减少假突破
 BREAKOUT_VOL_MULT_HIGH    = 3.0   # [v3.99] 量比门槛 高波动（原2.5x→3.0x）
 BREAKOUT_OI_GAIN_MIN_HIGH = 3.0   # breakout OI 15m 涨幅加分门槛（高波动，%）
 BREAKOUT_MAX_CHASE_ATR = 1.5      # [v3.99] 追入距离 2ATR→1.5ATR，减少追高/追空
@@ -846,7 +846,7 @@ OI_DIV_ORDER_EXPIRE_MIN      = 60      # oi_divergence 挂单有效期（分钟�
 
 # ── 触发门槛 ──────────────────────────────────────────────────────────────────
 EMA_TREND_EMA_GAP_MIN_PCT     = 0.005  # EMA20 > EMA50 至少差距 0.5%（多头；空头用下方独立参数）
-EMA_TREND_EMA_GAP_MIN_PCT_SHORT = 0.008  # [v3.99] 空头要求更强趋势确认 0.8%，过滤弱势空头
+EMA_TREND_EMA_GAP_MIN_PCT_SHORT = 0.015  # [v3.101] 空头 EMA gap 0.8%→1.5%，山寨币 0.8% 等于没过滤
 EMA_TREND_RSI1H_MIN           = 48     # 1H RSI 下限（太低说明已经超卖，走 reversal 更合适）
 EMA_TREND_RSI1H_MAX           = 68     # 1H RSI 上限（太高说明已超买，不是好的回踩入场点）
 EMA_TREND_RSI1H_SHORT_MIN     = 32     # 做空 RSI1H 下限（原沿用做多 48）

@@ -387,6 +387,15 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
                     f"量能不足证明市场对回踩无兴趣"
                 )
                 return False, out
+            # [v3.101] pullback SHORT OI 缩量确认：OI 上升说明空头在主动加仓（下跌主升浪），不适合回踩空
+            # 作为降仓因子（×0.8），不硬拒，保持信号量
+            _oi_now_pb   = float(ind.get("oi_now", 0) or 0)
+            _oi_1h_pb    = float(ind.get("oi_1h_ago", 0) or 0)
+            if _oi_now_pb > 0 and _oi_1h_pb > 0:
+                _oi_chg_pb = (_oi_now_pb - _oi_1h_pb) / (_oi_1h_pb + 1e-9)
+                if _oi_chg_pb > 0.03:  # OI 1H 上升 >3%：空头主动加仓，下跌动能强，不适合回踩空
+                    out["position_size_cap"] = round(out.get("position_size_cap", 0.5) * 0.8, 4)
+                    out["oi_expanding_short"] = True
         ema_4h_diff_pct = abs(ema20_4h - ema50_4h) / (ema50_4h + 1e-9) * 100 if ema50_4h else 999
         ema_4h_neutral  = ema_4h_diff_pct <= 1.5  # v3.6: 1.0→1.5，山寨币 EMA 差距较大，1% 太窄误拒 weak 路径
 
