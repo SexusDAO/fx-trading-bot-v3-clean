@@ -100,7 +100,9 @@ jobs:
           cd fx && source venv/bin/activate
           pip install -r requirements_live.txt -q
           python3 -m compileall . -q 2>/dev/null || true
-          python3 daemon_start.py restart
+          python3 daemon_start.py restart || true
+          sleep 5
+          pgrep -f 'main.py' > /dev/null && echo 'main.py started OK' || (echo 'main.py failed to start' && exit 1)
           REMOTE
 
       - name: Notify DingTalk (success)
