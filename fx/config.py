@@ -132,8 +132,8 @@ REVERSAL_CHG24_SHORT_MIN        = 10.0  # [fix C] reversal SHORT 主通道 chg24
                                # 若想让8%~14%走主通道改回8.0，等实盘数据后决定
 CLASSIFY_REVERSAL_FUNDING_MIN  = 0.001
 REVERSAL_RSI1H_SHORT_MIN       = 65    # 做空主通道 RSI1H 下限
-CLASSIFY_REVERSAL_RSI4H_LONG   = REVERSAL_RSI4H_MAX_LONG    # 25
-CLASSIFY_REVERSAL_RSI4H_SHORT  = REVERSAL_RSI4H_MIN_SHORT   # 78
+CLASSIFY_REVERSAL_RSI4H_LONG   = REVERSAL_RSI4H_MAX_LONG    # [refactor-B8] 注释更正：实际值 55（原注释 25 已过时）
+CLASSIFY_REVERSAL_RSI4H_SHORT  = REVERSAL_RSI4H_MIN_SHORT   # [refactor-B8] 注释更正：实际值 55（原注释 78 已过时）
 CLASSIFY_BREAKOUT_CHG24_MIN    = 5.0   # 8% 降至 5%，成交量验证移到 judge_breakout
 
 # ── final_score 门槛 ──────────────────────────────────────────────────────
@@ -991,7 +991,7 @@ MFE_DRAWBACK_USE_PROGRESS   = True    # mfe_drawback_50pct 改用「进度」判
 OPT_EMA_TREND_TRIGGER_BAR     = False   # OPT-11 EMA 趋势需 1H/15M 触发 K 线  # [v3.87 合并决策] 默认 False：OPT-11 评审未列入：保守起见默认关闭，待数据
 
 # v3.87 第二批
-OPT_BREAKOUT_RSI_STRONG_RELAX = False   # OPT-12 放量(量比≥强量阈值)突破放宽 RSI 限制  # [v3.87 合并决策] 默认 False：OPT-12 按评审：暂缓，待验证 RSI>65 突破单质量
+OPT_BREAKOUT_RSI_STRONG_RELAX = True    # [refactor-B8] 原 False。开启后仅「强放量突破」（量比≥2.5/3.0）RSI 上限放宽到 75/25，普通突破仍 65/35；改回 False 即恢复   # OPT-12 放量(量比≥强量阈值)突破放宽 RSI 限制  # [v3.87 合并决策] 默认 False：OPT-12 按评审：暂缓，待验证 RSI>65 突破单质量
 BREAKOUT_RSI_MAX_LONG_STRONG  = 75     # 强量突破做多 RSI1H 上限
 BREAKOUT_RSI_MIN_SHORT_STRONG = 25     # 强量突破做空 RSI1H 下限
 OPT_BREAKOUT_MOMENTUM_ENTRY   = False   # OPT-13 距突破位≤0.5ATR 时延续入场，不再强制等回踩  # [v3.87 合并决策] 默认 False：OPT-13 按评审：暂缓，待对比成交率与止损率

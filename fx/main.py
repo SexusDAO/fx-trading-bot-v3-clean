@@ -1032,6 +1032,10 @@ async def _startup_sync_lite() -> None:
                         ps[_k] = float(_intent[_k])
                 if _intent.get("mode"):
                     ps["intent_mode"] = _intent["mode"]
+                    # [refactor-B8] 系统仓位按原策略管理：mode/sig_type 用开仓时的策略类型，
+                    #   不再标 recovered（否则会按孤儿规则 RECOVERED_MAX_HOLD_HOURS=8H 强平，
+                    #   例如 reversal 本应 12H）。关闭账本开关时不会走到这里。
+                    ps["mode"] = ps["sig_type"] = _intent["mode"]
             if not add_position(ps):
                 logger.warning(f"[sync_lite] {sym}({pos_side}) 孤儿建档失败")
                 continue
@@ -1320,6 +1324,8 @@ async def _sync_positions_on_startup() -> None:
                             ps[_k6] = float(_intent_s[_k6])
                     if _intent_s.get("mode"):
                         ps["intent_mode"] = _intent_s["mode"]
+                        # [refactor-B8] 同上：开机认领的系统仓位按原策略时间止损，不按孤儿 8H 规则
+                        ps["mode"] = ps["sig_type"] = _intent_s["mode"]
                 if len(_orphan_notes) and any("歧义" in _n for _n in _orphan_notes):
                     logger.warning(f"[startup_sync] {sym}({pos_side}) {'; '.join(_orphan_notes)}")
                 if not add_position(ps):

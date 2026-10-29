@@ -2078,7 +2078,13 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
             _oi_exp_min = 60  # 默认 1H
         expire_ts = int((time.time() + _oi_exp_min * 60) * 1000)
     elif entry_mode == "pending_order":
-        expire_ts = int((time.time() + 4 * 3600) * 1000)
+        # [refactor-B8] 原写死 4 小时，改为读 ORDER_EXPIRE_PULLBACK_MIN（当前 240 分钟，数值不变）。
+        #   以后改配置即可生效；读取失败按原 240 分钟。
+        try:
+            from config import ORDER_EXPIRE_PULLBACK_MIN as _po_exp_min
+        except ImportError:
+            _po_exp_min = 240
+        expire_ts = int((time.time() + max(float(_po_exp_min), 11.0) * 60) * 1000)
     else:
         # [fix #34] immediate 模式原为无过期的 GTC：改用 GTD，有效期取 ORDER_EXPIRE_* 配置
         #   （交易所要求 goodTillDate 至少晚于当前 600 秒，这里取配置分钟数并保证 >= 11 分钟）
