@@ -87,7 +87,7 @@ def _ensure_deps():
         print("[startup] PySocks 缺失，自动安装...", flush=True)
         subprocess.run(
             [sys.executable, "-m", "pip", "install",
-             "requests[socks]", "PySocks", "-q", "--break-system-packages"],
+             "requests[socks]", "PySocks", "-q"],
             check=True,
         )
         print("[startup] PySocks 安装完成，重建代理 Session", flush=True)
@@ -878,9 +878,15 @@ async def _startup_sync_lite() -> None:
 
         # 1) 交易所真实持仓；查询失败直接放弃本轮（失败≠无持仓，绝不清理）
         try:
-            pos_risk = await asyncio.to_thread(_bapi.get_position, None)
-            open_orders = await asyncio.to_thread(_bapi.get_open_orders)
-            algo_orders = await asyncio.to_thread(_bapi.get_algo_open_orders)
+            pos_risk = await asyncio.wait_for(
+                asyncio.to_thread(_bapi.get_position, None), timeout=5.0)
+            open_orders = await asyncio.wait_for(
+                asyncio.to_thread(_bapi.get_open_orders), timeout=5.0)
+            algo_orders = await asyncio.wait_for(
+                asyncio.to_thread(_bapi.get_algo_open_orders), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("[sync_lite] 查询超时(5s)，本轮跳过，不做任何清理")
+            return
         except Exception as _qe:
             logger.warning(f"[sync_lite] 查询交易所持仓/挂单失败，本轮跳过: {_qe}")
             return
@@ -1690,7 +1696,8 @@ async def main() -> None:
                     _main_loop.call_soon_threadsafe(_spawn)
                 except Exception as _re:
                     logger.warning(f"[main] hub 重连回调调度失败（非致命）: {_re}")
-            hub.set_reconnect_callback(_on_ws_hub_reconnect)
+            # [fix] hub断线不触发sync_lite，避免get_position慢请求堵死事件循环
+            # hub.set_reconnect_callback(_on_ws_hub_reconnect)
             logger.info("[main] market_data_hub 重连回调已注册")
         except Exception as e:
             logger.warning(f"[main] hub 重连回调注册失败（非致命）: {e}")

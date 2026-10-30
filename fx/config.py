@@ -241,7 +241,7 @@ LEVERAGE_SHORT_RATIO_BEAR_STRONG = 0.80
 MAX_SINGLE_NOMINAL = 1000    # 单仓名义上限（v3.36: 2000→1000，单仓不超1000U）
 MIN_NOTIONAL_GUARD = 50.0   # 单仓名义下限（v3.36: 6.0→100.0；v3.96: 100→50，小账户也能开仓）
 TAKER_FEE_RATE     = 0.0005  # [fix #44] 无法从成交回报取手续费时的估算用 taker 费率（0.05%）
-RISK_PER_TRADE     = 0.03    # 每笔最大风险比例（止损定仓核心参数）  # [fix] 5% → 1%
+RISK_PER_TRADE     = 0.05    # 每笔最大风险比例（止损定仓核心参数）  # [fix] 5% → 1%
 
 # 熔断参数
 # [fix B] 恢复日内亏损熔断：改为按账户权益比例触发（默认 8%）。
@@ -255,7 +255,7 @@ SL_MAX_PCT_LOW  = 0.12  # low tier 止损上限
 SL_MAX_PCT_MID  = 0.15  # mid tier 止损上限
 SL_MAX_PCT_HIGH = 0.20  # high tier 止损上限
 TP1_LIQ_ADVANCE_ATR = 0.2   # TP1比清算区上沿提前成交的距离（仅做空方向：缓冲 _tp1_buf - 0.2ATR，下限0）
-TP1_MAX_PCT = 0.15      # TP1 距入场价上限（low/mid tier）
+TP1_MAX_PCT = 0.20      # TP1 距入场价上限（low/mid tier）
 TP1_MAX_PCT_HIGH = 0.25 # TP1 距入场价上限（high tier，配合更宽止损保证 RR）
 
 # 动态止损倍数
@@ -264,7 +264,7 @@ SL_MULT_MID  = 1.5
 SL_MULT_HIGH = 2.0
 
 # 盈亏比要求（复盘优化：益亏比 0.61→2.0+）
-RR_MIN_TP1      = 2.0   # TP1 盈亏比要求（low/mid tier）
+RR_MIN_TP1      = 1.8   # TP1 盈亏比要求（low/mid tier）
 TP1_DEGRADED_ATR_CAP = 3.5  # [v3.102] tp_degraded 时 TP1 最大距离 = ATR × 3.5
                              # 防止主流大币（ETH/BTC）SL 被结构止损撑宽后 TP1 拉到不合理位置
                              # 仅对 mid/low tier 且 ATR绝对值 < 30 生效；high tier 山寨币不受限
@@ -1180,7 +1180,7 @@ STOCK_TOKENS_CN_HOURS_UTC = (1, 7)  # 允许开仓的UTC小时范围 [1, 7)
 WS_MP_COALESCE         = True    # markPrice 合并分发：每标的只保留最新帧，定时批量回调；False=原逐帧分发
 WS_MP_FLUSH_SEC        = 0.25    # 合并分发间隔（秒）
 LOOP_SLOW_CALLBACK_SEC = 0.5     # 单个价格回调超过该耗时即记录 warning
-IO_POOL_WORKERS        = 16      # 默认线程池大小（原约 6）；0 = 不修改，沿用 Python 默认
+IO_POOL_WORKERS = 4      # 默认线程池大小（原约 6）；0 = 不修改，沿用 Python 默认
 LOOP_DEBUG_SLOW_CALLBACK = False # True 时 asyncio 会记录所有超过 LOOP_SLOW_CALLBACK_SEC 的回调（有少量开销）
 
 # ── [refactor-B2] 扫描计算移出主进程 ────────────────────────────────────────

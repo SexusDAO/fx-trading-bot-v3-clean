@@ -1699,7 +1699,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     except Exception as _xe:
         logger.warning(f"[executor] {symbol} 查询交易所实际持仓数失败，持仓上限仅按本地数量判断: "
                        f"{type(_xe).__name__}: {str(_xe)[:120]}")
-    ok, reason = _precheck(signal)
+    ok, reason = await asyncio.to_thread(_precheck, signal)
     if not ok:
         logger.info(f"[executor] {symbol} 预检拒绝: {reason}")
         # [v3.89 SHADOW] C 类：下单前检查被拒写入影子日志（只记录）
@@ -1745,7 +1745,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
 
     # ── 步骤2：拉取最新市场数据 ───────────────────────────────────────────────
     try:
-        mkt = _fetch_market(symbol)
+        mkt = await asyncio.to_thread(_fetch_market, symbol)
     except Exception as e:
         logger.error(f"[executor] {symbol} 市场数据拉取失败: {e}")
         raise PreOrderError(f"{symbol} 市场数据拉取失败: {e}") from e   # [v3.89 #102] 暂时性失败
@@ -1975,7 +1975,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
             notional = _max_risk_notional
 
     # ── 账户状态感知仓位调整（亏损连续/当日亏损过大时降仓）────────────────────
-    notional = _apply_account_state_scale(signal, notional)
+    notional = await asyncio.to_thread(_apply_account_state_scale, signal, notional)
 
     # ── 保证金偏紧时自动缩小仓位（_MARGIN_SCALE 由 _account_final_check 写入）──
     _scale = _MARGIN_SCALE[0]
@@ -2014,7 +2014,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
         return False
 
     # ── 步骤5：账户终检 ───────────────────────────────────────────────────────
-    ok, reason = _account_final_check(notional)
+    ok, reason = await asyncio.to_thread(_account_final_check, notional)
     if not ok:
         logger.warning(f"[executor] {symbol} 账户终检失败: {reason}")
         # [v3.89 #102] 账户查询失败是暂时性故障（可重试）；余额/名义/回撤等业务拒绝仍 return False
@@ -2048,7 +2048,7 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
         return False
 
     # ── 计算数量 ──────────────────────────────────────────────────────────────
-    precision = _get_precision(symbol)
+    precision = await asyncio.to_thread(_get_precision, symbol)
     quantity  = _round_qty(notional / entry_price, precision["step"])
     if quantity <= 0:
         logger.warning(f"[executor] {symbol} 计算数量异常: {quantity}")
