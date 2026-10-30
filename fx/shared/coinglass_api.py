@@ -222,6 +222,9 @@ def _calc_deriv_score(direction: str, sig: dict,
         if cb_prem is not None and cb_prem < -0.1:
             delta += 2; reasons.append(f"Coinbase折价{cb_prem:.2f}%:+2")
 
+    # [refactor-B11] 衍生品总分负向下限 -5：保留费率/OI/多空比极端拥挤的风险信息，
+    #   但不让它单独把信号压死。正向加分不受影响。
+    delta = max(delta, -5)
     return delta, reasons
 
 
@@ -245,8 +248,10 @@ def get_signal_for_open(symbol: str, direction: str,
                 heatmap_score = 10
                 h_reason = "✅ 热力图顺势（上方空头密集）:+10"
             elif heatmap_bias == "short":
-                heatmap_score = -20
-                h_reason = f"⚠️ 热力图逆势（下方多头密集 {zones['ratio']:.2f}）:-20"
+                # [refactor-B11] 原 -20。CG 清算图只做加分项：逆势不再扣分，
+                #   方向性否决交给策略门槛与 BTC 趋势过滤，避免多项扣分叠加压死信号。
+                heatmap_score = 0
+                h_reason = f"热力图逆势（下方多头密集 {zones['ratio']:.2f}，不扣分）:0"
             else:
                 heatmap_score = 0
                 h_reason = "热力图中性:0"
@@ -255,8 +260,9 @@ def get_signal_for_open(symbol: str, direction: str,
                 heatmap_score = 10
                 h_reason = "✅ 热力图顺势（下方多头密集）:+10"
             elif heatmap_bias == "long":
-                heatmap_score = -15
-                h_reason = f"⚠️ 热力图逆势（上方空头密集 {zones['ratio']:.2f}）:-15"
+                # [refactor-B11] 原 -15，同上：逆势不扣分
+                heatmap_score = 0
+                h_reason = f"热力图逆势（上方空头密集 {zones['ratio']:.2f}，不扣分）:0"
             else:
                 heatmap_score = 0
                 h_reason = "热力图中性:0"

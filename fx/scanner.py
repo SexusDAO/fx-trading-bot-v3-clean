@@ -2900,7 +2900,12 @@ def _filter_and_register_signals(
             try:
                 mark = float(_get_mark_price(sig["symbol"]).get("markPrice", 0))
                 cg_bonus = _cg_bonus_fn(sig["symbol"], direction, mark, ind)
-                cg_bonus = max(-10, min(10, cg_bonus))  # v3.65: clip ±15→±10，CG数据不100%可靠，收窄防单源一票否决
+                # [refactor-B11] CG 拆成两部分分别限幅（读 ind：score_symbol_cg_bonus 已把两项写进 ind）：
+                #   热力图只加分 0~+10；衍生品保留负向，限幅 -5~+5；合计 -5~+15。
+                #   原来是合计 clip 到 -10~+10。注意：衍生品正向上限由原先的合计 +10 内共享，改为单独 +5。
+                cg_heatmap = max(0, min(10, ind.get("cg_heatmap", 0) or 0))
+                cg_deriv   = max(-5, min(5,  ind.get("cg_deriv",   0) or 0))
+                cg_bonus   = cg_heatmap + cg_deriv
             except Exception:
                 pass
 
@@ -2918,16 +2923,18 @@ def _filter_and_register_signals(
                 _bear_str = "weak"
             if _sig_type == "reversal" and direction == "LONG":
                 # 熊市逆势做多：强熊惩罚更重
-                strategy_adj = -15 if _bear_str == "strong" else \
-                               -12 if _bear_str == "moderate" else -10
+                # [refactor-B11] 收窄：原 -15/-12/-10 → -10/-8/-6（保留方向性，不清零）
+                strategy_adj = -10 if _bear_str == "strong" else \
+                               -8  if _bear_str == "moderate" else -6
             elif _sig_type == "pullback" and direction == "SHORT":
                 # 熊市顺势做空：强熊加分更多
                 strategy_adj = +10 if _bear_str == "strong" else \
                                +7  if _bear_str == "moderate" else +5
             elif _sig_type == "range_bounce":
                 # 强熊下区间支撑失败概率更高
-                strategy_adj = -10 if _bear_str == "strong" else \
-                               -7  if _bear_str == "moderate" else -5
+                # [refactor-B11] 收窄：原 -10/-7/-5 → -7/-5/-3
+                strategy_adj = -7 if _bear_str == "strong" else \
+                               -5 if _bear_str == "moderate" else -3
             if strategy_adj:
                 logger.info(f"[scanner] {sig['symbol']} bear强度={_bear_str} "
                             f"strategy_adj={strategy_adj:+d} "
@@ -3008,7 +3015,7 @@ def _filter_and_register_signals(
             if _mkt_mode == "bull":
                 strategy_adj = -15 if _et_is_short else +8
             elif _mkt_mode == "bear":
-                strategy_adj = +8 if _et_is_short else -15
+                strategy_adj = +8 if _et_is_short else -10   # [refactor-B11] 熊市 ema_trend LONG：-15→-10
             elif _mkt_mode == "range":
                 strategy_adj = -5   # 震荡市 EMA 排列容易失效
             logger.info(
