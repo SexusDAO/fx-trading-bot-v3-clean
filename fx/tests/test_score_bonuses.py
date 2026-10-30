@@ -150,10 +150,11 @@ def test_hub_helpers_respect_flag_and_hub(monkeypatch):
     assert sc._bonus_hub_klines("BTCUSDT", "1h", 6) is None                  # 不回落 REST
 
 
+# [refactor-B11] 负向下限 -12 → -5，断言同步更新
 def test_hub_cap_floor_defaults_symmetric():
     import importlib, config as _c
     src = open(_c.__file__, encoding="utf-8").read()
-    assert "SCORE_HUB_BONUS_CAP            = 12" in src and "SCORE_HUB_PENALTY_FLOOR        = -12" in src
+    assert "SCORE_HUB_BONUS_CAP            = 12" in src and "SCORE_HUB_PENALTY_FLOOR        = -5" in src
 
 
 def test_config_switches_default_on():

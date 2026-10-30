@@ -183,7 +183,7 @@ SCORE_TAKER_BONUS              = True   # 近6根1h主动买入占比：顺向 +
 SCORE_RANGE_BONUS              = True   # 24h区间位置：顺向 +8 / 逆向 -5
 SCORE_VOLPRICE_BONUS           = True   # 放量(近4h/前20h>=1.6)且24h涨跌幅方向上有限：+8
 SCORE_HUB_BONUS_CAP            = 12     # hub 三项加分（taker/range/volprice）合计上限
-SCORE_HUB_PENALTY_FLOOR        = -12    # hub 三项加分负向下限
+SCORE_HUB_PENALTY_FLOOR        = -5     # [refactor-B11] 原 -12。hub 三项（taker/区间/量价）负向下限收窄
 
 # CLASSIFY_BREAKOUT_VOL_RATIO = 1.5  # 已废弃：分类层不再校验量比，移至 judge_breakout
 
