@@ -391,20 +391,18 @@ def _fetch_pool():
 
 
 def _fetch_with_timeout(sym: str, price: float, range_: str, key: str, timeout: float | None = None) -> dict:
-    """在独立线程里执行 _fetch_dedup，最多等 timeout 秒；超时返回 {}（不缓存、不抛异常）。"""
+    """直接在调用线程执行 _fetch_dedup（调用方 prefetch_liq_cache 已在线程池里），
+    用 abandon Event + 外层 ThreadPoolExecutor.map deadline 控制超时，
+    避免线程池嵌套导致事件循环阻塞 6-7s。[fix: loop-block]"""
     if timeout is None:
         timeout = float(LIQ_PREFETCH_FETCH_TIMEOUT_SEC)
-    if timeout <= 0:                         # 0/负数：关闭超时，直接同步执行（旧行为）
+    if timeout <= 0:
         return _fetch_dedup(sym, price, range_, key)
+    # 已在 prefetch 线程池的工作线程里，直接跑 _fetch_dedup，不再嵌套第二层线程池
+    # abandon 由外层 prefetch_liq_cache_bounded 的 deadline 机制控制，此处无需再套 fut.result()
     abandon = threading.Event()
-    fut = _fetch_pool().submit(_fetch_dedup, sym, price, range_, key, abandon)
     try:
-        return fut.result(timeout=timeout) or {}
-    except concurrent.futures.TimeoutError:
-        abandon.set()
-        fut.cancel()                         # 还在排队的直接取消；已在执行的由 abandon 阻止写缓存
-        logger.warning(f"[liq_cache] {key} 预热取数超过 {timeout:.0f}s，跳过且不缓存")
-        return {}
+        return _fetch_dedup(sym, price, range_, key, abandon) or {}
     except Exception as e:
         logger.debug(f"[liq_cache] {key} 预热取数异常: {e}")
         return {}

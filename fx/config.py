@@ -1196,7 +1196,7 @@ ENTRY_LEDGER_MAX_AGE_H = 48    # 账本记录有效期（小时）
 
 # ── [refactor-B10] 行情 WS（market_data_hub）稳定性 ─────────────────────────
 HUB_DECOUPLED_RECV        = True   # 收消息与解析拆开，避免解析慢导致接收缓冲堆满被服务器断开；False=原边收边解析
-HUB_RX_BUFFER             = 2000   # 本地接收缓冲上限（帧），满了丢最旧帧并告警
-HUB_PARSE_YIELD_EVERY     = 20     # 每解析多少帧让出一次事件循环
+HUB_RX_BUFFER             = 4000   # 本地接收缓冲上限（帧），满了丢最旧帧并告警
+HUB_PARSE_YIELD_EVERY     = 5     # 每解析多少帧让出一次事件循环
 HUB_SYNC_DEBOUNCE_SEC     = 20     # hub 重连后等多少秒再对账；窗口内再次重连会重新计时（0=立即）
 HUB_SYNC_MIN_INTERVAL_SEC = 60     # 两次 hub 重连对账的最小间隔，不足则推迟（不丢弃）；0=不限

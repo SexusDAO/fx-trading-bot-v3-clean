@@ -625,7 +625,7 @@ class MarketDataHub:
             first = False
             try:
                 async with websockets.connect(
-                    self._url, ping_interval=60, ping_timeout=120, proxy=_fb.current(), max_queue=64,
+                    self._url, ping_interval=60, ping_timeout=120, proxy=_fb.current(), max_queue=256,
                     compression=None,   # 禁用 permessage-deflate：免解压，缓解 GIL 争抢
                 ) as ws:
                     _fb.opened()
@@ -736,7 +736,7 @@ class MarketDataHub:
             first = False
             try:
                 async with websockets.connect(
-                    self._market_url, ping_interval=60, ping_timeout=120, proxy=_fb.current(), max_queue=32,
+                    self._market_url, ping_interval=60, ping_timeout=120, proxy=_fb.current(), max_queue=256,
                     compression=None,   # 禁用 permessage-deflate：免解压，缓解 GIL 争抢
                 ) as ws:
                     _fb.opened()
