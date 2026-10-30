@@ -37,7 +37,8 @@ def test_heatmap_with_direction_still_adds_10(monkeypatch):
 
 def test_scanner_cg_bonus_clip_floor_is_zero():
     src = Path(config.__file__).with_name("scanner.py").read_text(encoding="utf-8")
-    assert "cg_bonus = max(0, min(10, cg_bonus))" in src
+    # B11 修订：cg_bonus 由热力图(0~10)与衍生品(-5~5)拆分合成
+    assert "cg_heatmap = max(0, min(10," in src and "cg_deriv   = max(-5, min(5," in src
     assert "cg_bonus = max(-10, min(10, cg_bonus))" not in src
 
 
@@ -90,3 +91,37 @@ def test_bear_strong_long_and_short_score_arithmetic():
     assert long_score == 50 and long_score >= 40
     short_score = min(100, base + 5 + 10 + 10)       # btc +5, cg +10, strat +10
     assert short_score == 95
+
+
+def _cg_bonus_like_scanner(ind):
+    """按 scanner 里的真实公式复算（源码已由上一条测试锁定）。"""
+    h = max(0, min(10, ind.get("cg_heatmap", 0) or 0))
+    d = max(-5, min(5, ind.get("cg_deriv", 0) or 0))
+    return h + d
+
+
+def test_cg_split_heatmap_against_deriv_mild_negative(monkeypatch):
+    # 热力图逆势(0) + 衍生品轻度负向(-3)：cg_bonus 为负，且不低于 -5
+    _stub_cg(monkeypatch, "short", deriv_delta=-3)
+    ind = {}
+    monkeypatch.setattr(cg, "get_signal_for_open",
+                        cg.get_signal_for_open)  # 真实函数
+    cg.score_symbol_cg_bonus("BTCUSDT", "LONG", 100.0, ind)
+    assert ind["cg_heatmap"] == 0 and ind["cg_deriv"] == -3
+    assert _cg_bonus_like_scanner(ind) == -3
+    ind2 = {"cg_heatmap": 0, "cg_deriv": -5}
+    assert _cg_bonus_like_scanner(ind2) == -5
+
+
+def test_cg_split_heatmap_with_deriv_positive_range(monkeypatch):
+    # 热力图顺势(+10) + 衍生品正向：合计在 0~+15
+    _stub_cg(monkeypatch, "long", deriv_delta=8)
+    ind = {}
+    cg.score_symbol_cg_bonus("BTCUSDT", "LONG", 100.0, ind)
+    assert ind["cg_heatmap"] == 10 and ind["cg_deriv"] == 8
+    assert _cg_bonus_like_scanner(ind) == 15           # 衍生品 8 被限幅到 5
+    assert 0 <= _cg_bonus_like_scanner({"cg_heatmap": 10, "cg_deriv": 0}) <= 15
+
+
+def test_cg_split_missing_keys_default_zero():
+    assert _cg_bonus_like_scanner({}) == 0

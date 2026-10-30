@@ -2900,7 +2900,12 @@ def _filter_and_register_signals(
             try:
                 mark = float(_get_mark_price(sig["symbol"]).get("markPrice", 0))
                 cg_bonus = _cg_bonus_fn(sig["symbol"], direction, mark, ind)
-                cg_bonus = max(0, min(10, cg_bonus))  # [refactor-B11] 下限 -10→0：CG 只作加分项，不扣分（原 v3.65: ±10）
+                # [refactor-B11] CG 拆成两部分分别限幅（读 ind：score_symbol_cg_bonus 已把两项写进 ind）：
+                #   热力图只加分 0~+10；衍生品保留负向，限幅 -5~+5；合计 -5~+15。
+                #   原来是合计 clip 到 -10~+10。注意：衍生品正向上限由原先的合计 +10 内共享，改为单独 +5。
+                cg_heatmap = max(0, min(10, ind.get("cg_heatmap", 0) or 0))
+                cg_deriv   = max(-5, min(5,  ind.get("cg_deriv",   0) or 0))
+                cg_bonus   = cg_heatmap + cg_deriv
             except Exception:
                 pass
 
