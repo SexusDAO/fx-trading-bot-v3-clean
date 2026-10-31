@@ -643,6 +643,13 @@ def _weekend_counter_inc() -> int:
     return _WEEKEND_POS_COUNT
 
 
+# 模块加载时自动初始化（进程启动/重启时只执行一次）
+try:
+    _init_weekend_counter_from_trade_log()
+except Exception:
+    pass
+
+
 def _is_weekend_cutoff(now: datetime) -> bool:
     """周日 UTC WEEKEND_CUTOFF_SUNDAY_UTC_HOUR 起为收尾时段，不再注册新信号。"""
     from config import WEEKEND_CUTOFF_SUNDAY_UTC_HOUR
