@@ -1788,6 +1788,12 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
     tp2_price   = params["tp2_price"]
     entry_mode  = params.get("entry_mode", "immediate")
 
+    # [fix] entry_price/sl_price/tp1_price 任一为 None 时拒绝开仓，避免格式化崩溃
+    if entry_price is None or sl_price is None or tp1_price is None:
+        logger.warning(f"[executor] {symbol} calc_sl_tp 返回 None 价格(entry={entry_price} sl={sl_price} tp1={tp1_price})，拒绝开仓")
+        await _reject_card(signal, "止损计算返回None价格", reason_key="sl_tp_none")
+        return False
+
     # v3.19: 开仓参数完整记录，方便复盘时确认 SL/TP 是否合理
     logger.info(
         f"[executor] {symbol} 开仓参数 "
