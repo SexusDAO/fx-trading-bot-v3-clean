@@ -405,9 +405,7 @@ class MarketDataHub:
             self.frame_count += 1
             was_ready = self._ready
             if updates:
-                new = dict(self._prices)          # 复制 + 整体替换，读端不受影响
-                new.update(updates)
-                self._prices = new
+                self._prices.update(updates)      # [fix] 直接更新，避免每帧复制980条字典
                 self._ready = True
         if updates and not was_ready:
             # 断线 → 重新就绪：只触发一次（每帧都触发会刷爆对齐任务）；首次就绪不触发
