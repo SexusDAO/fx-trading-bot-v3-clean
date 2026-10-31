@@ -357,7 +357,7 @@ HUB_WS_PROXY = (os.environ.get("HUB_WS_PROXY") or os.environ.get("PROXY_URL") or
 ROUTE_PROBE_INTERVAL_SEC = 600   # 双通道（代理/直连）后台复测间隔（秒）；仅配置了代理时生效
 ROUTE_SWITCH_RATIO = 2.0         # 当前通道比另一条慢这么多倍才切换（防抖）
 ROUTE_FAIL_SWITCH_N = 3          # 当前通道连续失败这么多次才切换
-KLINE_HUB_SYMBOLS_MAX = 165  # 对应候选池上限 SCAN_POOL_MAX=165；连接数=ceil(165/60)=3 条，共 495 个 stream（单连接上限 KLINE_STREAM_PER_CONN=180）
+KLINE_HUB_SYMBOLS_MAX = 120  # 对应候选池上限 SCAN_POOL_MAX=165；连接数=ceil(165/60)=3 条，共 495 个 stream（单连接上限 KLINE_STREAM_PER_CONN=180）
 KLINE_REQUEST_TOTAL_SEC = 8.0     # 单次 get_klines 调用总时限（秒，含重试、重试间隔、直连失败后改走代理）
 API_REQUEST_TIMEOUT     = (3, 5)    # 全局 REST 接口超时 (connect_s, read_s)：公开行情 _get 与签名查询/撤单/杠杆等
 API_REQUEST_MAX_RETRY   = 1         # 全局 REST 接口最多重试次数（_retry 总尝试 = 1 + 此值）
@@ -1196,7 +1196,7 @@ ENTRY_LEDGER_MAX_AGE_H = 48    # 账本记录有效期（小时）
 
 # ── [refactor-B10] 行情 WS（market_data_hub）稳定性 ─────────────────────────
 HUB_DECOUPLED_RECV        = True   # 收消息与解析拆开，避免解析慢导致接收缓冲堆满被服务器断开；False=原边收边解析
-HUB_RX_BUFFER             = 4000   # 本地接收缓冲上限（帧），满了丢最旧帧并告警
+HUB_RX_BUFFER             = 800   # 本地接收缓冲上限（帧），满了丢最旧帧并告警
 HUB_PARSE_YIELD_EVERY     = 5     # 每解析多少帧让出一次事件循环
 HUB_SYNC_DEBOUNCE_SEC     = 20     # hub 重连后等多少秒再对账；窗口内再次重连会重新计时（0=立即）
 HUB_SYNC_MIN_INTERVAL_SEC = 60     # 两次 hub 重连对账的最小间隔，不足则推迟（不丢弃）；0=不限
