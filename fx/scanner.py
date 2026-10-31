@@ -574,9 +574,44 @@ def _is_weekend_period(now: datetime) -> bool:
     return False
 
 
-# ── v3.92 周末新开仓计数器（主扫描 + funding_arb 共用；按注册计，进程内存，不持久化）──
+# ── v3.92 周末新开仓计数器（主扫描 + funding_arb 共用；启动时从 trade_log 恢复实际成交数）──
 _WEEKEND_POS_COUNT = 0
 _WEEKEND_WINDOW_START = 0.0   # 当前周末窗口起点（UTC 周五 22:00）时间戳
+
+def _init_weekend_counter_from_trade_log() -> int:
+    """启动时从 trade_log.jsonl 读取本周末窗口内实际成交笔数，初始化计数器。"""
+    global _WEEKEND_POS_COUNT, _WEEKEND_WINDOW_START
+    try:
+        import json as _json
+        from datetime import datetime as _dt, timezone as _tz
+        _now = _dt.now(_tz.utc)
+        if not _is_weekend_period(_now):
+            return 0
+        _ws = _weekend_window_start_ts(_now)
+        _WEEKEND_WINDOW_START = _ws
+        # 读 trade_log.jsonl，统计 open_time 在本周末窗口内的笔数
+        import pathlib as _pl
+        _log = _pl.Path(__file__).parent.parent / "logs" / "trade_log.jsonl"
+        if not _log.exists():
+            return 0
+        _count = 0
+        with open(_log, "r", encoding="utf-8") as _f:
+            for _line in _f:
+                try:
+                    _rec = _json.loads(_line.strip())
+                    _ot = _rec.get("open_time", 0)
+                    # open_time 可能是毫秒或秒
+                    _ts = _ot / 1000 if _ot > 1e12 else _ot
+                    if _ts >= _ws:
+                        _count += 1
+                except Exception:
+                    continue
+        _WEEKEND_POS_COUNT = _count
+        logger.info(f"[scanner] 周末计数器从 trade_log 恢复：本周末已成交 {_count} 笔（窗口起点 {_ws}）")
+        return _count
+    except Exception as _e:
+        logger.warning(f"[scanner] 周末计数器恢复失败，从 0 开始: {_e}")
+        return 0
 
 
 def _weekend_window_start_ts(now: datetime) -> float:
