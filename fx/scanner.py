@@ -2065,24 +2065,76 @@ _POOL_OI_TOTAL_TIMEOUT_SEC = 90.0
 
 
 # ── 大户持仓多空比影子记录（只写日志，不影响评分、不影响信号是否发出）─────────────
-def _log_top_trader_shadow(signals: list) -> int:
-    """对最终通过的信号逐个拉大户持仓比并写一行 info 日志；任何异常都吞掉。返回成功写日志的条数。"""
-    n = 0
+def _log_top_trader_shadow(signals: list) -> list:
+    """大户持仓多空比过滤 + 顺向加分 + 日志记录。
+    过滤：极端逆向时拒绝（做空时多头>70%或比值>3.0，做多时空头>70%或比值<0.33）
+    加分：大户顺向时+4~+8分，逆向时-5分
+    返回过滤后的信号列表。
+    """
+    try:
+        from config import TOP_TRADER_FILTER_ENABLED as _TT_ENABLED
+    except Exception:
+        _TT_ENABLED = True
+
+    passed = []
     for sig in signals or []:
         try:
             from shared.clawby_adapter import get_top_trader_ratio
             sym = sig.get("symbol", "")
+            direction = sig.get("direction", "").upper()
             r = get_top_trader_ratio(sym)
             if not r:
+                passed.append(sig)
                 continue
-            logger.info(f"[top_trader] {sym} {sig.get('direction', '')} "
-                        f"大户多头={r['top_position_long_percent']:.1f}% "
-                        f"空头={r['top_position_short_percent']:.1f}% "
-                        f"比值={r['top_position_long_short_ratio']:.2f}")
-            n += 1
+
+            long_pct  = float(r.get("top_position_long_percent", 50))
+            short_pct = float(r.get("top_position_short_percent", 50))
+            ratio     = float(r.get("top_position_long_short_ratio", 1.0))
+
+            logger.info(f"[top_trader] {sym} {direction} "
+                        f"大户多头={long_pct:.1f}% "
+                        f"空头={short_pct:.1f}% "
+                        f"比值={ratio:.2f}")
+
+            if _TT_ENABLED:
+                if direction == "SHORT" and (long_pct > 70 or ratio > 3.0):
+                    logger.warning(
+                        f"[top_trader] {sym} SHORT 被大户过滤: "
+                        f"多头={long_pct:.1f}% 比值={ratio:.2f}"
+                    )
+                    continue
+                if direction == "LONG" and (short_pct > 70 or ratio < 0.33):
+                    logger.warning(
+                        f"[top_trader] {sym} LONG 被大户过滤: "
+                        f"空头={short_pct:.1f}% 比值={ratio:.2f}"
+                    )
+                    continue
+
+            # 顺向加分 / 逆向扣分
+            tt_adj = 0
+            if direction == "LONG":
+                if long_pct >= 65:    tt_adj = +8
+                elif long_pct >= 55:  tt_adj = +4
+                elif short_pct >= 60: tt_adj = -5
+            elif direction == "SHORT":
+                if short_pct >= 65:   tt_adj = +8
+                elif short_pct >= 55: tt_adj = +4
+                elif long_pct >= 60:  tt_adj = -5
+
+            if tt_adj != 0:
+                _ind = sig.get("ind") or {}
+                _old = sig.get("final_score") or _ind.get("final_score") or 0
+                _new = min(100, max(0, _old + tt_adj))
+                sig["final_score"] = _new
+                _ind["final_score"] = _new
+                _ind["top_trader_adj"] = tt_adj
+                logger.info(f"[top_trader] {sym} {direction} 大户调分 {tt_adj:+d} ({_old}→{_new})")
+
+            passed.append(sig)
         except Exception as e:
-            logger.debug(f"[top_trader] 影子记录异常（忽略）: {e}")
-    return n
+            logger.debug(f"[top_trader] 异常（放行）: {e}")
+            passed.append(sig)
+    return passed
 
 
 # ── 代币解锁风险过滤（只影响 LONG）─────────────────────────────────────────────
@@ -3286,7 +3338,7 @@ def _filter_and_register_signals(
     result["signals_final"] = len(avail_signals)
 
     # 大户持仓多空比影子记录：评分、槽位筛选都已完成，只写日志（失败不影响信号）
-    _log_top_trader_shadow(avail_signals)
+    avail_signals = _log_top_trader_shadow(avail_signals)
 
     # ── 市场环境快照：注入所有信号（用于 trade_log 标注）─────────────────────
     try:
