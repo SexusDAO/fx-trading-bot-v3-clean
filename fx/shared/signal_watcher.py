@@ -2066,16 +2066,18 @@ class SignalWatcher:
                     return True, f"reversal LONG RSI1H={rsi_1h:.1f} 回升至 {_rsi_lc} 以上，超卖消退"
 
         elif mode == 'range_bounce':
-            # 核心理由：区间结构未被破坏（保留原有逻辑，已足够精简）
+            # 核心理由：区间结构未被破坏
+            # [fix] 入场价已改为锚定 c_low×1.002，触发区间=[c_low×0.995, c_low×1.008]
+            # 撤单条件从 c_low×0.995 改为 c_low×0.99（下方1%缓冲），避免与触发区间重合
             _reason_dict = entry.signal.get('reason', {}) or {}
             if direction == 'LONG':
                 c_low = float(_reason_dict.get('c_low', 0))
-                if c_low > 0 and price < c_low * 0.995:
-                    return True, f"range_bounce 区间下沿跌破 (price={price:.5f} < c_low={c_low:.5f} × 0.995)"
+                if c_low > 0 and price < c_low * 0.99:
+                    return True, f"range_bounce 区间下沿跌破 (price={price:.5f} < c_low={c_low:.5f} × 0.99)"
             elif direction == 'SHORT':
                 c_high = float(_reason_dict.get('c_high', 0))
-                if c_high > 0 and price > c_high * 1.005:
-                    return True, f"range_bounce SHORT 区间上沿突破 (price={price:.5f} > c_high={c_high:.5f} × 1.005)"
+                if c_high > 0 and price > c_high * 1.01:
+                    return True, f"range_bounce SHORT 区间上沿突破 (price={price:.5f} > c_high={c_high:.5f} × 1.01)"
 
         elif mode == 'stop_hunt':
             # 核心理由：二探未过深（保留原有逻辑）
