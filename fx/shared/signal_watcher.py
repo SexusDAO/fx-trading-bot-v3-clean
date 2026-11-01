@@ -309,6 +309,29 @@ def compute_entry_range(
             low        = entry_price - half
             high       = entry_price + half
             entry_p    = entry_price
+        elif mode == "range_bounce":
+            # [fix] 触发区间锚定 c_low，只在价格真正回踩到支撑区时才触发
+            # 原逻辑走 else 分支用 pre_entry_price（现价附近）±buf，导致 2.9s 秒触发
+            _jd_sw = signal.get("judge_detail") or signal.get("reason") or {}
+            _c_low_sw = float(_jd_sw.get("c_low") or 0)
+            if _c_low_sw > 0 and _c_low_sw < mark_price * 0.998:
+                # 触发区间 = [c_low × 0.995, c_low × 1.008]
+                # 下限：c_low 下方 0.5%（跌破太深说明支撑失效，_survival_check 会撤单）
+                # 上限：c_low 上方 0.8%（价格在支撑区附近才挂单）
+                entry_p = round(_c_low_sw * 1.002, 8)  # 入场价在 c_low 上方 0.2%
+                low     = _c_low_sw * 0.995
+                high    = _c_low_sw * 1.008
+                logger.info(
+                    f"[signal_watcher] range_bounce 触发区间锚定c_low: "
+                    f"c_low={_c_low_sw:.6g} 触发区间=[{low:.6g},{high:.6g}] entry={entry_p:.6g}"
+                )
+            else:
+                # c_low 不可用时降级到通用逻辑
+                buf     = _BUF_PULLBACK
+                low     = entry_price * (1 - buf)
+                high    = entry_price * (1 + buf)
+                entry_p = entry_price
+                logger.warning(f"[signal_watcher] range_bounce c_low不可用，降级通用触发区间")
         else:
             buf        = _BUF_PULLBACK
             low        = entry_price * (1 - buf)

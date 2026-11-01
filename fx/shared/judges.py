@@ -2728,9 +2728,13 @@ def _judge_range_bounce_impl(k1h, k4h, k15, ind, chg24, funding):
         out["reject_reason"] = f"ATR%={atr_r:.2f}%<{_atr_min_rb}%，波动不足"
         return False, out
 
-    # ── 5. RSI 不超买不超卖（中性区间 30~75）────────────────────────────
-    if rsi_1h > 75:
-        out["reject_reason"] = f"RSI1H={rsi_1h:.1f}>75，价格偏强，已非底部"
+    # ── 5. RSI 不超买不超卖（1H+4H 双重检查）──────────────────────────────
+    rsi_4h = ind.get("rsi_4h", 50)
+    if rsi_1h > 65:
+        out["reject_reason"] = f"RSI1H={rsi_1h:.1f}>65，价格偏强，已非底部"
+        return False, out
+    if rsi_4h > 70:
+        out["reject_reason"] = f"RSI4H={rsi_4h:.1f}>70，4H维度超买，拒绝追多"
         return False, out
     if rsi_1h < 25:
         out["reject_reason"] = f"RSI1H={rsi_1h:.1f}<25，已超卖，应走reversal路径"

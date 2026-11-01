@@ -1095,9 +1095,18 @@ def calc_sl_tp(
         entry  = mark_price
         e_mode = "immediate"
     elif mode == "range_bounce":
-        # v3.37: 限价回踩入场，挂在当前价下方 0.3 ATR
-        # 与系统整体「等触发」哲学一致，确认回踩企稳后再入场，不直接吃市价
-        entry  = round(mark_price - atr * 0.3, 8)
+        # [fix] 入场锚定横盘区间下沿 c_low，等价格真正回踩支撑区再进场
+        # 原逻辑 mark - 0.3ATR 等于追价，2.9秒就触发，毫无等待意义
+        _jd_rb = signal.get("judge_detail") or signal.get("reason") or {}
+        _c_low = float(_jd_rb.get("c_low") or 0)
+        if _c_low > 0 and _c_low < mark_price * 0.999:
+            # 在 c_low 上方 0.2% 挂限价，留一点滑点空间
+            entry = round(_c_low * 1.002, 8)
+            logger.info(f"[calc_sl_tp] range_bounce 入场锚定 c_low={_c_low:.6g} → entry={entry:.6g}")
+        else:
+            # c_low 不可用或已高于市价时降级（异常情况兜底）
+            entry = round(mark_price - atr * 0.3, 8)
+            logger.warning(f"[calc_sl_tp] range_bounce c_low不可用({_c_low})，降级到 mark-0.3ATR")
         e_mode = "limit"
     elif mode == "stop_hunt":
         # v3.49: 止损猎杀限价单，入场价 = 当前 mark_price（收回确认时的实时价）
@@ -1199,8 +1208,51 @@ def calc_sl_tp(
     _vp_val = float(_vp.get("val", 0.0))
 
     # ── 2. 止损 ──────────────────────────────────────────────────────────────
-    sl, sl_degraded = _calc_sl(entry, atr, direction,
-                                liq_long, liq_short, tier, k1h=k1h)
+    # [fix] range_bounce 专属止损：优先锚定 c_low 下方清算支撑
+    # 原逻辑从入场价找下方清算区，入场价在横盘中部时往往找不到 → ATR降级 → sl_degraded
+    # 新逻辑：从 c_low 下方找清算支撑作为止损锚点，有结构依据，止损更紧更合理
+    if mode == "range_bounce" and direction == "LONG":
+        _jd_sl = signal.get("judge_detail") or signal.get("reason") or {}
+        _c_low_sl = float(_jd_sl.get("c_low") or 0)
+        _rb_sl = None
+        if _c_low_sl > 0:
+            # 在 c_low 下方 0~3ATR 范围内找最近的清算密集区
+            _rb_candidates = []
+            for _z in liq_long:
+                _zmid = (_z["price_low"] + _z["price_high"]) / 2
+                _dist_atr = (_c_low_sl - _zmid) / (atr + 1e-9)
+                if 0 < _dist_atr <= 3.0:
+                    _rb_candidates.append((_dist_atr, _z))
+            if _rb_candidates:
+                _rb_candidates.sort(key=lambda x: x[0])
+                _nearest_z = _rb_candidates[0][1]
+                _rb_sl_candidate = _nearest_z["price_low"] - atr * 0.2
+                _sl_pct = (entry - _rb_sl_candidate) / (entry + 1e-9)
+                _max_pct = {"low": 0.12, "mid": 0.15, "high": 0.20}.get(tier, 0.15)
+                if _sl_pct <= _max_pct:
+                    _rb_sl = _rb_sl_candidate
+                    logger.info(
+                        f"[calc_sl_tp] range_bounce SL锚定c_low下方清算区: "
+                        f"c_low={_c_low_sl:.6g} → SL={_rb_sl:.6g} ({_sl_pct*100:.1f}%)"
+                    )
+            if _rb_sl is None and _c_low_sl > 0:
+                # c_low 下方无合适清算区：用 c_low × 0.97 作为止损
+                _rb_sl = round(_c_low_sl * 0.97, 8)
+                _sl_pct = (entry - _rb_sl) / (entry + 1e-9)
+                _max_pct = {"low": 0.12, "mid": 0.15, "high": 0.20}.get(tier, 0.15)
+                if _sl_pct > _max_pct:
+                    _rb_sl = None  # 超过上限，降级到通用逻辑
+                    logger.warning(f"[calc_sl_tp] range_bounce c_low×0.97止损距离{_sl_pct*100:.1f}%超上限，降级通用逻辑")
+                else:
+                    logger.info(f"[calc_sl_tp] range_bounce SL降级c_low×0.97={_rb_sl:.6g} ({_sl_pct*100:.1f}%)")
+        if _rb_sl is not None:
+            sl = _rb_sl
+            sl_degraded = False
+        else:
+            sl, sl_degraded = _calc_sl(entry, atr, direction, liq_long, liq_short, tier, k1h=k1h)
+    else:
+        sl, sl_degraded = _calc_sl(entry, atr, direction,
+                                    liq_long, liq_short, tier, k1h=k1h)
 
     # ── 2b. oi_divergence 止损回避清算密集带（v3.63b P1）────────────────────
     # 评审建议（P2→P1 提升）：止损线恰好落在清算密集带内时，做市商极易猎杀。
