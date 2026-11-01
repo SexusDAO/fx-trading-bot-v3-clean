@@ -127,7 +127,19 @@ def _alert_all_failed(symbol: str) -> None:
 
     def _send():
         try:
-            # openclaw 命令在本环境不存在，告警只走钉钉（未配置钉钉时静默跳过）
+            # [fix] 只对有持仓的币发钉钉通知，候选池扫描失败不打扰
+            _has_position = False
+            try:
+                import json, pathlib
+                _pos_file = pathlib.Path(__file__).parent.parent / "logs" / "pos_state.json"
+                if _pos_file.exists():
+                    _pos_data = json.loads(_pos_file.read_text())
+                    _has_position = any(p.get("symbol") == symbol for p in _pos_data if isinstance(p, dict))
+            except Exception:
+                pass
+            if not _has_position:
+                logger.debug(f"[liq_cache] {symbol} 三级失败但无持仓，跳过钉钉通知")
+                return
             from shared.notifier import dingtalk_notify
             dingtalk_notify(f"⚠️ liq_cache {symbol} 三级数据源全部失败，清算图不可用，止损将降级为ATR公式", wait=True)
         except Exception as e:
