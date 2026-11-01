@@ -2768,6 +2768,32 @@ def _judge_range_bounce_impl(k1h, k4h, k15, ind, chg24, funding):
         out["reject_reason"] = f"资金费率过高({funding*100:.4f}%)，多头拥挤"
         return False, out
 
+    # ── 10. c_low 清算支撑验证（确保入场锚点下方有真实结构支撑）──────────
+    # c_low 是横盘区间收盘价最低值，不一定是真正支撑
+    # 需要验证 c_low 下方 3ATR 范围内有清算密集区，否则止损无结构依据
+    try:
+        _symbol_rb = ind.get("symbol", "")
+        _atr_rb = ind.get("atr_1h", price * 0.02)
+        if _symbol_rb:
+            from shared.liq_cache import get_liq_zones_cached as _glzc
+            _liq_below = _glzc(_symbol_rb, "LONG", c_low, range_="3d")
+            _support_usd = 0.0
+            for _z in (_liq_below or []):
+                _zmid = (_z["price_low"] + _z["price_high"]) / 2
+                _dist_atr = (c_low - _zmid) / (_atr_rb + 1e-9)
+                if 0 < _dist_atr <= 3.0:
+                    _support_usd += _z.get("liq_usd", 0) or _z.get("amount", 0)
+            out["c_low_support_usd"] = round(_support_usd, 0)
+            if _support_usd < 50_000:
+                out["reject_reason"] = (
+                    f"c_low({c_low:.5g})下方3ATR内清算支撑不足"
+                    f"(${_support_usd/1000:.0f}K < $50K)，止损无结构依据"
+                )
+                return False, out
+    except Exception as _liq_rb_e:
+        # 清算图获取失败时放行（不因数据缺失拒绝信号）
+        logger.debug(f"[judge_range_bounce] c_low清算支撑检查异常（放行）: {_liq_rb_e}")
+
     # ── 信号强度分级 ─────────────────────────────────────────────────────
     # 4H 多头趋势 → strong(0.5)；4H 中性 → medium(0.3)
     if gap_4h > 0:
