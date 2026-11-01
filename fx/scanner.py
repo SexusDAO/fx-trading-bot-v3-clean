@@ -2956,6 +2956,44 @@ def _filter_and_register_signals(
         avail_signals = btc_bear_filtered
         logger.info(f"[scanner] ③ BTC空头：过滤后剩余信号 {len(avail_signals)} 个")
 
+    # ── BTC 上涨时对 SHORT reversal 的对称保护 ─────────────────────────────────
+    # BTC 下跌禁止 LONG reversal，对称地：BTC 上涨时禁止 SHORT reversal
+    # 豁免条件与 LONG 方向对称：极端独立行情（跌幅>30%、费率<-0.2%、量价共振）
+    if _btc_trend == "up":
+        btc_bull_filtered = []
+        for sig in avail_signals:
+            if sig["direction"] == "SHORT" and sig.get("sig_type") == "reversal":
+                chg24_s     = abs(float(sig.get("chg24", 0)))
+                funding_s   = float(sig.get("funding", sig["ind"].get("funding", 0)))
+                vol_ratio_s = float(sig["ind"].get("vol_ratio", 0))
+                exempt = False
+                exempt_reason = ""
+                if sig.get("news_exempt"):
+                    exempt = True
+                    exempt_reason = "利空新闻豁免"
+                elif chg24_s > 30:
+                    exempt = True
+                    exempt_reason = f"24H跌幅极端 {chg24_s:.1f}%>30%"
+                elif funding_s < -0.002:
+                    exempt = True
+                    exempt_reason = f"资金费率 {funding_s*100:.3f}%<-0.2%，空头极度拥挤"
+                elif vol_ratio_s > 3 and chg24_s > 15:
+                    exempt = True
+                    exempt_reason = f"量比 {vol_ratio_s:.1f}>3 且涨幅 {chg24_s:.1f}%>15%"
+                if exempt:
+                    btc_bull_filtered.append(sig)
+                    logger.info(f"[scanner] ③ {sig['symbol']} SHORT reversal 豁免 BTC牛市过滤: {exempt_reason}")
+                else:
+                    result["rejected"].append({
+                        "symbol": sig["symbol"],
+                        "reason": "BTC 4H多头排列禁止做空reversal (btc_trend=up)",
+                    })
+                    logger.info(f"[scanner] ③ {sig['symbol']} SHORT reversal 被BTC多头硬性拦截")
+            else:
+                btc_bull_filtered.append(sig)
+        avail_signals = btc_bull_filtered
+        logger.info(f"[scanner] ③ BTC多头：过滤后剩余信号 {len(avail_signals)} 个")
+
     # ── BTC 趋势加减分 + CG bonus（与 paper_scanner 对齐）─────────────────────
     _cg_import_ok = False
     try:
