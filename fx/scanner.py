@@ -633,7 +633,8 @@ def _weekend_counter_sync(now: datetime) -> int:
     _ws = _weekend_window_start_ts(now)
     if _ws != _WEEKEND_WINDOW_START:
         _WEEKEND_WINDOW_START = _ws
-        _WEEKEND_POS_COUNT = 0
+        # [fix] 新周末窗口：从 trade_log 恢复实际成交数，而不是从0开始
+        _init_weekend_counter_from_trade_log()
     return _WEEKEND_POS_COUNT
 
 
@@ -3635,8 +3636,8 @@ def _filter_and_register_signals(
                         score_original_expire=exp,
                     )
                     result["placed"] += 1
-                    if sig.get("weekend_mode"):
-                        sig["weekend_pos_seq"] = _weekend_counter_inc()
+                    # [fix] 注册到 SignalWatcher 不算开仓，不计入周末计数器
+                    # 真正开仓成功后由 executor 回调或 trade_log 统计
                     if _ws_ref is not None:
                         _ws_ref.subscribe(sym)
 
