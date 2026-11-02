@@ -332,6 +332,27 @@ def compute_entry_range(
                 high    = entry_price * (1 + buf)
                 entry_p = entry_price
                 logger.warning(f"[signal_watcher] range_bounce c_low不可用，降级通用触发区间")
+        elif mode == "oi_divergence":
+            # [fix] oi_divergence 触发区间锚定在入场价附近 ±0.5ATR
+            # 原逻辑走 else 用 ±buf（现价附近），entry_price≈mark_price 导致1秒触发
+            # oi_divergence 的入场价已由 calc_sl_tp 计算在近期高/低点附近，
+            # 触发区间应该在入场价附近等价格真正回调确认后才触发
+            atr_sig_oi = (signal.get("ind") or {}).get("atr_1h") or mark_price * 0.02
+            _direction_oi = signal.get("direction", "LONG").upper()
+            half_oi = atr_sig_oi * 0.5
+            if _direction_oi == "SHORT":
+                # SHORT：等价格从上方回落到入场价附近
+                low     = entry_price - half_oi
+                high    = entry_price + half_oi * 0.3  # 上方窄，防止追高
+            else:
+                # LONG：等价格从下方反弹到入场价附近
+                low     = entry_price - half_oi * 0.3  # 下方窄，防止追低
+                high    = entry_price + half_oi
+            entry_p = entry_price
+            logger.info(
+                f"[signal_watcher] oi_divergence {_direction_oi} 触发区间锚定入场价±ATR: "
+                f"entry={entry_price:.6g} 触发区间=[{low:.6g},{high:.6g}]"
+            )
         else:
             buf        = _BUF_PULLBACK
             low        = entry_price * (1 - buf)
