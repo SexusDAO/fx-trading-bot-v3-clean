@@ -1254,11 +1254,12 @@ def calc_sl_tp(
         sl, sl_degraded = _calc_sl(entry, atr, direction,
                                     liq_long, liq_short, tier, k1h=k1h)
 
-    # ── 2b. 止损回避清算密集带（全模式）────────────────────────────────────
-    # 止损线恰好落在清算密集带内时，做市商极易猎杀。
-    # 检查 SL ±1% 范围内是否有 >$30万 同向清算，若有则外移至清算带外侧。
-    # [fix] 原仅对 oi_divergence 生效，现扩展到所有模式（pullback/reversal 同样需要）
-    if True:  # 全模式生效（原 oi_divergence 专属改为通用）
+    # ── 2b. oi_divergence 止损回避清算密集带（v3.63b P1）────────────────────
+    # 评审建议（P2→P1 提升）：止损线恰好落在清算密集带内时，做市商极易猎杀。
+    # 当 mode=oi_divergence 时，主动检查 SL ±1% 范围内是否有 >$30万 同向清算。
+    # 若有，将 SL 外移至清算带外侧 +0.3% 作为缓冲。
+    # 阈值 $30万 比入场过滤（#6b $50万）更宽松：止损被猎杀的成本比不入场更高。
+    if mode == "oi_divergence":
         try:
             _liq_sl_symbol = signal.get("symbol", "")
             _liq_sl_zones  = liq_short if direction == "SHORT" else liq_long

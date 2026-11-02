@@ -2698,11 +2698,28 @@ def _filter_and_register_signals(
     from config import CORR_MAX_REVERSAL_SAME_DIR, CORR_MAX_PULLBACK_SAME_DIR, CORR_MAX_SAME_DIR_TOTAL
     from shared.state import get_all_positions as _all_pos
     _open_pos = _all_pos()
-    # 统计已有持仓的方向×策略分布
+    # 统计已有持仓的方向×策略分布（持仓 + SignalWatcher监控中的信号）
     _rev_long  = sum(1 for p in _open_pos if p.get("mode") == "reversal"  and p.get("direction","").upper() == "LONG"  and p.get("status") in ("open","pending"))
     _rev_short = sum(1 for p in _open_pos if p.get("mode") == "reversal"  and p.get("direction","").upper() == "SHORT" and p.get("status") in ("open","pending"))
     _pb_long   = sum(1 for p in _open_pos if p.get("mode") == "pullback"  and p.get("direction","").upper() == "LONG"  and p.get("status") in ("open","pending"))
     _pb_short  = sum(1 for p in _open_pos if p.get("mode") == "pullback"  and p.get("direction","").upper() == "SHORT" and p.get("status") in ("open","pending"))
+    # [fix] 把 SignalWatcher 正在监控的信号也计入（监控中未成交 ≠ 没有占用信号槽位）
+    # 否则每轮扫描都从0开始计数，导致 SignalWatcher 堆积大量重复信号
+    try:
+        if signal_watcher is not None:
+            _watching = getattr(signal_watcher, "_entries", {})
+            for _ek, _ev in _watching.items():
+                _w_sig  = getattr(_ev, "signal", {}) or {}
+                _w_mode = _w_sig.get("mode") or _w_sig.get("sig_type", "")
+                _w_dir  = (_w_sig.get("direction") or "").upper()
+                if _w_mode == "reversal":
+                    if _w_dir == "LONG":  _rev_long  += 1
+                    elif _w_dir == "SHORT": _rev_short += 1
+                elif _w_mode in ("pullback", "range_bounce", "ema_trend"):
+                    if _w_dir == "LONG":  _pb_long   += 1
+                    elif _w_dir == "SHORT": _pb_short  += 1
+    except Exception as _corr_sw_e:
+        logger.debug(f"[scanner] 相关性过滤读取SignalWatcher异常（跳过）: {_corr_sw_e}")
     _corr_filtered = []
     for sig in avail_signals:
         _mode = sig.get("sig_type", "pullback")

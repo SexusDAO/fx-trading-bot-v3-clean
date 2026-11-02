@@ -2255,6 +2255,10 @@ async def _check_pending_expire_static(pos: dict, now_ms: int):
         except Exception as e:
             logger.warning(f"[pm] {symbol} 核验pending订单失败: {e}")
 
+    # patching状态说明正在补挂保护单，不能超时删除
+    if pos.get('status') == 'patching':
+        return
+
     expire_min = ORDER_EXPIRE_BREAKOUT_MIN if mode == "breakout" else ORDER_EXPIRE_PULLBACK_MIN
 
     if hold_min < expire_min:

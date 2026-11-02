@@ -2134,25 +2134,36 @@ async def _execute_async_locked(signal: dict, ws_listener: Any = None) -> bool:
         except Exception:
             pass
 
-    # ── 步骤8：REST 轮询确认开仓成交（WS不可靠时降级）────────────────────────
-    # 限价单挂出后立刻查一次，未成交则不撤单，记 pending 等后续重试
+    # ── 步骤8：WS 短等（10s）+ REST确认 + pending降级────────────────────────
+    # [fix] 下单后先用WS短等10秒（市价/即时成交场景），未收到再REST查一次
+    # 限价单大概率未立刻成交，写pending后由 patrol(_check_pending_expire) 轮询
+    # + WS ORDER_TRADE_UPDATE 推送双重保障
     fill = None
-    try:
-        loop_ref = asyncio.get_event_loop()
-        od = await loop_ref.run_in_executor(None, lambda: api.get_order(symbol, order_id))
-        if od and od.get("status") == "FILLED":
-            _fq_a = float(od.get("executedQty", 0))
-            if _fq_a > 0:
-                fill = {
-                    "fill_price": float(od.get("avgPrice") or od.get("price", 0)),
-                    "fill_qty":   _fq_a,
-                }
-                logger.info(f"[executor] {symbol} REST确认已成交: price={fill['fill_price']:.6g}")
-            else:
-                logger.warning(f"[executor] {symbol} REST返回FILLED但executedQty=0，视同未成交")
-        # 不撤单！让限价单继续挂着等撮合
-    except Exception as rest_err:
-        logger.warning(f"[executor] {symbol} REST确认失败: {rest_err}")
+    if ws_listener is not None:
+        try:
+            fill = await _wait_fill_ws(symbol, order_id, ws_listener, timeout_sec=10)
+            if fill:
+                logger.info(f"[executor] {symbol} WS确认成交: price={fill['fill_price']:.6g}")
+        except Exception as ws_err:
+            logger.warning(f"[executor] {symbol} WS短等异常，降级REST: {ws_err}")
+
+    if fill is None:
+        # WS 10s内未确认 → REST 查一次
+        try:
+            loop_ref = asyncio.get_event_loop()
+            od = await loop_ref.run_in_executor(None, lambda: api.get_order(symbol, order_id))
+            if od and od.get("status") == "FILLED":
+                _fq_a = float(od.get("executedQty", 0))
+                if _fq_a > 0:
+                    fill = {
+                        "fill_price": float(od.get("avgPrice") or od.get("price", 0)),
+                        "fill_qty":   _fq_a,
+                    }
+                    logger.info(f"[executor] {symbol} REST确认已成交: price={fill['fill_price']:.6g}")
+                else:
+                    logger.warning(f"[executor] {symbol} REST返回FILLED但executedQty=0，视同未成交")
+        except Exception as rest_err:
+            logger.warning(f"[executor] {symbol} REST确认失败: {rest_err}")
 
     if fill is None:
         # REST 也未确认成交 → 写 pending + 启动 30s 异步重试

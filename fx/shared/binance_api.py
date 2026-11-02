@@ -929,6 +929,9 @@ def get_position(symbol: str = None) -> list:
 
 def get_account() -> dict:
     """查账户余额，失败返回 {}"""
+    import threading
+    if threading.current_thread() is threading.main_thread():
+        logger.error("[api] get_account 在主线程被调用（会阻塞事件循环）", stack_info=True)
     def _call():
         return _signed_get("/fapi/v2/account", {}) or {}
     return _retry(_call) or {}

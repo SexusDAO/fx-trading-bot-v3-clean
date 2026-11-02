@@ -151,7 +151,7 @@ def _forensic_stack() -> str:
     """[state-forensic] 取证：当前调用栈最近 6 帧（只用于日志，异常一律吞掉）。"""
     try:
         import traceback
-        return "".join(traceback.format_stack()[-6:])
+        return "".join(traceback.format_stack()[-15:])
     except Exception:
         return "?"
 
