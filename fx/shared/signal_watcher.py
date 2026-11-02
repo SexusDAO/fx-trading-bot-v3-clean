@@ -333,25 +333,31 @@ def compute_entry_range(
                 entry_p = entry_price
                 logger.warning(f"[signal_watcher] range_bounce c_low不可用，降级通用触发区间")
         elif mode == "oi_divergence":
-            # [fix] oi_divergence 触发区间锚定在入场价附近 ±0.5ATR
-            # 原逻辑走 else 用 ±buf（现价附近），entry_price≈mark_price 导致1秒触发
-            # oi_divergence 的入场价已由 calc_sl_tp 计算在近期高/低点附近，
-            # 触发区间应该在入场价附近等价格真正回调确认后才触发
+            # [fix] oi_divergence 触发区间：等价格真正回调到入场价后才触发
+            # LONG：entry_price 在近期低点附近，当前价通常高于 entry_price
+            #   → 需要等价格从当前位置回落到 entry_price 附近才触发
+            # SHORT：entry_price 在近期高点附近，当前价通常低于 entry_price
+            #   → 需要等价格从当前位置反弹到 entry_price 附近才触发
             atr_sig_oi = (signal.get("ind") or {}).get("atr_1h") or mark_price * 0.02
             _direction_oi = signal.get("direction", "LONG").upper()
-            half_oi = atr_sig_oi * 0.5
+            half_oi = atr_sig_oi * 0.3  # 窄区间，确保在入场价附近才触发
             if _direction_oi == "SHORT":
-                # SHORT：等价格从上方回落到入场价附近
-                low     = entry_price - half_oi
-                high    = entry_price + half_oi * 0.3  # 上方窄，防止追高
+                # SHORT：当前价在入场价下方，等反弹到入场价区间
+                # 如果当前价已在入场价上方（追价场景），直接用当前价附近
+                _ref_oi = max(entry_price, mark_price * 0.998)
+                low     = _ref_oi - half_oi
+                high    = _ref_oi + half_oi * 0.5
             else:
-                # LONG：等价格从下方反弹到入场价附近
-                low     = entry_price - half_oi * 0.3  # 下方窄，防止追低
-                high    = entry_price + half_oi
+                # LONG：当前价在入场价上方，等回落到入场价区间
+                # 如果当前价已在入场价下方（已跌穿），直接用当前价附近
+                _ref_oi = min(entry_price, mark_price * 1.002)
+                low     = _ref_oi - half_oi * 0.5
+                high    = _ref_oi + half_oi
             entry_p = entry_price
             logger.info(
-                f"[signal_watcher] oi_divergence {_direction_oi} 触发区间锚定入场价±ATR: "
-                f"entry={entry_price:.6g} 触发区间=[{low:.6g},{high:.6g}]"
+                f"[signal_watcher] oi_divergence {_direction_oi} 触发区间锚定入场价: "
+                f"entry={entry_price:.6g} mark={mark_price:.6g} "
+                f"触发区间=[{low:.6g},{high:.6g}]"
             )
         else:
             buf        = _BUF_PULLBACK

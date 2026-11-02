@@ -3781,7 +3781,27 @@ def _judge_oi_divergence_impl(k1h, k4h, k15, ind, chg24, funding):
     #   SHORT：4H EMA20 斜率过陡（近5根均价快速上涨）→ 逆势做空胜率不足 → 拒绝
     #   LONG ：4H EMA20 斜率过陡向下 → 逆势做多胜率不足 → 拒绝
     # 斜率阈值：0.8%/bar（每根4H K线 EMA20 均价涨超0.8%算"强势"）
-    _OI_DIV_4H_SLOPE_THRESHOLD = 0.008  # 每根4H K涨/跌 0.8% 以上算强趋势
+    _OI_DIV_4H_SLOPE_THRESHOLD = 0.005  # [fix] 0.8%→0.5%，更敏感的趋势检测
+
+    # [fix] 新增摆动低点结构检查（镜像 reversal 的保护逻辑）
+    # oi_divergence LONG 在4H下跌通道（摆动低点依次降低）中胜率极低
+    if direction == "LONG" and len(k4h) >= 10:
+        try:
+            _lows_4h = [float(_k[3]) for _k in k4h[:-1]]
+            _swing_lows_oi = []
+            for _si in range(1, len(_lows_4h) - 1):
+                if _lows_4h[_si] < _lows_4h[_si-1] and _lows_4h[_si] < _lows_4h[_si+1]:
+                    _swing_lows_oi.append(_lows_4h[_si])
+            if len(_swing_lows_oi) >= 2:
+                _sl1, _sl2 = _swing_lows_oi[-2], _swing_lows_oi[-1]
+                if _sl2 < _sl1 * 0.997:  # 第二个摆动低点比第一个低 0.3% 以上
+                    out["reject_reason"] = (
+                        f"4H下跌通道：摆动低点依次降低({_sl1:.5g}→{_sl2:.5g})，"
+                        f"oi_divergence LONG 在下跌通道中胜率不足"
+                    )
+                    return False, out
+        except Exception:
+            pass
     try:
         # v3.63b bugfix: 只用已闭合的 4H K 线计算斜率
         # 评审指出：若当前正处于4H K线开盘早期，未闭合K线的收盘=实时价，
