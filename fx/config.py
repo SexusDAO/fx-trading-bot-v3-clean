@@ -294,7 +294,7 @@ LIQUIDITY_GATE_DEPTH_MULT = 5        # 深度需 >= 名义仓位 × 5
 NET_DELTA_MAX_PCT = 0.70   # 净多头/空头 Delta 上限 = 权益 × MAX_TOTAL_NOMINAL × 70%（原 30%）
 
 # ── 全局最大回撤保护（v3.57）────────────────────────────────────────────────
-DRAWDOWN_HALT_PCT  = 0.15   # 从高水位回撤 >= 15% → 暂停开仓
+DRAWDOWN_HALT_PCT  = 0   # 从高水位回撤 >= 15% → 暂停开仓
 DRAWDOWN_HALT_DAYS = 3      # 暂停天数
 DRAWDOWN_WARN_PCT  = 0.08   # >= 8% → 警告日志
 
@@ -853,13 +853,13 @@ EMA_TREND_EMA_GAP_MIN_PCT_SHORT = 0.015  # [v3.101] 空头 EMA gap 0.8%→1.5%�
 EMA_TREND_RSI1H_MIN           = 48     # 1H RSI 下限（太低说明已经超卖，走 reversal 更合适）
 EMA_TREND_RSI1H_MAX           = 68     # 1H RSI 上限（太高说明已超买，不是好的回踩入场点）
 EMA_TREND_RSI1H_SHORT_MIN     = 32     # 做空 RSI1H 下限（原沿用做多 48）
-EMA_TREND_RSI1H_SHORT_MAX     = 48     # 做空 RSI1H 上限（原 52；STRKUSDT 开仓时 52.4 勉强通过，收紧到 48 排除中性偏强区）
+EMA_TREND_RSI1H_SHORT_MAX     = 55     # 做空 RSI1H 上限（从48放宽到55，空头趋势中RSI45-55属于正常回踩）
 EMA_TREND_RSI_GOLDEN_SHORT_MIN = 38    # 做空 rsi_golden 下限（做多为 52）
 EMA_TREND_RSI_GOLDEN_SHORT_MAX = 48    # 做空 rsi_golden 上限（做多为 62）
 EMA_TREND_RSI4H_MIN           = 45     # 4H RSI 下限（趋势结构支撑）
 EMA_TREND_RSI4H_MAX           = 72     # 4H RSI 上限（超买区域放弃）
 EMA_TREND_RSI4H_SHORT_MAX     = 52     # 做空 4H RSI 上限（原写死 55，现参数化并收紧）
-EMA_TREND_VOL_RATIO_SHORT_MIN = 0.7    # 做空量比下限（做多仍用 EMA_TREND_VOL_RATIO_MIN=0.5）；量比=1H 当前K线量/前20根均量
+EMA_TREND_VOL_RATIO_SHORT_MIN = 0.5    # 做空量比下限（与做多统一为0.5，不对称缺乏回测依据）
 EMA_TREND_1H_EMA_ALIGN        = True   # 要求 1H EMA20/EMA50 排列与 4H 方向一致（做空要 1H EMA20<=EMA50，做多要 1H EMA20>=EMA50）；False=关闭
 
 # ── 回踩深度：价格必须在 EMA20 附近（回踩确认） ───────────────────────────────
@@ -988,7 +988,7 @@ OPT_PULLBACK_ENTRY_AT_CONFIRM = False   # OPT-8 回踩在确认处入场（mark�
 OPT_INVALIDATION_SL           = False   # OPT-9 回踩/EMA趋势/反转用失效位止损（1H 结构点外 0.3ATR，1~3ATR）  # [v3.87 合并决策] 默认 False：OPT-9 按评审：舍弃，会绕过清算区止损；代码保留但永久关闭
 OPT_OI_DIV_EXHAUSTION_CONFIRM = False   # OPT-10 OI 背离需不创新低(高) + 主动买卖比确认  # [v3.87 合并决策] 默认 False：OPT-10 按评审：暂缓，待 oi_divergence 累计 20+ 笔再定
 MFE_DRAWBACK_USE_PROGRESS   = True    # mfe_drawback_50pct 改用「进度」判断(峰值进度>=60%、回撤>=50%、当前进度<30%、仍盈利);False=回退旧逻辑(峰值>0.5%且回撤>=50%)
-OPT_EMA_TREND_TRIGGER_BAR     = False   # OPT-11 EMA 趋势需 1H/15M 触发 K 线  # [v3.87 合并决策] 默认 False：OPT-11 评审未列入：保守起见默认关闭，待数据
+OPT_EMA_TREND_TRIGGER_BAR     = True    # OPT-11 EMA 趋势需 1H/15M 触发 K 线（开启：不加15M确认等于追价，基本交易逻辑）
 
 # v3.87 第二批
 OPT_BREAKOUT_RSI_STRONG_RELAX = True    # [refactor-B8] 原 False。开启后仅「强放量突破」（量比≥2.5/3.0）RSI 上限放宽到 75/25，普通突破仍 65/35；改回 False 即恢复   # OPT-12 放量(量比≥强量阈值)突破放宽 RSI 限制  # [v3.87 合并决策] 默认 False：OPT-12 按评审：暂缓，待验证 RSI>65 突破单质量

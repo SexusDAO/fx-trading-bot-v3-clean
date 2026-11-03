@@ -4079,30 +4079,37 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
     # LONG：价格从上方靠近 EMA20 支撑（正常回踩）
     # SHORT：价格从下方靠近 EMA20 阻力（空头排列中反弹到 EMA20 下方再压制）
     pb_ratio = (price - ema20_4h) / (ema20_4h + 1e-9)
+    # [优化] 价格区间从固定%改为ATR动态倍数，自适应不同币种波动率
+    # LONG：EMA20 - 0.7ATR ~ EMA20 + 0.3ATR（允许稍微跌破EMA20支撑）
+    # SHORT：EMA20 - 0.3ATR ~ EMA20 + 0.7ATR（允许稍微突破EMA20阻力）
+    _atr_zone = atr / (ema20_4h + 1e-9)  # ATR占EMA20的比例
     if _ema_direction == "long":
-        if pb_ratio > _PB_ABOVE:
+        _zone_above = _atr_zone * 0.3   # 上方最多0.3ATR
+        _zone_below = _atr_zone * 0.7   # 下方最多0.7ATR
+        if pb_ratio > _zone_above:
             out["reject_reason"] = (
                 f"价格追高: price={price:.4g} 在 EMA20={ema20_4h:.4g} 上方 "
-                f"{pb_ratio*100:.1f}% > {_PB_ABOVE*100:.1f}%，非回踩入场"
+                f"{pb_ratio*100:.1f}%（>{_zone_above*100:.1f}%=0.3ATR），非回踩入场"
             )
             return False, out
-        if pb_ratio < -_PB_BELOW_LONG:
+        if pb_ratio < -_zone_below:
             out["reject_reason"] = (
                 f"价格破位: price={price:.4g} 在 EMA20={ema20_4h:.4g} 下方 "
-                f"{abs(pb_ratio)*100:.1f}% > {_PB_BELOW_LONG*100:.1f}%，EMA 支撑失效"
+                f"{abs(pb_ratio)*100:.1f}%（>{_zone_below*100:.1f}%=0.7ATR），EMA支撑失效"
             )
             return False, out
     else:  # SHORT
-        # 价格在 EMA20 下方（空头回踩阻力：-PB_ABOVE ~ 0）
-        if pb_ratio > _PB_BELOW:
+        _zone_above = _atr_zone * 0.7   # 上方最多0.7ATR（允许稍微突破阻力）
+        _zone_below = _atr_zone * 0.3   # 下方最多0.3ATR
+        if pb_ratio > _zone_above:
             out["reject_reason"] = (
-                f"SHORT 价格高于 EMA20 阻力: {pb_ratio*100:.1f}% > {_PB_BELOW*100:.1f}%，"
-                f"已突破阻力，不追空"
+                f"SHORT 价格高于 EMA20 阻力: {pb_ratio*100:.1f}%（>{_zone_above*100:.1f}%=0.7ATR），"
+                f"已大幅突破阻力，不追空"
             )
             return False, out
-        if pb_ratio < -_PB_ABOVE:
+        if pb_ratio < -_zone_below:
             out["reject_reason"] = (
-                f"SHORT 价格过低: {abs(pb_ratio)*100:.1f}% > {_PB_ABOVE*100:.1f}%，"
+                f"SHORT 价格过低: {abs(pb_ratio)*100:.1f}%（>{_zone_below*100:.1f}%=0.3ATR），"
                 f"跌离阻力太远，非回踩入场"
             )
             return False, out
