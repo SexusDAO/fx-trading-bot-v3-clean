@@ -94,6 +94,10 @@ def advance(hub, sym, iv, close=None, high=None, low=None, vol=None):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
+    # [fix-judge-coarse-align] 触发器现在遵守 STOP_HUNT_ENABLED（生产为 False）；
+    #   本文件的 stop_hunt 用例测的是检测逻辑本身，所以夹具里显式打开开关。
+    import config as _cfg_mod
+    monkeypatch.setattr(_cfg_mod, "STOP_HUNT_ENABLED", True, raising=False)
     import config as _c
     monkeypatch.setattr(_c, "TRIGGER_DISPATCH_ENABLED", False, raising=False)   # 影子触发逻辑单测：隔离派发开关（生产默认已开启）
     ind = {"rsi": 50.0}
@@ -691,3 +695,28 @@ def test_disabled_by_default(monkeypatch):
     monkeypatch.setattr(config, "TRIGGER_DETECTOR_ENABLED", False)   # 生产默认已改为 True，此处验证关闭时行为
     td._default = None
     assert td.create() is None
+
+
+# ═══ [fix-judge-coarse-align] stop_hunt 触发器遵守 STOP_HUNT_ENABLED ═══
+def test_stop_hunt_disabled_by_config_emits_nothing(env, monkeypatch):
+    import config as _c
+    monkeypatch.setattr(_c, "STOP_HUNT_ENABLED", False, raising=False)
+    e = env
+    _stop_hunt_hub(e)
+    e["det"].poll_once()
+    k15 = e["hub"].k[("AAAUSDT", "15m")]
+    k15[-1][3], k15[-1][5] = 94.0, 300.0                    # 与 test_stop_hunt_pierce_low 完全相同的刺穿场景
+    got = poll(e)
+    assert "stop_hunt" not in strats(got)
+    assert not [k for k in e["det"]._st if k[1] == "stop_hunt"]   # 连状态机都不应被推进
+
+
+def test_stop_hunt_enabled_by_config_still_fires(env, monkeypatch):
+    import config as _c
+    monkeypatch.setattr(_c, "STOP_HUNT_ENABLED", True, raising=False)
+    e = env
+    _stop_hunt_hub(e)
+    e["det"].poll_once()
+    k15 = e["hub"].k[("AAAUSDT", "15m")]
+    k15[-1][3], k15[-1][5] = 94.0, 300.0
+    assert ("stop_hunt", "LONG") in fired(poll(e))

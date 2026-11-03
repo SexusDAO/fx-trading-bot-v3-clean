@@ -707,6 +707,11 @@ class TriggerDetector:
         self._run(sym, "breakout", now, ctx, out, [("LONG", up, r), ("SHORT", dn, r)])
 
     def _stop_hunt(self, sym, now, ctx, ind, out):
+        # [fix-judge-coarse-align] 受 config.STOP_HUNT_ENABLED 控制（scanner 路由早已遵守，触发器此前未检查）。
+        #   关闭时直接返回，不产生 stop_hunt 触发请求；缺省 True 保持旧行为。回退：删除下面 3 行。
+        _sh_enabled = getattr(__import__('config'), 'STOP_HUNT_ENABLED', True)
+        if not _sh_enabled:
+            return
         pv, vma = ind.get("pivots") or {}, ind.get("vma15", 0.0)
         bars = list(ind.get("k15c", [])[-6:])
         if ind.get("k15_cur"):
