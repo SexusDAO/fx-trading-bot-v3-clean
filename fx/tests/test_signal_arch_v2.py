@@ -93,8 +93,26 @@ def test_sub_list_total_capped_by_hub_max_held_survive(monkeypatch):
 
 def test_config_values():
     assert config.SCAN_POOL_MAX == 300 and config.KLINE_HUB_SYMBOLS_MAX == 300
-    assert config.SW_REALTIME_JUDGE is True and config.SW_REALTIME_JUDGE_NO_HUB in ("pass", "reject")
-    assert "funding_arb" not in config.SW_REALTIME_JUDGE_MODES and "oi_divergence" not in config.SW_REALTIME_JUDGE_MODES
+    assert config.SW_REALTIME_JUDGE is True
+    # 调整 1：breakout 不参与实时精筛（触发时最新K线不再是突破K线，会被误杀）
+    assert tuple(config.SW_REALTIME_JUDGE_MODES) == ("pullback", "ema_trend", "reversal")
+    # 调整 2：hub 无K线默认不放行
+    assert config.SW_REALTIME_JUDGE_NO_HUB == "reject"
+    # 调整 3：整轮扫描超时 180 -> 300
+    assert config.SCAN_TOTAL_TIMEOUT_SEC == 300
+
+
+def test_breakout_signal_not_marked_for_realtime_check(monkeypatch):
+    """breakout 不在名单内：analyze_one 不应给它打 needs_realtime_check，judge 也不应被延后。"""
+    modes = tuple(config.SW_REALTIME_JUDGE_MODES)
+    assert "breakout" not in modes
+
+
+def test_main_scan_wait_follows_total_timeout():
+    src = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
+    assert "timeout=_scan_wait_sec" in src
+    # 整轮分析上限 300 时，main 的等待上限必须更大，否则会先于分析超时到点
+    assert max(300, int(config.SCAN_TOTAL_TIMEOUT_SEC) + 120) > config.SCAN_TOTAL_TIMEOUT_SEC
 
 
 # ── signal_watcher：实时精筛函数 ───────────────────────────────────────────────

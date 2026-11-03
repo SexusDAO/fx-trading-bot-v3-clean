@@ -321,7 +321,10 @@ ORDER_EXPIRE_PULLBACK_MIN = 240   # 回踩/反转挂单超时，分钟
 
 # 扫描超时保护
 SCAN_SYMBOL_TIMEOUT_SEC   = 10    # 单标的分析超时（秒），超时跳过
-SCAN_TOTAL_TIMEOUT_SEC    = 180   # 整轮扫描总超时（秒）；v3.26: 240→120，并发25线程理论8~12s
+# [refactor-signal-arch-v2] 原值 180。候选池 165→300 后，按现网最长一轮 137s 线性外推约 249s，180s 会截断整轮
+#   （未完成的标的被放弃）。改为 300。联动：main.py 对整轮 run_scan 的等待上限随此值走（见 main.py）。
+#   想回到旧行为：改回 180。
+SCAN_TOTAL_TIMEOUT_SEC    = 300   # 整轮扫描总超时（秒）；v3.26: 240→120，并发25线程理论8~12s
 SCAN_MAX_WORKERS          = 2     # [2核服务器收紧 4→2] 并行分析线程数（10→4：降低 GIL 竞争导致事件循环阻塞）；v3.82: 25→10，控制并发内存峰值（25线程×11MB=275MB峰值，pymalloc不归还导致水位积累至3.5GB）
 FUNDING_ARB_SCAN_WORKERS = 2  # funding_arb并发扫描线程数，降低SSL并发防止阻塞事件循环
 SCAN_USE_PROCESS_POOL     = True   # [refactor-B2] 原 False；改回 False 即回到线程池  # True：并行分析走 spawn 进程池（shared/analysis_worker.py）；False：保持线程池（默认）
@@ -1216,8 +1219,10 @@ HUB_SYNC_MIN_INTERVAL_SEC = 60     # 两次 hub 重连对账的最小间隔，�
 #       不通过就丢弃、不开仓。False：与改动前完全一致（回退开关）。
 SW_REALTIME_JUDGE = True
 # hub 没有该标的 K线（未订阅/数据过旧/历史不足）时的处理：
-#   "pass"   放行（按原方案：不阻断开仓，等于该标的没有精筛）
-#   "reject" 不开仓
-SW_REALTIME_JUDGE_NO_HUB = "pass"
+#   "pass"   放行（不阻断开仓，但等于该标的绕过了全部精筛条件）
+#   "reject" 不开仓（默认：候选池已全部订阅，hub 无K线属于少数异常情况，宁可错过也不绕过精筛）
+SW_REALTIME_JUDGE_NO_HUB = "reject"
 # 参与实时精筛的策略（funding_arb / oi_divergence 等不依赖 15M 的不在此列）
-SW_REALTIME_JUDGE_MODES = ("pullback", "ema_trend", "reversal", "breakout")
+# 不含 breakout：触发时价格已回踩到突破位，最新已收盘1H K线不再是「突破K线」，重跑 judge_breakout 会被
+#   「收盘价未突破近10根区间」误杀；breakout 的量能/突破幅度本来就基于已收盘突破K线，注册时的快照是准确的。
+SW_REALTIME_JUDGE_MODES = ("pullback", "ema_trend", "reversal")
