@@ -133,3 +133,119 @@ def test_reversal_vol_gate_reads_closed_first():
     src = inspect.getsource(J._judge_reversal_impl)
     gate = [l for l in src.splitlines() if l.strip().startswith("_rev_vol =")]
     assert len(gate) == 1 and 'ind.get("vol_ratio_closed"' in gate[0]
+
+
+# ═══ [fix-judge-logic-v2] 改动一：4H EMA 已知为空头排列时的粗筛 ═══
+def test_ema_coarse_known_bear_4h_rsi38_chg_m10_true():
+    ind = {"rsi_1h": 38.0, "ema20_4h": 99.0, "ema50_4h": 100.0}     # 空头排列
+    assert S._is_ema_trend_coarse(ind, -10.0) is True
+
+
+def test_ema_coarse_known_bear_4h_rsi60_chg_m10_false():
+    ind = {"rsi_1h": 60.0, "ema20_4h": 99.0, "ema50_4h": 100.0}     # RSI 60 > 空头上限 55
+    assert S._is_ema_trend_coarse(ind, -10.0) is False
+
+
+# ═══ [fix-judge-logic-v2] 改动二/三：reversal 做多 ═══
+from unittest.mock import patch
+import config
+from test_judge import _k, _flat_k1h, _ind as _jind
+
+
+def _rev_long(chg24, rsi_4h, tier_atr=1500, chg4h_drop=False):
+    """构造与 test_judge.test_reversal_long_triggers 相同的做多反转场景，参数化 chg24 / rsi_4h。"""
+    base = 50000
+    k1h = _flat_k1h(base)[:-2] + [
+        _k(base, base * 1.01, base * 0.969, base * 0.970, 2500),
+        _k(base * 0.970, base * 0.972, base * 0.968, base * 0.969, 1800),
+    ]
+    k4h = [
+        _k(50000, 50200, 49800, 50100), _k(50100, 50300, 49200, 49300),
+        _k(49300, 49500, 49000, 49100), _k(49100, 49800, 49100, 49700), _k(49700, 50500, 49600, 50400),
+        _k(50400, 50800, 50100, 50700), _k(50700, 51000, 50300, 50900), _k(50900, 51200, 49700, 49800),
+        _k(49800, 50200, 49500, 50100), _k(50100, 50600, 49600, 50500), _k(50500, 51000, 50200, 50800),
+        _k(50800, 51500, 50700, 51300),
+    ]
+    k15 = [
+        _k(base, base * 1.01, base * 0.97, base * 0.975, 1800),
+        _k(base * 0.975, base * 1.01, base * 0.97, base * 0.98, 1500),
+        _k(base * 0.98, base * 1.005, base * 0.955, base * 1.002, 1400),
+        _k(base * 1.002, base * 1.012, base * 1.001, base * 1.01, 1300),
+    ]
+    ind = _jind(price=50000, atr=tier_atr, rsi_1h=28, rsi_4h=rsi_4h, ema20_1h=50000, ema50_1h=50000)
+    with patch("shared.coinglass_api.get_liq_zones", return_value=[]), \
+         patch("shared.state._load_oi_cache", return_value={}):
+        return J.judge_reversal(k1h, k4h, k15, ind, chg24=chg24, funding=-0.0015)
+
+
+def _rr(out):
+    return str((out or {}).get("reject_reason") or "")
+
+
+def test_reversal_long_chg24_m6_no_longer_rejected_as_insufficient_magnitude():
+    # 24H -6%（旧门槛要求 <=-15 才过幅度检查）。1H 末两根合计下跌与 chg4h 取决于 K 线；
+    # 这里只断言：不再因「幅度不足」被拒（若 4H 窗口本身满足也不影响）。
+    ok, out = _rev_long(chg24=-6.0, rsi_4h=22)
+    assert "幅度不足" not in _rr(out), _rr(out)
+
+
+def test_reversal_long_chg24_m4_still_not_enough():
+    # -4% 低于任何入口门槛 → 方向不明确（或幅度不足），不会被识别为做多
+    ok, out = _rev_long(chg24=-4.0, rsi_4h=22)
+    assert ok is False
+
+
+def test_reversal_rsi4h_main_entry_and_precision_use_config():
+    assert config.REVERSAL_RSI4H_MAX_LONG == 55
+    # RSI4H=50：旧 <40 会走不到做多（方向不明确/未达超卖）；新 <55 通过入口与精筛的 RSI4H 检查
+    ok, out = _rev_long(chg24=-18.0, rsi_4h=50)
+    r = _rr(out)
+    assert "方向不明确" not in r and "未达超卖" not in r, r
+
+
+def test_reversal_rsi4h_above_config_max_still_rejected():
+    ok, out = _rev_long(chg24=-18.0, rsi_4h=58)      # >= 55
+    assert ok is False
+    r = _rr(out)
+    assert "方向不明确" in r or "未达超卖" in r, r
+
+
+def test_reversal_rsi4h_reads_config_value(monkeypatch):
+    monkeypatch.setattr(config, "REVERSAL_RSI4H_MAX_LONG", 45, raising=False)
+    ok, out = _rev_long(chg24=-18.0, rsi_4h=50)      # 50 >= 45 → 被拒
+    assert ok is False
+    r = _rr(out)
+    assert "方向不明确" in r or "未达超卖" in r, r
+
+
+# ═══ [fix-judge-logic-v2] 改动四：oi_divergence RSI 门槛 ═══
+def test_oi_div_rsi_config_values():
+    assert config.OI_DIV_RSI1H_LONG_MAX == 45
+    assert config.OI_DIV_RSI1H_SHORT_MIN == 58
+
+
+def _oi_judge(direction_long, rsi_1h):
+    base = 50000
+    k1h = _flat_k1h(base)
+    ind = _jind(price=base * 1.01, atr=1200, rsi_1h=rsi_1h, rsi_4h=50)
+    ind.update(low_24h=base, high_24h=base * 1.5, oi_now=115000 if direction_long else 85000, oi_1h_ago=100000,
+               taker_buy_ratio=0.55, taker_buy_ratio_now=0.55, vol24_usd=50e6)
+    if not direction_long:
+        ind.update(price=base * 1.49, high_24h=base * 1.5, low_24h=base * 0.5)
+    with patch("shared.coinglass_api.get_liq_zones", return_value=[]), \
+         patch("shared.state._load_oi_cache", return_value={}):
+        return J.judge_oi_divergence(k1h, [], [], ind, chg24=0.0, funding=0.0)
+
+
+def test_oi_div_long_rsi_44_passes_rsi_filter_but_46_rejected():
+    _, out44 = _oi_judge(True, 44.0)
+    assert "RSI 过滤" not in _rr(out44), _rr(out44)
+    _, out50 = _oi_judge(True, 50.0)
+    assert "LONG RSI 过滤" in _rr(out50), _rr(out50)
+
+
+def test_oi_div_short_rsi_59_passes_rsi_filter_but_55_rejected():
+    _, out59 = _oi_judge(False, 59.0)
+    assert "SHORT RSI 过滤" not in _rr(out59), _rr(out59)
+    _, out55 = _oi_judge(False, 53.0)
+    assert "SHORT RSI 过滤" in _rr(out55), _rr(out55)

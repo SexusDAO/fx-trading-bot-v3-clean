@@ -121,7 +121,7 @@ BREAKOUT_RSI_MIN_SHORT_HIGH = 35    # 高波动层  # [v3.85 FIX-1] 同步为实
                                     # 负费率 < -0.3% 为强信号，中性费率为普通信号
 # 以下 REVERSAL_RSI4H_* 为历史遗留占位值，judge_reversal 实际用 chg24<=-8%+rsi4h<55 逻辑
 # 代码实际值与此不同，调参请直接修改 _judge_reversal_impl 内的门槛
-REVERSAL_RSI4H_MAX_LONG       = 55      # 注意：此值用于方向路由判断，judge 精筛实际用写死的 40（高波动 30），两者不一致待后续统一
+REVERSAL_RSI4H_MAX_LONG       = 55      # [fix-judge-logic-v2] reversal 做多 4H RSI 上限：judge 主入口与精筛均读此值（高波动档用 本值-15=40）；原写死 40/30
 REVERSAL_RSI4H_MIN_SHORT      = 55      # 实际用值（原78已废弃，代码用55）
 
 # 高波动层专属
@@ -132,7 +132,7 @@ REVERSAL_CHG24_SHORT_MIN        = 10.0  # [fix C] reversal SHORT 主通道 chg24
                                # 若想让8%~14%走主通道改回8.0，等实盘数据后决定
 CLASSIFY_REVERSAL_FUNDING_MIN  = 0.001
 REVERSAL_RSI1H_SHORT_MIN       = 65    # 做空主通道 RSI1H 下限
-CLASSIFY_REVERSAL_RSI4H_LONG   = REVERSAL_RSI4H_MAX_LONG    # [fix-judge-coarse-align] 注意：此值用于方向路由判断，judge 精筛实际用写死的 40（高波动 30），两者不一致待后续统一
+CLASSIFY_REVERSAL_RSI4H_LONG   = REVERSAL_RSI4H_MAX_LONG    # [fix-judge-logic-v2] 分类路由与 judge 主入口/精筛现统一读 REVERSAL_RSI4H_MAX_LONG
 CLASSIFY_REVERSAL_RSI4H_SHORT  = REVERSAL_RSI4H_MIN_SHORT   # [refactor-B8] 注释更正：实际值 55（原注释 78 已过时）
 CLASSIFY_BREAKOUT_CHG24_MIN    = 5.0   # 8% 降至 5%，成交量验证移到 judge_breakout
 
@@ -832,8 +832,8 @@ OI_DIV_TAKER_RECOVERY_MIN    = 0.48   # LONG：taker_buy_ratio_now >= 此值视�
 OI_DIV_TAKER_WEAK_MAX        = 0.52   # SHORT：taker_buy_ratio_now <= 此值视为买方转弱
 
 # ── RSI 过滤 ─────────────────────────────────────────────────────────────────
-OI_DIV_RSI1H_LONG_MAX        = 38  # 45→38：与 judge 原写死的有效门槛一致（原 45 被代码 38 覆盖）     # LONG：RSI1H 不能太高（> 45 说明还没超卖）
-OI_DIV_RSI1H_SHORT_MIN       = 62  # 55→62：与 judge 原写死的有效门槛一致（原 55 被代码 62 覆盖）     # SHORT：RSI1H 不能太低（< 55 说明还没超买）
+OI_DIV_RSI1H_LONG_MAX        = 45  # [fix-judge-logic-v2] 38→45（实盘数据：rsi_1h=39.8 差 1.8 即可通过，38 过严；回退改回 38）。历史：45→38：与 judge 原写死的有效门槛一致（原 45 被代码 38 覆盖）     # LONG：RSI1H 不能太高（> 45 说明还没超卖）
+OI_DIV_RSI1H_SHORT_MIN       = 58  # [fix-judge-logic-v2] 62→58（对称放宽；回退改回 62）。历史：55→62：与 judge 原写死的有效门槛一致（原 55 被代码 62 覆盖）     # SHORT：RSI1H 不能太低（< 55 说明还没超买）
 
 # ── 波动率门槛（与 pullback 共用 ATR 分层，不单独设参数）─────────────────────
 
