@@ -1335,6 +1335,7 @@ def judge_reversal(k1h: list, k4h: list, k15: list, ind: dict,
 
 def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
     from config import CLASSIFY_REVERSAL_RSI4H_LONG, CLASSIFY_REVERSAL_RSI4H_SHORT
+    from config import REVERSAL_RSI4H_MAX_LONG as _REV_RSI4H_MAX_LONG   # [fix-judge-logic-v2] 主入口/精筛统一读 config
     # v3.3.6: 流动性门槛——vol24 < 1M 的极低流动性标的直接拒绝
     _vol24 = ind.get("vol24_usd", 0)
     if _vol24 > 0 and _vol24 < 1_000_000:
@@ -1373,7 +1374,10 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
     #         真正瓶颈是chg24>=+8%出现频率极低，导致SHORT方向从未触发。
     # 修复：SHORT 主通道收紧 RSI 要求（>65），同时放宽 chg24 门槛（+5%）；
     #       RSI1H 补充通道也对称放宽（chg24>=4%，RSI1H>72仍保留）。
-    _rev_rsi4h_long_entry = 30 if tier == "high" else 40   # [#11] 与精筛 rsi_long_thresh 同一分档（_volatility_tier），high <30、其余 <40
+    # [fix-judge-logic-v2] 原：high<30、其余<40（写死）。现读 config REVERSAL_RSI4H_MAX_LONG(=55)：
+    #   其余档 <55，高波动档 <55-15=40；与下方精筛 rsi_long_thresh 同源，消除 40~55 死区。
+    #   回退：改回 30 if tier == "high" else 40（精筛 rsi_long_thresh 同步改回）。
+    _rev_rsi4h_long_entry = (_REV_RSI4H_MAX_LONG - 15) if tier == "high" else _REV_RSI4H_MAX_LONG   # [#11] 与精筛 rsi_long_thresh 同一分档（_volatility_tier），high <30、其余 <40
     if chg24 <= _rev_chg24_long and rsi_4h < _rev_rsi4h_long_entry:
         direction = "LONG"
         _rsi1h_channel = False
@@ -1581,7 +1585,9 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
                     out["signal_strength"]   = "medium"
                     out["4h_bear_gap"]       = round(_4h_bear_gap, 2)
 
-            win24_ok = chg24 <= -15
+            # [fix-judge-logic-v2] 原：chg24 <= -15。与方向判断入口（中波动档 5%，补充通道 5%）对齐改为 -5；
+            #   4H 跌幅 chg4h <= -10 不变，两者满足其一即可。回退：改回 -15。
+            win24_ok = chg24 <= -5
             win4h_ok = chg4h <= -10
         else:
             # v3.64: SHORT 方向幅度要求同步放宽（触发门槛已降至+5%）
@@ -1601,7 +1607,9 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
     # RSI4H 门槛:方向已由 chg24 确定,RSI 只做辅助过滤
     # LONG:RSI4H < 45(跌了10%以上价格已在低位,不要求极度超卖)
     # SHORT:RSI4H > 65(涨了20%以上,不要求极度超买)
-    rsi_long_thresh  = 30 if tier == "high" else 40  # v3.6: 45→40，RSI4H<45 不够超卖
+    # [fix-judge-logic-v2] 原：high<30、其余<40（写死，v3.6 由 45 收紧到 40）。现与主入口同源读 config
+    #   REVERSAL_RSI4H_MAX_LONG(=55)：其余档 <55，高波动档 <40。回退：改回 30 if tier == "high" else 40。
+    rsi_long_thresh  = (_REV_RSI4H_MAX_LONG - 15) if tier == "high" else _REV_RSI4H_MAX_LONG
     rsi_short_thresh = 70 if tier == "high" else 65
 
     # ── v3.46 动态波动率分档（替代固定门槛）───────────────────────────────

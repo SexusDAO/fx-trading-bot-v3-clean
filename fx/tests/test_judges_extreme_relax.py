@@ -122,6 +122,13 @@ def test_oi_dynamic_rsi_pass():
 
 
 def test_oi_dynamic_rsi_reject():
-    ok, out = _oi(0.15, 40)
+    # [fix-judge-logic-v2] OI_DIV_RSI1H_LONG_MAX 38→45：原用 RSI=40 / "> 38"，现用 RSI=50 / "> 45"
+    ok, out = _oi(0.15, 50)
     assert ok is False and _rsi_rejected(out)
-    assert "> 38" in out["reject_reason"]
+    assert "> 45" in out["reject_reason"]
+
+
+def test_oi_rsi_40_now_passes_filter_without_relax():
+    # [fix-judge-logic-v2] 新增：旧门槛 38 下 RSI=40（OI 变化 15%，无动态放宽）会被拒，45 后不再因 RSI 被拒
+    ok, out = _oi(0.15, 40)
+    assert not _rsi_rejected(out)
