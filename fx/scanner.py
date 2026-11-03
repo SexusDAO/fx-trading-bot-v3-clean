@@ -238,6 +238,30 @@ def set_hub_subscribe_hold(hold: bool) -> None:
     _HUB_SUBSCRIBE_HOLD = bool(hold)
 
 
+def _build_hub_sub_list(held, pool) -> list:
+    """[refactor-signal-arch-v2] hub K线订阅名单：BTC + 持仓（永远在最前、不被截断）+ 候选池前 N 名。
+    原行为：["BTCUSDT"] + 持仓 + 整个候选池，超出 KLINE_HUB_SYMBOLS_MAX 时由 hub 静默从尾部截断。
+    现行为：候选池部分取前 HUB_SUBSCRIBE_TOP_N 名，且总数不超过 KLINE_HUB_SYMBOLS_MAX（在这里截断并写日志）。
+    回退：HUB_SUBSCRIBE_TOP_N 设为很大（如 9999）即回到「整个候选池」。"""
+    head, seen = [], set()
+    for x in ["BTCUSDT"] + list(held or []):
+        if x and x not in seen:
+            seen.add(x); head.append(x)
+    try:
+        import config as _c
+        top_n = int(getattr(_c, "HUB_SUBSCRIBE_TOP_N", 9999))
+        mx = int(getattr(_c, "KLINE_HUB_SYMBOLS_MAX", 9999))
+    except Exception:
+        top_n, mx = 9999, 9999
+    room = max(min(top_n, mx - len(head)), 0)
+    tail = [x for x in pool if x not in seen][:room]
+    out = head + tail
+    if len([x for x in pool if x not in seen]) > len(tail):
+        logger.info(f"[hub] K线订阅名单：候选池 {len(pool)} 个，订阅前 {len(tail)} 个（持仓+BTC {len(head)} 个，"
+                    f"上限 TOP_N={top_n} / KLINE_HUB_SYMBOLS_MAX={mx}）")
+    return out
+
+
 def _hub_subscribe_klines(symbols) -> None:
     """把本轮候选池交给 hub 订阅 K 线（hub 关闭时不做任何事）。"""
     if not _hub_enabled():
@@ -1439,6 +1463,10 @@ def analyze_one(symbol: str, ticker: dict,
         _4h_loaded = False
 
         _passed_signals: list[dict] = []  # 收集所有通过 judge 的路径
+        # [refactor-signal-arch-v2] 是否启用「粗筛 + 触发后实时精筛」及适用的策略
+        _cfg_rt = __import__('config')
+        _rt_defer_on = bool(getattr(_cfg_rt, "SW_REALTIME_JUDGE", False)) and not prefetch.get("realtime_ctx")
+        _rt_defer_modes = tuple(getattr(_cfg_rt, "SW_REALTIME_JUDGE_MODES", ()))
 
         for _route in _candidate_routes:
             if _route in _NEED_4H and not _4h_loaded:
@@ -1453,6 +1481,14 @@ def analyze_one(symbol: str, ticker: dict,
             if _route in _CHG24_DEPENDENT_ROUTES and _chg24_missing(chg24):
                 logger.debug(f"[scanner] {symbol} chg24数据缺失，跳过pullback/reversal（当前路径={_route}）")
                 continue
+
+            # [refactor-signal-arch-v2] 粗筛模式：把依赖实时价格/短周期K线的硬拒绝延后到触发时（signal_watcher._trigger 重跑）。
+            #   原行为：这些条件在这里就拒绝；现行为：ind["_defer_rt"]=True 时 judge 跳过它们并记入 reason["deferred_checks"]。
+            #   触发器派发路径（prefetch["realtime_ctx"]）本身就是触发那一刻的实时数据，不延后。
+            #   回退：config.SW_REALTIME_JUDGE=False → 不写标记，judge 与改动前一致。
+            ind.pop("_defer_rt", None)
+            if _rt_defer_on and _route in _rt_defer_modes:
+                ind["_defer_rt"] = True
 
             # 执行对应 judge
             if _route == "reversal":
@@ -1481,6 +1517,8 @@ def analyze_one(symbol: str, ticker: dict,
             else:  # pullback
                 _ok, _reason = judge_pullback(k1h, _k4h, k15, ind, chg24, funding)
                 _dir = "LONG" if ind["ema_bull_1h"] else "SHORT"
+
+            ind.pop("_defer_rt", None)   # [refactor-signal-arch-v2] 标记只对本次 judge 有效，不进入信号里的 ind
 
             # v3.83：熊市禁止 reversal LONG（由原预筛下沉到此，仅影响该路径）
             if _ok and _route == "reversal" and _dir == "LONG" and _bear_block_rev_long:
@@ -1611,6 +1649,10 @@ def analyze_one(symbol: str, ticker: dict,
 
         _sig = _build_signal(symbol, direction, sig_type, reason, chg24, funding, ind, oi_now, k1h,
                              int(prefetch.get("now_ms") or 0))
+        # [refactor-signal-arch-v2] 标记该信号需在触发时用实时K线重跑 judge（signal_watcher._trigger 读取）
+        if _rt_defer_on and sig_type in _rt_defer_modes:
+            _sig["needs_realtime_check"] = True
+            _sig["deferred_checks"] = list((reason or {}).get("deferred_checks", [])) if isinstance(reason, dict) else []
 
         # v3.28: 通过记录（含竞争路径信息）→ 事件；LLM 否决时主进程不写
         _competing_routes = [
@@ -2481,7 +2523,7 @@ def refresh_pool() -> list:
         _sub_pool = [s for s in pool if s in _held_set or _is_stock_token_tradeable(s)]
         if len(_sub_pool) != len(pool):
             logger.debug(f"[scanner] hub 订阅跳过非交易时段股票代币 {len(pool) - len(_sub_pool)} 个")
-        _hub_subscribe_klines(["BTCUSDT"] + _held + _sub_pool)
+        _hub_subscribe_klines(_build_hub_sub_list(_held, _sub_pool))   # [refactor-signal-arch-v2] 原：["BTCUSDT"] + _held + _sub_pool
         return pool
 
     except Exception as e:
@@ -3816,6 +3858,7 @@ def dispatch_trigger_analysis(symbol: str, ticker: dict, mark: dict | None, klin
     b = _prefetch_symbol(symbol, ticker, bi.get("_loss_blacklist"), None, mpm, klines=klines)
     if b is None:
         return out
+    b["prefetch"]["realtime_ctx"] = True   # [refactor-signal-arch-v2] 触发器路径已是触发时刻的实时数据，judge 不延后任何条件
     events: list = []
     sig = analyze_one(symbol, ticker, b["k15"], b["k1h"], b["k4h"], active_syms, pending_syms,
                       bi.get("_allowed_dirs"), bi.get("_loss_blacklist"), bi["_btc_trend"], bi["_mkt_mode"],
@@ -4106,7 +4149,7 @@ def run_scan(dry_run: bool = False, signal_watcher=None) -> dict:
     scan_pool = _tradeable_pool
     result["scanned"] = len(scan_pool)
     # 持仓标的和 BTCUSDT 也订阅（patrol / 挂单维护读它们的 K 线），放最前：hub 对重复标的去重，超出 KLINE_HUB_SYMBOLS_MAX 时按顺序截断
-    _hub_subscribe_klines(["BTCUSDT"] + sorted(active_sym_set) + list(scan_pool))
+    _hub_subscribe_klines(_build_hub_sub_list(sorted(active_sym_set), list(scan_pool)))   # [refactor-signal-arch-v2] 原：["BTCUSDT"] + sorted(active_sym_set) + list(scan_pool)
 
     # 方向约束：对应方向槽位已满时只扫描另一个方向（v3.53: 基于 open-only 计数）
     allowed_dirs: set | None = None

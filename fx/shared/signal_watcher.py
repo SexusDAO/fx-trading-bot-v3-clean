@@ -412,6 +412,74 @@ def _get_hub_or_rest(sym: str, data_type: str, interval: str = "1h", limit: int 
     return _api.get_klines(sym, interval, limit) or []
 
 
+def _realtime_judge_sync(signal: dict) -> tuple:
+    """[refactor-signal-arch-v2] 触发后实时精筛（同步函数，必须在线程里调用，不得在事件循环里直接调）。
+    用 hub 里「此刻」的 15m/1h/4h K线重建指标，重跑该信号所属策略的完整 judge。
+    返回 (verdict, detail)：
+      "pass"   judge 通过（方向一致）；
+      "reject" judge 拒绝，或方向与注册时相反；detail 为拒绝原因；
+      "skip"   无法精筛（hub 无该标的 K线 / 策略不在名单 / 取数异常），detail 为原因，由调用方按配置降级。
+    只读 hub 内存，不发 K线 REST。judge 内部读清算区缓存，缓存过期时会自己联网，所以调用方要放线程里并设超时。
+    指标构建复用 scanner.calc_indicators（与 scanner.analyze_one 同一实现），其余字段（vol24_usd/oi/btc 急跌等）
+    沿用注册时 signal["ind"] 里的值——这些变化慢，按设计属于「粗筛可用快照」。"""
+    import config as _cfg
+    mode = signal.get("sig_type") or signal.get("mode") or ""
+    if mode not in tuple(getattr(_cfg, "SW_REALTIME_JUDGE_MODES", ())):
+        return "skip", f"策略 {mode} 不在实时精筛名单"
+    symbol = signal.get("symbol", "")
+    direction = str(signal.get("direction", "LONG")).upper()
+    try:
+        from shared.market_data_hub import get_hub
+        hub = get_hub()
+        if hub is None:
+            return "skip", "hub 未启动"
+        k15 = hub.get_klines(symbol, "15m", 100)
+        k1h = hub.get_klines(symbol, "1h", 100)
+        k4h = hub.get_klines(symbol, "4h", 100)
+        if not k15 or not k1h or not k4h:
+            return "skip", f"hub 无完整K线(15m={bool(k15)} 1h={bool(k1h)} 4h={bool(k4h)})"
+        if len(k1h) < 25:
+            return "skip", "hub 1h K线不足25根"
+        mp = hub.get_mark_price(symbol) or {}
+    except Exception as e:
+        return "skip", f"读取 hub 异常: {e}"
+    try:
+        from scanner import calc_indicators
+        from shared import judges as _J
+        ind = dict(signal.get("ind") or {})
+        ind.pop("_defer_rt", None)                      # 精筛必须执行全部条件，不能再延后
+        ind.update(calc_indicators(k15, k1h, k4h))      # 用此刻K线刷新全部技术指标
+        ind["symbol"] = symbol
+        price = float(k1h[-1][4])
+        p24 = float(k1h[-25][4])
+        chg24 = (price - p24) / p24 * 100 if p24 > 0 else float(signal.get("chg24", 0) or 0)
+        ind["chg24"] = chg24
+        mk = float(mp.get("markPrice") or 0)
+        if mk > 0:
+            ind["markPrice"] = mk
+        funding = float(mp.get("lastFundingRate", signal.get("funding", 0)) or 0)
+        fn = {"pullback": _J.judge_pullback, "ema_trend": _J.judge_ema_trend,
+              "reversal": _J.judge_reversal, "breakout": _J.judge_breakout}.get(mode)
+        if fn is None:
+            return "skip", f"策略 {mode} 无对应 judge"
+        ok, reason = fn(k1h, k4h, k15, ind, chg24, funding)
+    except Exception as e:
+        return "skip", f"精筛计算异常: {e}"
+    rd = reason if isinstance(reason, dict) else {}
+    if not ok:
+        return "reject", str(rd.get("reject_reason") or reason)
+    # 方向复核：精筛得出的方向必须与注册时一致
+    if mode == "pullback":
+        new_dir = "LONG" if ind.get("ema_bull_1h") else "SHORT"
+    elif mode == "breakout":
+        new_dir = str(rd.get("breakout_direction", direction)).upper()
+    else:
+        new_dir = str(rd.get("direction", direction)).upper()
+    if new_dir != direction:
+        return "reject", f"方向已变化: 注册 {direction} → 现在 {new_dir}"
+    return "pass", ""
+
+
 def _liq_freshness(sym: str, now: float) -> float:
     """[v2-12] 清算图新鲜度系数：<=5min 1.0；5~15min 线性递减；>15min 0。读 liq_cache 条目 ts（取最新）。"""
     try:
@@ -577,6 +645,7 @@ class SignalWatcher:
         # v3.33 5分钟内同方向触发上限
         # {"LONG": last_trigger_ts, "SHORT": last_trigger_ts}
         self._dir_last_trigger: Dict[str, float] = {}
+        self._rt_stats: Dict[str, int] = {}   # [refactor-signal-arch-v2] 触发后实时精筛结果计数：pass / reject / skip
         self._DIR_TRIGGER_COOLDOWN = 300  # 5分钟内同方向最多触发 1 个
 
         # v3.55 BTC 即时波动监控（WebSocket 实时检测，不等下一轮扫描）
@@ -1317,6 +1386,50 @@ class SignalWatcher:
             f"当前价={price:.6g} 挂单价={entry.entry_price:.6g} "
             f"等待了 {elapsed:.1f}s"
         )
+
+        # ── [refactor-signal-arch-v2] 触发后实时精筛 ─────────────────────────────
+        # 原行为：价格进入触发区间 → 直接（经冷却/滑点检查）下单，用的是注册时（最长约 15 分钟前）的快照判断。
+        # 现行为：对带 needs_realtime_check 标记的信号，用 hub 此刻的K线重跑完整 judge，不通过就丢弃、不开仓。
+        #   放在冷却检查之前：被精筛拒绝的触发不消耗 5 分钟方向冷却。
+        #   hub 没有K线 / 取数异常 / 超时 → 不阻断（按 SW_REALTIME_JUDGE_NO_HUB，默认放行）。
+        # 回退：config.SW_REALTIME_JUDGE=False → 本段整体不执行，与改动前完全一致。
+        try:
+            import config as _cfg_rt
+            _rt_on = bool(getattr(_cfg_rt, "SW_REALTIME_JUDGE", False)) and bool(entry.signal.get("needs_realtime_check"))
+        except Exception:
+            _rt_on = False
+        if _rt_on:
+            try:
+                _rt_verdict, _rt_detail = await asyncio.wait_for(
+                    asyncio.to_thread(_realtime_judge_sync, entry.signal), timeout=8.0)
+            except asyncio.TimeoutError:
+                _rt_verdict, _rt_detail = "skip", "精筛超时(8s)"
+            except Exception as _rte:
+                _rt_verdict, _rt_detail = "skip", f"精筛异常: {_rte}"
+            self._rt_stats[_rt_verdict] = self._rt_stats.get(_rt_verdict, 0) + 1
+            if _rt_verdict == "skip" and getattr(_cfg_rt, "SW_REALTIME_JUDGE_NO_HUB", "pass") == "reject":
+                _rt_verdict, _rt_detail = "reject", f"无法精筛且配置为不放行: {_rt_detail}"
+            if _rt_verdict == "reject":
+                logger.info(f"[sw-realtime] {symbol} {entry.mode} {entry.signal.get('direction','')} "
+                            f"触发时实时judge拒绝，丢弃不开仓: {_rt_detail}")
+                async with self._lock:
+                    if self._watched.get(symbol) is entry:
+                        self._watched.pop(symbol, None)
+                try:
+                    _close_entry_card(entry, "触发时实时精筛未通过")
+                except Exception:
+                    pass
+                if self._ws_listener:
+                    try:
+                        self._ws_listener.unsubscribe(symbol)
+                    except Exception:
+                        pass
+                return
+            if _rt_verdict == "pass":
+                logger.info(f"[sw-realtime] {symbol} {entry.mode} 触发时实时judge通过")
+                entry.signal["rt_judge"] = {"passed": True, "ts": time.time()}
+            else:
+                logger.debug(f"[sw-realtime] {symbol} {entry.mode} 跳过实时judge: {_rt_detail}")
 
         # ── v3.33/v3.42 5分钟内同方向同策略触发上限 ─────────────────────────────
         # 防止 BTC 下跌时多个相关信号集中触发 → 集中止损

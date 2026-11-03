@@ -37,8 +37,9 @@ def _clean(monkeypatch):
 
 
 def test_config_symbols_max_is_165():
+    # [refactor-signal-arch-v2] 名字沿用旧的，值已改为与候选池对齐的 300
     import config
-    assert config.KLINE_HUB_SYMBOLS_MAX == 165
+    assert config.KLINE_HUB_SYMBOLS_MAX == 300
 
 
 # ── 断线重连：重新订阅全部流 + 重拉历史 ─────────────────────────────────────
@@ -165,4 +166,4 @@ def test_scanner_injects_scan_pool_into_hub(monkeypatch):
     sc._hub_subscribe_klines(["AUSDT", "BUSDT"])
     assert got == [["AUSDT", "BUSDT"]]
     src = (Path(__file__).parent.parent / "scanner.py").read_text()
-    assert 'result["scanned"] = len(scan_pool)' in src and '_hub_subscribe_klines(["BTCUSDT"] + sorted(active_sym_set) + list(scan_pool))' in src
+    assert 'result["scanned"] = len(scan_pool)' in src and '_hub_subscribe_klines(_build_hub_sub_list(sorted(active_sym_set), list(scan_pool)))' in src
