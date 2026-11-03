@@ -285,43 +285,9 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
         out["reject_reason"] = f"RSI1H={rsi_1h:.1f}>72,超买状态应走reversal路径而非pullback"
         return False, out
 
-    # ── [Fix 1 修订版] 峰値回撤保护（v3.48）───────────────────────
-    # 原方案用 closes[-480] 做基准，短期反弹会重置基准价格，被反弹欺骗
-    # 新方案：用 60日内最高点做基准，不受反弹影响
-    if direction == "LONG" and len(k1h) >= 240:
-        _closes_1h = [float(k[4]) for k in k1h]
-        _lookback   = min(1440, len(_closes_1h) - 1)  # 1440根1H = 60天
-        _price_now  = _closes_1h[-1]
-        _peak_price = max(_closes_1h[-_lookback:])
-        if _peak_price > 0:
-            _drawdown = (_price_now - _peak_price) / _peak_price
-            if _drawdown < -0.40:  # 距峰値跌超 40%
-                out["reject_reason"] = (
-                    f"峰値回撤保护：近{_lookback}根1H最高={_peak_price:.6g}，"
-                    f"当前={_price_now:.6g}，"
-                    f"回撤={_drawdown*100:.1f}%<-40%，"
-                    f"禁止 pullback LONG（结构性熊市，反弹不改变趋势）"
-                )
-                return False, out
+    # [已移除] 60日峰值回撤保护（接受结构性回撤，不硬性过滤）
 
-    # ── [Fix 3 修订版] 60日价格分位保护（v3.48）───────────────────
-    # 原版：当前价是否N日新低（被反弹欺骗）
-    # 新版：当前价处于60日价格区间的低位分位时，禁止 pullback LONG
-    if direction == "LONG" and len(k1h) >= 240:
-        _c1h_f3     = [float(k[4]) for k in k1h]
-        _lk2        = min(1440, len(_c1h_f3) - 1)
-        _range_high = max(_c1h_f3[-_lk2:])
-        _range_low  = min(_c1h_f3[-_lk2:])
-        _range_span = _range_high - _range_low
-        if _range_span > 0:
-            _percentile = (_c1h_f3[-1] - _range_low) / _range_span
-            if _percentile < 0.30:  # 处于60日区间低 30% 分位
-                out["reject_reason"] = (
-                    f"价格分位保护：当前价处于60日区间 {_percentile*100:.1f}% 分位"
-                    f"（高={_range_high:.6g} 低={_range_low:.6g} 当前={_c1h_f3[-1]:.6g}），"
-                    f"禁止 pullback LONG"
-                )
-                return False, out
+    # [已移除] 60日价格分位保护（不用历史分位限制当前趋势结构）
 
     # ── v3.46 动态波动率分档（替代固定门槛）───────────────────────────────
     from config import ATR_TIER_HIGH_MIN, ATR_TIER_MID_MIN, ATR_TIER_HIGH_WEEKEND, ATR_TIER_MID_WEEKEND
@@ -343,7 +309,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
     # ── v3.59 全方向量能硬性门槛（Pullback LONG/SHORT 都适用）──────────────────
     # GPT-5 与 Opus 4.5 均指出：实盘中 vol_ratio<0.1 的标的大量进场导致 early_stagnation
     # vol_ratio < 0.4 说明市场几乎无人参与，不是横盘震荡就是即将结束的回踩，直接拒绝
-    _pb_vol_ratio_min = 0.40
+    _pb_vol_ratio_min = 0.50
     _pb_vol = ind.get("vol_ratio_closed", ind.get("vol_ratio", 1.0))  # [opt-1] 已收盘 1H 量比，缺失回退
     if _pb_vol < _pb_vol_ratio_min:
         out["reject_reason"] = (
@@ -451,7 +417,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
         # [v3.87 STEP3] 删除未使用的 sl_mult（下边界已固定为 1.0 ATR，与止损系数解耦）
         # v3.6: 回踩区间下边界固定 1.0 ATR，与止损系数解耦
         # sl_mult 用于止损计算，回踩区间若也用 sl_mult（mid=2.0），会把破位的标的也放进来
-        _zone_lower_mult = 1.0  # 固定下边界，不随 tier 变化
+        _zone_lower_mult = 0.7  # 固定下边界，不随 tier 变化（从1.0收紧，避免接破位刀）
         if direction == "LONG":
             upper = ema20_1h + atr * 0.3
             lower = ema20_1h - atr * _zone_lower_mult
