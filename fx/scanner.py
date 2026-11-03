@@ -4138,7 +4138,7 @@ def run_scan(dry_run: bool = False, signal_watcher=None) -> dict:
                             continue
                         _rec = _json.loads(_line)
                         import time as _bk_tm
-                        _cutoff_ms = (_bk_tm.time() - 7 * 86400) * 1000
+                        _cutoff_ms = (_bk_tm.time() - 1 * 86400) * 1000  # [fix] 7天→24小时，避免长期拉黑影响候选池
                         _ct = _rec.get("close_time", _rec.get("open_time", 0))
                         if _ct and float(_ct) < _cutoff_ms:
                             continue
