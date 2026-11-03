@@ -121,7 +121,7 @@ BREAKOUT_RSI_MIN_SHORT_HIGH = 35    # 高波动层  # [v3.85 FIX-1] 同步为实
                                     # 负费率 < -0.3% 为强信号，中性费率为普通信号
 # 以下 REVERSAL_RSI4H_* 为历史遗留占位值，judge_reversal 实际用 chg24<=-8%+rsi4h<55 逻辑
 # 代码实际值与此不同，调参请直接修改 _judge_reversal_impl 内的门槛
-REVERSAL_RSI4H_MAX_LONG       = 55      # 实际用值（原25已废弃，代码用55）
+REVERSAL_RSI4H_MAX_LONG       = 55      # 注意：此值用于方向路由判断，judge 精筛实际用写死的 40（高波动 30），两者不一致待后续统一
 REVERSAL_RSI4H_MIN_SHORT      = 55      # 实际用值（原78已废弃，代码用55）
 
 # 高波动层专属
@@ -132,7 +132,7 @@ REVERSAL_CHG24_SHORT_MIN        = 10.0  # [fix C] reversal SHORT 主通道 chg24
                                # 若想让8%~14%走主通道改回8.0，等实盘数据后决定
 CLASSIFY_REVERSAL_FUNDING_MIN  = 0.001
 REVERSAL_RSI1H_SHORT_MIN       = 65    # 做空主通道 RSI1H 下限
-CLASSIFY_REVERSAL_RSI4H_LONG   = REVERSAL_RSI4H_MAX_LONG    # [refactor-B8] 注释更正：实际值 55（原注释 25 已过时）
+CLASSIFY_REVERSAL_RSI4H_LONG   = REVERSAL_RSI4H_MAX_LONG    # [fix-judge-coarse-align] 注意：此值用于方向路由判断，judge 精筛实际用写死的 40（高波动 30），两者不一致待后续统一
 CLASSIFY_REVERSAL_RSI4H_SHORT  = REVERSAL_RSI4H_MIN_SHORT   # [refactor-B8] 注释更正：实际值 55（原注释 78 已过时）
 CLASSIFY_BREAKOUT_CHG24_MIN    = 5.0   # 8% 降至 5%，成交量验证移到 judge_breakout
 
@@ -1003,7 +1003,7 @@ MFE_DRAWBACK_USE_PROGRESS   = True    # mfe_drawback_50pct 改用「进度」判
 OPT_EMA_TREND_TRIGGER_BAR     = True    # OPT-11 EMA 趋势需 1H/15M 触发 K 线（开启：不加15M确认等于追价，基本交易逻辑）
 
 # v3.87 第二批
-OPT_BREAKOUT_RSI_STRONG_RELAX = True    # [refactor-B8] 原 False。开启后仅「强放量突破」（量比≥2.5/3.0）RSI 上限放宽到 75/25，普通突破仍 65/35；改回 False 即恢复   # OPT-12 放量(量比≥强量阈值)突破放宽 RSI 限制  # [v3.87 合并决策] 默认 False：OPT-12 按评审：暂缓，待验证 RSI>65 突破单质量
+OPT_BREAKOUT_RSI_STRONG_RELAX = True    # [fix-judge-coarse-align] 强放量突破：做空 RSI 下限从 35 放宽到 25（做多上限已是 75，此开关对做多无效）；原 False，改回 False 即恢复   # OPT-12 放量(量比≥强量阈值)突破放宽 RSI 限制  # [v3.87 合并决策] 默认 False：OPT-12 按评审：暂缓，待验证 RSI>65 突破单质量
 BREAKOUT_RSI_MAX_LONG_STRONG  = 75     # 强量突破做多 RSI1H 上限
 BREAKOUT_RSI_MIN_SHORT_STRONG = 25     # 强量突破做空 RSI1H 下限
 OPT_BREAKOUT_MOMENTUM_ENTRY   = False   # OPT-13 距突破位≤0.5ATR 时延续入场，不再强制等回踩  # [v3.87 合并决策] 默认 False：OPT-13 按评审：暂缓，待对比成交率与止损率

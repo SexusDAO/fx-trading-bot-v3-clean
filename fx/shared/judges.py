@@ -351,7 +351,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
         # chg24 过小说明标的未经历明显拉升，不是标准的 pullback 结构
         # vol_ratio 过小说明市场没有兴趣，横盘摆动而非单向趋势回踩
         if direction == "SHORT":
-            _vol_ratio = ind.get("vol_ratio", ind.get("vol_ratio_1h", 1.0))
+            _vol_ratio = ind.get("vol_ratio_closed", ind.get("vol_ratio", ind.get("vol_ratio_1h", 1.0)))  # [fix-judge-coarse-align] 原 vol_ratio(含未收盘1H)→已收盘量比，缺失回退；回退:改回 ind.get("vol_ratio",…)
             # v3.46: 中波动档（主流币）涨 2% 就是有意义的涨幅，高波动档保持 _PB_SHORT_CHG24_MIN
             from config import ATR_TIER_MID_PULLBACK_CHG24
             _pb_short_chg24_thresh = (
@@ -524,7 +524,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
         # 如果缩量是发生在近4根内有异常放量(量比>2.5)之后,
         # 说明刚经历过主力拉升/砸盘,缩量是消化而非抛压耗尽,不可信。
         # 只有当前量比确实极低(<0.25)时才触发此检查,避免误伤正常缩量。
-        vol_ratio = ind.get("vol_ratio", 1.0)
+        vol_ratio = ind.get("vol_ratio_closed", ind.get("vol_ratio", 1.0))  # [fix-judge-coarse-align] 原 vol_ratio(含未收盘1H)→已收盘量比，缺失回退；回退:改回 ind.get("vol_ratio",…)
         if vol_ratio < 0.25 and len(k1h) >= 6:
             closed_k1h = k1h[:-1]  # 已闭合K线
             if len(closed_k1h) >= 5:
@@ -1461,7 +1461,7 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
     # Opus 4.5 发现：实盘 vol_ratio 最低 0.012x，无量进场和 early_stagnation 直接挂钉
     # reversal 需要真正的市场异动（大跌/大涨），无量时评价信号没有意义
     _rev_vol_ratio_min = 0.40
-    _rev_vol = ind.get("vol_ratio", ind.get("vol_ratio_1h", 1.0))
+    _rev_vol = ind.get("vol_ratio_closed", ind.get("vol_ratio", ind.get("vol_ratio_1h", 1.0)))  # [fix-judge-coarse-align] 原 vol_ratio(含未收盘1H)→已收盘量比，缺失回退；回退:改回 ind.get("vol_ratio",…)
     if _rev_vol < _rev_vol_ratio_min and not _rt_defer(ind, out, "vol_ratio"):
         out["reject_reason"] = (
             f"reversal 量能门槛：vol_ratio={_rev_vol:.2f} < {_rev_vol_ratio_min}，"
@@ -3529,7 +3529,7 @@ def _judge_oi_divergence_impl(k1h, k4h, k15, ind, chg24, funding):
         return False, out
 
     # ── 6. 量能检查（vol_ratio 最低门槛，避免完全无量） ───────────────────
-    vol_ratio = ind.get("vol_ratio", 1.0)
+    vol_ratio = ind.get("vol_ratio_closed", ind.get("vol_ratio", 1.0))  # [fix-judge-coarse-align] 原 vol_ratio(含未收盘1H)→已收盘量比，缺失回退；回退:改回 ind.get("vol_ratio",…)
     if vol_ratio < 0.4:
         out["reject_reason"] = (
             f"量能过低: vol_ratio={vol_ratio:.2f} < 0.4，"
@@ -4085,7 +4085,7 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
             )
             return False, out
     _vol_min_short = getattr(_config_mod, "EMA_TREND_VOL_RATIO_SHORT_MIN", 0.7)
-    _vr45 = ind.get("vol_ratio", 1.0)
+    _vr45 = ind.get("vol_ratio_closed", ind.get("vol_ratio", 1.0))  # [fix-judge-coarse-align] 原 vol_ratio(含未收盘1H)→已收盘量比，缺失回退；回退:改回 ind.get("vol_ratio",…)
     if _ema_direction == "short" and _vr45 < _vol_min_short and not _rt_defer(ind, out, "vol_ratio"):
         out["reject_reason"] = (
             f"做空量能不足: vol_ratio={_vr45:.2f} < {_vol_min_short}，缩量结构不支持做空"
@@ -4132,7 +4132,7 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
             return False, out
 
     # ── 6. 量能检查 ───────────────────────────────────────────────────────
-    vol_ratio = ind.get("vol_ratio", 1.0)
+    vol_ratio = ind.get("vol_ratio_closed", ind.get("vol_ratio", 1.0))  # [fix-judge-coarse-align] 原 vol_ratio(含未收盘1H)→已收盘量比，缺失回退；回退:改回 ind.get("vol_ratio",…)（同时影响下方 vol_strong）
     if vol_ratio < _VOL_MIN and not _rt_defer(ind, out, "vol_ratio"):
         out["reject_reason"] = (
             f"量能不足: vol_ratio={vol_ratio:.2f} < {_VOL_MIN}，"

@@ -933,31 +933,56 @@ def _is_stop_hunt(k1h: list, k15: list, ind: dict) -> bool:
     return False
 
 
+# [fix-judge-coarse-align] 方向感知的 RSI/CHG24 范围，与 judge_ema_trend 精筛对齐：
+#   多头：RSI1H 45~72，CHG24 -8%~+12%
+#   空头：RSI1H 32~55，CHG24 -12%~+8%（对应 config EMA_TREND_RSI1H_SHORT_MIN/MAX=32/55）
+# 原行为：粗筛不分方向，一律用多头范围（RSI 45~72、CHG24 -8~+12），
+#   导致精筛本来允许的做空区间（RSI 32~45、CHG24 -12~-8）在粗筛就被挡掉，永远进不了 judge。
+# 回退：把 _EMA_COARSE_DIR_AWARE 改为 False 即恢复旧的「只用多头范围」行为。
+_EMA_COARSE_DIR_AWARE = True
+_EMA_LONG_RSI  = (45.0, 72.0)
+_EMA_LONG_CHG  = (-8.0, 12.0)
+_EMA_SHORT_RSI = (32.0, 55.0)
+_EMA_SHORT_CHG = (-12.0, 8.0)
+
+
+def _ema_range_ok(is_long: bool, rsi_1h: float, chg24: float) -> bool:
+    rsi_rng = _EMA_LONG_RSI if is_long else _EMA_SHORT_RSI
+    chg_rng = _EMA_LONG_CHG if is_long else _EMA_SHORT_CHG
+    return rsi_rng[0] <= rsi_1h <= rsi_rng[1] and chg_rng[0] <= chg24 <= chg_rng[1]
+
+
 def _is_ema_trend_coarse(ind: dict, chg24: float) -> bool:
     """
     EMA 趋势策略粗筛（不依赖4H数据）。
     只检查不需要4H K线的条件，满足才加入候选路由，
-    触发4H懒加载后由 _is_ema_trend / judge 做精筛。
-    条件：
-    - CHG24 在 -8%~+12% 范围内
-    - RSI_1h 在 45~72 范围内
+    触发4H懒加载后由 judge 做精筛。
+    [fix-judge-coarse-align] 方向感知：
+    - 多头范围：RSI_1h 45~72 且 CHG24 -8%~+12%
+    - 空头范围：RSI_1h 32~55 且 CHG24 -12%~+8%
+    - 4H EMA 已知（ema20_4h>ema50_4h 为多头，反之空头）：只按该方向的范围判断
+    - 4H EMA 未知（analyze_one 调用本函数时 4H K 线尚未加载，ema*_4h=0）：
+      多头或空头任一范围通过即放行，由 judge 按真实 4H 排列再精筛
     """
-    if chg24 > 12.0 or chg24 < -8.0:
-        return False
     rsi_1h = ind.get("rsi_1h", 50)
-    if not (45 <= rsi_1h <= 72):
-        return False
-    return True
+    if not _EMA_COARSE_DIR_AWARE:
+        # 旧行为：只用多头范围
+        return _ema_range_ok(True, rsi_1h, chg24)
+    ema20_4h = ind.get("ema20_4h", 0.0) or 0.0
+    ema50_4h = ind.get("ema50_4h", 0.0) or 0.0
+    if ema20_4h > 0 and ema50_4h > 0 and ema20_4h != ema50_4h:
+        return _ema_range_ok(ema20_4h > ema50_4h, rsi_1h, chg24)
+    return _ema_range_ok(True, rsi_1h, chg24) or _ema_range_ok(False, rsi_1h, chg24)
 
 
 def _is_ema_trend(ind: dict, chg24: float) -> bool:
     """
     EMA 趋势跟随策略粗筛（v3.61；v3.83 起支持空头排列）。
     宽松条件快速过滤，第二层精筛在 judge_ema_trend 内完成。
-    多头：4H EMA20 > EMA50，1H RSI 45~70，价格在 EMA20 的 -2.5%~+3%。
-    空头：4H EMA20 < EMA50，1H RSI 45~72，价格在 EMA20 的 -3%~+2.5%（反弹到阻力附近）。
-    CHG24 在 -8%~+12% 范围内（两个方向相同，与 judge 一致）。
-    v3.83 修复：judge 在 v3.64 已加入 SHORT 分支，但粗筛只放行多头排列，SHORT 分支永远走不到。
+    多头：4H EMA20 > EMA50，1H RSI 45~72，CHG24 -8%~+12%，价格在 EMA20 的 -2.5%~+3%。
+    空头：4H EMA20 < EMA50，1H RSI 32~55，CHG24 -12%~+8%，价格在 EMA20 的 -3%~+2.5%（反弹到阻力附近）。
+    [fix-judge-coarse-align] 原空头沿用多头 RSI 45~72 / CHG24 -8~+12，与 judge 不一致；
+      现按方向取范围（回退：_EMA_COARSE_DIR_AWARE=False）。注：当前 analyze_one 未调用本函数（仅粗筛版被调用）。
     """
     ema20_4h = ind.get("ema20_4h", 0.0)
     ema50_4h = ind.get("ema50_4h", 0.0)
@@ -965,10 +990,14 @@ def _is_ema_trend(ind: dict, chg24: float) -> bool:
         return False
     is_long = ema20_4h > ema50_4h
     rsi_1h = ind.get("rsi_1h", 50)
-    if not (45 <= rsi_1h <= (70 if is_long else 72)):
-        return False
-    if chg24 > 12.0 or chg24 < -8.0:
-        return False
+    if _EMA_COARSE_DIR_AWARE:
+        if not _ema_range_ok(is_long, rsi_1h, chg24):
+            return False
+    else:
+        if not (45 <= rsi_1h <= (70 if is_long else 72)):
+            return False
+        if chg24 > 12.0 or chg24 < -8.0:
+            return False
     price = ind.get("price", 0.0)
     if price <= 0:
         return False
@@ -976,6 +1005,10 @@ def _is_ema_trend(ind: dict, chg24: float) -> bool:
     if is_long:
         return -0.025 <= pb <= 0.03
     return -0.03 <= pb <= 0.025
+
+
+_OI_NEAR_LOW_MULT  = 1.08   # [fix-judge-coarse-align] 原 1.03
+_OI_NEAR_HIGH_MULT = 0.92   # [fix-judge-coarse-align] 原 0.97
 
 
 def _is_oi_divergence(ind: dict) -> bool:
@@ -986,7 +1019,9 @@ def _is_oi_divergence(ind: dict) -> bool:
       - OI 数据有效（oi_now > 0 且 oi_1h_ago > 0）
       - ATR_ratio >= 0.5%（波动率基本达标）
       - OI 变化幅度 >= 8%（judge 要求 >= 10%）
-      - 价格接近 24H 新高（>= 97%）或新低（<= 103%）
+      - 价格接近 24H 新高（>= 92%）或新低（<= 108%）
+      [fix-judge-coarse-align] 原 97%/103%，与 judge 的 OI_DIV_PRICE_NEAR_HIGH/LOW_PCT=0.92/1.08 对齐；
+      回退：把下面 _OI_NEAR_LOW_MULT / _OI_NEAR_HIGH_MULT 改回 1.03 / 0.97
     """
     oi_now    = ind.get("oi_now", 0.0)
     oi_1h_ago = ind.get("oi_1h_ago", 0.0)
@@ -1006,8 +1041,8 @@ def _is_oi_divergence(ind: dict) -> bool:
     if oi_change < 0.065:
         return False
     # 价格位置：必须按近新高或新低
-    near_low  = price <= low_24h  * 1.03
-    near_high = price >= high_24h * 0.97
+    near_low  = price <= low_24h  * _OI_NEAR_LOW_MULT
+    near_high = price >= high_24h * _OI_NEAR_HIGH_MULT
     return near_low or near_high
 
 
@@ -1023,7 +1058,10 @@ def _is_range_bounce(k1h: list, ind: dict) -> bool:
     price   = ind.get("price", closes[-1])
     atr_r   = ind.get("atr_ratio", 0)
     _weekend = ind.get("_weekend_mode", False)
-    _atr_min = 1.5 if _weekend else 2.0
+    # [fix-judge-coarse-align] 原 1.5(周末)/2.0(平日)；judge 在 pre_gain>=30 且 c_range<=10 时会放宽到
+    #   max(1.2, min-0.5)=1.2/1.5，粗筛挡在 2.0 使放宽分支走不到。现改 1.2(周末)/1.5(平日) 与放宽下限对齐，
+    #   更严的 2.0/1.5 仍由 judge 精筛。回退：改回 1.5 if _weekend else 2.0
+    _atr_min = 1.2 if _weekend else 1.5
     if atr_r < _atr_min:
         return False
     # 近12根内找大涨高点（涨幅 ≥ 15%）
