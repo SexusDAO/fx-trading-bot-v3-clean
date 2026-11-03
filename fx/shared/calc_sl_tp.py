@@ -366,7 +366,13 @@ def _entry_pullback(mark: float, atr: float, ema20: float,
             weighted = (liq_edge * _w + ema20 * 1 + vol_mid * 1) / (_w + 2)
             entry = weighted
         else:
-            entry = mark - atr * _pp["long_deg"]   # 无清算区降级（OPT-3 参数化）
+            # [结构优先] 无清算区时以EMA20为锚点，而非mark附近随机挂单
+            # 若EMA20在有效回踩区间内，优先挂在EMA20上方0.1ATR；否则用mark降级
+            if ema20 > 0 and (mark - ema20) <= atr * 1.0:
+                entry = ema20 + atr * 0.1  # EMA20上方小幅留单
+                logger.debug(f"[entry_pullback] LONG 无清算区降级→EMA20锚点: entry={entry:.6g}")
+            else:
+                entry = mark - atr * _pp["long_deg"]   # EMA20过远，回退mark降级
 
         # 合理性检查1：entry 不应高于 mark 或低于 mark-1.5ATR
         if entry >= mark or (mark - entry) > atr * _pp["long_max"]:
@@ -419,7 +425,12 @@ def _entry_pullback(mark: float, atr: float, ema20: float,
             weighted = (liq_edge * _w + ema20 * 1 + vol_mid * 1) / (_w + 2)
             entry = weighted
         else:
-            entry = mark + atr * _pp["short_deg"]  # v3.20: 0.3→0.8 ATR（v3.84 OPT-3 起由开关参数化）
+            # [结构优先] 无清算区时以EMA20为锚点
+            if ema20 > 0 and (ema20 - mark) <= atr * 1.0:
+                entry = ema20 - atr * 0.1  # EMA20下方小幅留单
+                logger.debug(f"[entry_pullback] SHORT 无清算区降级→EMA20锚点: entry={entry:.6g}")
+            else:
+                entry = mark + atr * _pp["short_deg"]  # EMA20过远，回退mark降级
 
         if entry <= mark or (entry - mark) > atr * _pp["short_max"]:  # v3.20: 上限 1.5→2.5，匹配新降级弹幅
             logger.warning(
@@ -1443,6 +1454,14 @@ def calc_sl_tp(
                 sl = float(_sl_hint)
                 sl_degraded = False
 
+    # [结构优先] sl_degraded=True（无结构止损位）直接拒绝，不降仓继续开
+    # 原逻辑降仓50%继续开，止损位置仍不合理，两头都不占便宜
+    if sl_degraded and mode in ("pullback", "ema_trend", "reversal", "range_bounce"):
+        logger.info(
+            f"[calc_sl_tp] {mode} {direction} 无结构止损位（sl_degraded），拒绝信号"
+        )
+        return {"error": f"无结构止损位（清算图/摆动点均不可用），拒绝{mode}信号"}
+
     # 止损距离动态上限检查（low=12% mid=15% high=20%）
     if not _check_sl_distance(entry, sl, direction, tier):
         sl_pct = abs(entry - sl) / (entry + 1e-9) * 100
@@ -1566,22 +1585,16 @@ def calc_sl_tp(
         _rr_after_cap  = abs(tp1 - entry) / _sl_dist_check
         if _rr_after_cap < _rr_min:
             # 尝试收紧 SL：SL = entry ± tp1_dist / _rr_min（最小距离按波动层，见 _tighten_sl_after_cap）
-            sl_tight, _sl_tight_pct = _tighten_sl_after_cap(entry, sl, tp1, direction, _rr_min, tier)
-            if sl_tight is not None:
-                logger.info(
-                    f"[calc_sl_tp] {symbol_hint} TP1 cap 后 RR={_rr_after_cap:.2f} < {_rr_min}，"
-                    f"收紧 SL: {sl:.6g} → {sl_tight:.6g} (-{_sl_tight_pct*100:.1f}%)，RR 修复为 {_rr_min}，"
-                    f"SL 已非清算图位置，标记 sl_degraded=True"
-                )
-                sl = sl_tight
-                sl_degraded = True  # v3.19: SL 被 TP cap 反推，不再来自清算图，强制降级
-                _sl_dist_check = abs(entry - sl) + 1e-9
-            else:
-                # 无法收紧（原 SL 本就很近，或收紧后低于 2.5% 最小距离）→ 拒绝
-                return {"error": (
-                    f"TP1 cap {_tp1_cap*100:.0f}% 后 RR={_rr_after_cap:.2f} < {_rr_min}，"
-                    f"收紧 SL 至 {_sl_tight_pct*100:.1f}% 不满足 {tier} 层最小止损距离，或比原止损更宽，拒绝信号"
-                )}
+            # [结构优先] TP被cap后RR不足，直接拒绝，禁止收紧结构止损
+            # 原逻辑收紧止损会把清算图止损移到无结构意义的位置，破坏交易逻辑
+            logger.info(
+                f"[calc_sl_tp] {symbol_hint} TP1 cap后 RR={_rr_after_cap:.2f} < {_rr_min}，"
+                f"拒绝信号（禁止收紧结构止损）"
+            )
+            return {"error": (
+                f"TP1 cap {_tp1_cap*100:.0f}% 后 RR={_rr_after_cap:.2f} < {_rr_min}，"
+                f"拒绝信号（结构止损不可收紧）"
+            )}
         else:
             logger.debug(f"TP1 收窄至 {_tp1_cap*100:.0f}%（tier={tier}）: {tp1_pct*100:.1f}% → {_tp1_cap*100:.0f}%，RR={_rr_after_cap:.2f}")
 
