@@ -321,7 +321,10 @@ ORDER_EXPIRE_PULLBACK_MIN = 240   # 回踩/反转挂单超时，分钟
 
 # 扫描超时保护
 SCAN_SYMBOL_TIMEOUT_SEC   = 10    # 单标的分析超时（秒），超时跳过
-SCAN_TOTAL_TIMEOUT_SEC    = 180   # 整轮扫描总超时（秒）；v3.26: 240→120，并发25线程理论8~12s
+# [refactor-signal-arch-v2] 原值 180。候选池 165→300 后，按现网最长一轮 137s 线性外推约 249s，180s 会截断整轮
+#   （未完成的标的被放弃）。改为 300。联动：main.py 对整轮 run_scan 的等待上限随此值走（见 main.py）。
+#   想回到旧行为：改回 180。
+SCAN_TOTAL_TIMEOUT_SEC    = 300   # 整轮扫描总超时（秒）；v3.26: 240→120，并发25线程理论8~12s
 SCAN_MAX_WORKERS          = 2     # [2核服务器收紧 4→2] 并行分析线程数（10→4：降低 GIL 竞争导致事件循环阻塞）；v3.82: 25→10，控制并发内存峰值（25线程×11MB=275MB峰值，pymalloc不归还导致水位积累至3.5GB）
 FUNDING_ARB_SCAN_WORKERS = 2  # funding_arb并发扫描线程数，降低SSL并发防止阻塞事件循环
 SCAN_USE_PROCESS_POOL     = True   # [refactor-B2] 原 False；改回 False 即回到线程池  # True：并行分析走 spawn 进程池（shared/analysis_worker.py）；False：保持线程池（默认）
@@ -357,7 +360,14 @@ HUB_WS_PROXY = (os.environ.get("HUB_WS_PROXY") or os.environ.get("PROXY_URL") or
 ROUTE_PROBE_INTERVAL_SEC = 600   # 双通道（代理/直连）后台复测间隔（秒）；仅配置了代理时生效
 ROUTE_SWITCH_RATIO = 2.0         # 当前通道比另一条慢这么多倍才切换（防抖）
 ROUTE_FAIL_SWITCH_N = 3          # 当前通道连续失败这么多次才切换
-KLINE_HUB_SYMBOLS_MAX = 120  # 对应候选池上限 SCAN_POOL_MAX=165；连接数=ceil(165/60)=3 条，共 495 个 stream（单连接上限 KLINE_STREAM_PER_CONN=180）
+# [refactor-signal-arch-v2] 原值 120（候选池上限 165 时只订前 120 个，池尾走 REST）。
+#   现与候选池 SCAN_POOL_MAX=300 对齐：300 标的 × 3 周期 = 900 个 stream，每连接 180 → 5 条连接。
+#   想回到旧行为：改回 120。
+KLINE_HUB_SYMBOLS_MAX = 300
+# [refactor-signal-arch-v2] hub 订阅的候选池前 N 名（持仓 + BTC 永远在最前、不受此值截断）。
+#   当前取 300 = 订阅整个候选池，使触发时实时精筛都能读到 hub K线；若 2 核机器吃紧，调小即可（如 60），
+#   池尾标的触发时会走 SW_REALTIME_JUDGE_NO_HUB 指定的降级策略。
+HUB_SUBSCRIBE_TOP_N = 300
 KLINE_REQUEST_TOTAL_SEC = 8.0     # 单次 get_klines 调用总时限（秒，含重试、重试间隔、直连失败后改走代理）
 API_REQUEST_TIMEOUT     = (3, 5)    # 全局 REST 接口超时 (connect_s, read_s)：公开行情 _get 与签名查询/撤单/杠杆等
 API_REQUEST_MAX_RETRY   = 1         # 全局 REST 接口最多重试次数（_retry 总尝试 = 1 + 此值）
@@ -527,7 +537,9 @@ UNLOCK_FILTER_DAYS          = 7           # 窗口：UTC 日历天，今天起 N
 UNLOCK_FILTER_PCT           = 1.0         # 阈值：下次解锁占流通量百分比（接口 next_unlock_of_circulating 是百分数，1.34=1.34%）
 LIQ_BIAS_MIN_RATIO          = 3.0         # coin-list 1h 多空失衡：多空清算量最低比例（大/小，小侧 +1 防除零）
 POOL_FUNDING_EXTREME_MIN    = UNIVERSE_FUNDING_MIN_ABS
-SCAN_POOL_MAX               = 165          # 200 → 165，对齐理论最大来源数，让评分排序真正生效
+# [refactor-signal-arch-v2] 原值 165（成交额50+涨幅30+跌幅30+费率极端25+清算量30）。扩到 300：评分逻辑不变，
+#   只是截断位置后移。想回到旧行为：改回 165。
+SCAN_POOL_MAX               = 300
                                            # 配额：成交额 50 + 涨幅 30 + 跌幅 30 + 费率极端 25 + 清算量 30 = 165
 SCAN_POOL_MIN_OI_U          = 1_000_000    # 已停用：_pool_filter_by_oi 在 a8b87e1d 停用，此参数保留供恢复时使用
 # JUDGE_PULLBACK_PARAMS — 已废弃，judges 直接使用 config 参数
@@ -1200,3 +1212,17 @@ HUB_RX_BUFFER             = 800   # 本地接收缓冲上限（帧），满了�
 HUB_PARSE_YIELD_EVERY     = 5     # 每解析多少帧让出一次事件循环
 HUB_SYNC_DEBOUNCE_SEC     = 20     # hub 重连后等多少秒再对账；窗口内再次重连会重新计时（0=立即）
 HUB_SYNC_MIN_INTERVAL_SEC = 60     # 两次 hub 重连对账的最小间隔，不足则推迟（不丢弃）；0=不限
+
+
+# ── [refactor-signal-arch-v2] 触发后实时精筛（signal_watcher._trigger）────────────────────────
+# True：价格进入触发区间后，用 hub 里触发那一刻的 15m/1h/4h K线重新跑对应策略的完整 judge，
+#       不通过就丢弃、不开仓。False：与改动前完全一致（回退开关）。
+SW_REALTIME_JUDGE = True
+# hub 没有该标的 K线（未订阅/数据过旧/历史不足）时的处理：
+#   "pass"   放行（不阻断开仓，但等于该标的绕过了全部精筛条件）
+#   "reject" 不开仓（默认：候选池已全部订阅，hub 无K线属于少数异常情况，宁可错过也不绕过精筛）
+SW_REALTIME_JUDGE_NO_HUB = "reject"
+# 参与实时精筛的策略（funding_arb / oi_divergence 等不依赖 15M 的不在此列）
+# 不含 breakout：触发时价格已回踩到突破位，最新已收盘1H K线不再是「突破K线」，重跑 judge_breakout 会被
+#   「收盘价未突破近10根区间」误杀；breakout 的量能/突破幅度本来就基于已收盘突破K线，注册时的快照是准确的。
+SW_REALTIME_JUDGE_MODES = ("pullback", "ema_trend", "reversal")

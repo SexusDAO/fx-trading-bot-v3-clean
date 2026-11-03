@@ -267,7 +267,16 @@ async def _loop_scan(interval: int = 300, signal_watcher=None, ws_listener=None)
             try:
                 # shield：wait_for 超时会取消传入的 future，取消后 done() 为 True，会让上面的防重叠检查误判；
                 # 用 shield 保证超时只放弃等待，_scan_future 在线程真正结束前一直是未完成状态
-                result = await asyncio.wait_for(asyncio.shield(future), timeout=300)
+                # [refactor-signal-arch-v2] 原：timeout=300（写死）。整轮分析上限 SCAN_TOTAL_TIMEOUT_SEC 已从 180 提到 300，
+                #   若这里仍是 300，会比分析上限先到点：本轮结果（placed/signals_final 计数）被丢弃，后续轮次被「上一轮仍在运行」跳过。
+                #   现：等待上限 = max(300, SCAN_TOTAL_TIMEOUT_SEC + 120)，120s 余量给候选池刷新/清算区预热/信号注册。
+                #   回退：把 SCAN_TOTAL_TIMEOUT_SEC 改回 180 时仍为 300，与改动前一致。
+                try:
+                    import config as _cfg_scan_wait
+                    _scan_wait_sec = max(300, int(getattr(_cfg_scan_wait, "SCAN_TOTAL_TIMEOUT_SEC", 180)) + 120)
+                except Exception:
+                    _scan_wait_sec = 300
+                result = await asyncio.wait_for(asyncio.shield(future), timeout=_scan_wait_sec)
                 placed = (result or {}).get("placed", 0)
                 # ── 心跳计数器更新 ────────────────────────────────────────────
                 _r = result or {}
@@ -286,7 +295,7 @@ async def _loop_scan(interval: int = 300, signal_watcher=None, ws_listener=None)
                     if pending:
                         logger.info(f"[main] SignalWatcher 监控中: {pending} 个信号 {signal_watcher.pending_symbols()}")
             except asyncio.TimeoutError:
-                logger.error("[main] task_scan 超时（300s），跳过本轮（扫描线程仍在后台，结束前后续轮次会被跳过）")
+                logger.error(f"[main] task_scan 超时（{_scan_wait_sec}s），跳过本轮（扫描线程仍在后台，结束前后续轮次会被跳过）")
             except Exception as e:
                 logger.error(f"[main] task_scan 子线程异常: {e}", exc_info=True)
         except Exception as e:

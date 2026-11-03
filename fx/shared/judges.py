@@ -199,6 +199,23 @@ def _liq_volume_adj(trigger: float, baseline: float, mult: float = 2.5) -> int:
     return 0
 
 
+def _rt_defer(ind: dict, out: dict, tag: str) -> bool:
+    """[refactor-signal-arch-v2] 扫描器粗筛模式下，把「依赖实时价格/短周期K线」的硬拒绝延后到触发时。
+    原行为：这些条件不通过就直接 return False（拒绝）。
+    现行为：仅当 ind["_defer_rt"] 为真（由 scanner.analyze_one 在 SW_REALTIME_JUDGE 开启且策略在
+            SW_REALTIME_JUDGE_MODES 内时写入）时返回 True —— 调用处据此跳过这次拒绝，并把条件名记入
+            out["deferred_checks"]，供触发后的实时精筛（signal_watcher._trigger）重跑时真正执行。
+    回退：SW_REALTIME_JUDGE=False 时 ind 里没有该标记，本函数恒返回 False，judge 与改动前逐行等价。
+    用法：`if <原拒绝条件> and not _rt_defer(ind, out, "条件名"):`（原条件为假时不会调用本函数）。"""
+    try:
+        if ind.get("_defer_rt"):
+            out.setdefault("deferred_checks", []).append(tag)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _btc_crash_reject(ind: dict, direction: str, strategy_name: str, out: dict):
     """[opt-5] BTC 1H 跌幅 <= -5% 时禁止 LONG；返回 (False, out) 或 None。"""
     if direction == "LONG":
@@ -278,10 +295,10 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
     # ── RSI 极端光速拒绝(入库第一道)───────────────────────────────
     # pullback 假设趋势正常回踩,RSI 超卖或超买属于异常波动,应走 reversal 路径
     # v3.6 门槛对齐：与 _is_reversal 分类层保持一致（28/72），消除 28~29/70~71 死区
-    if direction == "LONG" and rsi_1h < 28:
+    if direction == "LONG" and rsi_1h < 28 and not _rt_defer(ind, out, "rsi_1h_extreme"):
         out["reject_reason"] = f"RSI1H={rsi_1h:.1f}<28,超卖状态应走reversal路径而非pullback"
         return False, out
-    if direction == "SHORT" and rsi_1h > 72:
+    if direction == "SHORT" and rsi_1h > 72 and not _rt_defer(ind, out, "rsi_1h_extreme"):
         out["reject_reason"] = f"RSI1H={rsi_1h:.1f}>72,超买状态应走reversal路径而非pullback"
         return False, out
 
@@ -311,7 +328,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
     # vol_ratio < 0.4 说明市场几乎无人参与，不是横盘震荡就是即将结束的回踩，直接拒绝
     _pb_vol_ratio_min = 0.50
     _pb_vol = ind.get("vol_ratio_closed", ind.get("vol_ratio", 1.0))  # [opt-1] 已收盘 1H 量比，缺失回退
-    if _pb_vol < _pb_vol_ratio_min:
+    if _pb_vol < _pb_vol_ratio_min and not _rt_defer(ind, out, "vol_ratio"):
         out["reject_reason"] = (
             f"pullback 量能门槛：vol_ratio={_pb_vol:.2f} < {_pb_vol_ratio_min}，"
             f"市场参与度不足，非标准回踩结构"
@@ -347,7 +364,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
                     f"标的未有足够涨幅，非标准回踩空结构"
                 )
                 return False, out
-            if _vol_ratio < _PB_SHORT_VOL_RATIO_MIN:
+            if _vol_ratio < _PB_SHORT_VOL_RATIO_MIN and not _rt_defer(ind, out, "vol_ratio"):
                 out["reject_reason"] = (
                     f"pullback SHORT 弱信号：vol_ratio={_vol_ratio:.2f}<{_PB_SHORT_VOL_RATIO_MIN}，"
                     f"量能不足证明市场对回踩无兴趣"
@@ -395,7 +412,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
             _recent_low_20 = min(float(k[3]) for k in k1h[-20:])
             if _recent_low_20 > 0:
                 _rebound_pct = (price - _recent_low_20) / _recent_low_20 * 100
-                if _rebound_pct > _rebound_limit:
+                if _rebound_pct > _rebound_limit and not _rt_defer(ind, out, "price_position_rebound"):
                     out["reject_reason"] = (
                         f"从近20根1H低点{_recent_low_20:.4g}反弹{_rebound_pct:.1f}%"
                         f">{_rebound_limit}%，反弹幅度过大，非空头回踩"
@@ -405,7 +422,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
             _recent_high_20 = max(float(k[2]) for k in k1h[-20:])
             if _recent_high_20 > 0:
                 _pullback_pct = (_recent_high_20 - price) / _recent_high_20 * 100
-                if _pullback_pct > _rebound_limit:
+                if _pullback_pct > _rebound_limit and not _rt_defer(ind, out, "price_position_rebound"):
                     out["reject_reason"] = (
                         f"从近20根1H高点{_recent_high_20:.4g}回调{_pullback_pct:.1f}%"
                         f">{_rebound_limit}%，回调幅度过大，非多头回踩"
@@ -428,7 +445,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
             in_zone = lower <= price <= upper
 
         out["price_in_zone"] = in_zone
-        if not in_zone:
+        if not in_zone and not _rt_defer(ind, out, "price_in_zone"):
             out["reject_reason"] = f"价格{price:.4g}不在回踩区间[{lower:.4g},{upper:.4g}]"
             return False, out
 
@@ -440,13 +457,13 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
         if direction == "LONG":
             recent_high = max(float(k[2]) for k in k1h[-12:]) if len(k1h) >= 12 else price
             gap_abs = recent_high - price
-            if gap_abs < _gap_min:
+            if gap_abs < _gap_min and not _rt_defer(ind, out, "price_position_gap"):
                 out["reject_reason"] = f"近期高点(12根){recent_high:.4g}距当前价{gap_abs:.4g}<0.5ATR({_gap_min:.4g}),无真实回踩空间"
                 return False, out
         else:
             recent_low = min(float(k[3]) for k in k1h[-12:]) if len(k1h) >= 12 else price
             gap_abs = price - recent_low
-            if gap_abs < _gap_min:
+            if gap_abs < _gap_min and not _rt_defer(ind, out, "price_position_gap"):
                 out["reject_reason"] = f"近期低点(12根){recent_low:.4g}距当前价{gap_abs:.4g}<0.5ATR({_gap_min:.4g}),无真实反弹空间"
                 return False, out
 
@@ -464,7 +481,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
                 )
                 # v3.21 动能确认：近3根中至少1根阳线（确认下跌动能减弱，非下跌途中）
                 any_green = any(float(k[4]) >= float(k[1]) for k in _k3)
-                if not (not_new_low_cnt >= 2 and any_green):
+                if not (not_new_low_cnt >= 2 and any_green) and not _rt_defer(ind, out, "1h_direction_confirm"):
                     out["reject_reason"] = (
                         f"1H价格方向未确认:近3根中{not_new_low_cnt}根不创新低(<2),或近3根无收红(动能确认)"
                     )
@@ -476,7 +493,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
                 )
                 # v3.21 动能确认：近3根中至少1根阴线（确认上涨动能减弱）
                 any_red = any(float(k[4]) <= float(k[1]) for k in _k3)
-                if not (not_new_high_cnt >= 2 and any_red):
+                if not (not_new_high_cnt >= 2 and any_red) and not _rt_defer(ind, out, "1h_direction_confirm"):
                     out["reject_reason"] = (
                         f"1H价格方向未确认:近3根中{not_new_high_cnt}根不创新高(<2),或近3根无收阴(动能确认)"
                     )
@@ -485,18 +502,18 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
             # 数据不足4根时退化到原逻辑
             k_prev, k_last = k1h[-2], k1h[-1]
             if direction == "LONG":
-                if not (float(k_last[3]) >= float(k_prev[3])):
+                if not (float(k_last[3]) >= float(k_prev[3])) and not _rt_defer(ind, out, "1h_direction_confirm"):
                     out["reject_reason"] = f"1H价格方向未确认(数据不足):最后一根创新低"
                     return False, out
             else:
-                if not (float(k_last[2]) <= float(k_prev[2])):
+                if not (float(k_last[2]) <= float(k_prev[2])) and not _rt_defer(ind, out, "1h_direction_confirm"):
                     out["reject_reason"] = f"1H价格方向未确认(数据不足):最后一根创新高"
                     return False, out
 
         # 条件三:止跌 / 止涨信号(硬性,15M,至少一种)
         rev_sig = _reversal_signal_15m(k15, direction)
         out["reversal_signal"] = rev_sig
-        if rev_sig is None:
+        if rev_sig is None and not _rt_defer(ind, out, "reversal_signal_15m_or_1h"):
             out["reject_reason"] = "无有效15M止跌/止涨信号"
             return False, out
 
@@ -517,7 +534,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
                     for k in closed_k1h[-5:-1]  # 入场前4根(不含当前)
                 ]
                 surge_count = sum(1 for r in recent_ratios if r > 2.5)
-                if surge_count >= 1:
+                if surge_count >= 1 and not _rt_defer(ind, out, "vol_ratio"):
                     out["reject_reason"] = (
                         f"缩量({vol_ratio:.2f})发生在近4根有{surge_count}根放量(>2.5x)之后,"
                         f"可能是主力消化而非抛压耗尽,跳过"
@@ -591,7 +608,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
         # 注：高波动层成交密集区是支撑/压力的核心区域，做多/做空都在密集区附近入场
         # 差异通过 EMA 方向 + 资金费率条件已经隐式区分了方向
         out["price_in_zone"] = in_zone
-        if not in_zone:
+        if not in_zone and not _rt_defer(ind, out, "price_in_zone"):
             out["reject_reason"] = f"价格{price:.4g}不在成交密集区[{dense_low:.4g},{dense_high:.4g}]±{margin:.4g}"
             return False, out
 
@@ -608,7 +625,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
         # 条件四:1H止跌止涨信号(硬性,周期提升到1H)
         rev_sig = _reversal_signal_1h(k1h, direction)
         out["reversal_signal"] = rev_sig
-        if rev_sig is None:
+        if rev_sig is None and not _rt_defer(ind, out, "reversal_signal_15m_or_1h"):
             out["reject_reason"] = "无有效1H止跌/止涨信号(高波动层)"
             return False, out
 
@@ -730,7 +747,7 @@ def _judge_pullback_impl(k1h, k4h, k15, ind, chg24, funding):
         except Exception as _e15:
             _confirm15 = True
             logger.debug(f"[judge_pullback] {ind.get('symbol', '')} 15M确认检查异常，跳过: {_e15}")
-        if not _confirm15:
+        if not _confirm15 and not _rt_defer(ind, out, "15m_momentum_confirm"):
             out["reject_reason"] = (
                 f"15M动能未确认：最近{len(_recent15)}根已收盘15M无{'阳' if _want_up else '阴'}线（或成交量为零），"
                 f"pullback {direction} 短期动能已熄"
@@ -1123,7 +1140,7 @@ def _judge_breakout_impl(k1h, k4h, k15, ind, chg24, funding):
         out["breakout_margin_atr"] = round((breakout_close - ref_high) / (atr + 1e-9), 3)
         out["breakout_entry_price"] = ref_high
         _chase = (price - ref_high) / (atr + 1e-9)
-        if _chase > _MAX_CHASE:
+        if _chase > _MAX_CHASE and not _rt_defer(ind, out, "price_chase_distance"):
             out["reject_reason"] = f"追入距离{_chase:.1f}ATR超过上限{_MAX_CHASE}ATR"
             return False, out
     else:
@@ -1134,7 +1151,7 @@ def _judge_breakout_impl(k1h, k4h, k15, ind, chg24, funding):
         out["breakout_margin_atr"] = round((ref_low - breakout_close) / (atr + 1e-9), 3)
         out["breakout_entry_price"] = ref_low
         _chase = (ref_low - price) / (atr + 1e-9)
-        if _chase > _MAX_CHASE:
+        if _chase > _MAX_CHASE and not _rt_defer(ind, out, "price_chase_distance"):
             out["reject_reason"] = f"追入距离{_chase:.1f}ATR超过上限{_MAX_CHASE}ATR"
             return False, out
 
@@ -1157,7 +1174,7 @@ def _judge_breakout_impl(k1h, k4h, k15, ind, chg24, funding):
     )
     out["bar_15m_confirm"]          = confirm_ok
     out["bar_15m_upper_shadow_flag"] = shadow_flag
-    if not confirm_ok:
+    if not confirm_ok and not _rt_defer(ind, out, "15m_confirm_bar"):
         # 未确认:写入 pending_confirm 状态,本轮不输出信号
         out["reject_reason"] = "15M确认K线未闭合,等待下一轮"
         # 调用方(scanner)负责写入 pending_confirm_state
@@ -1177,10 +1194,10 @@ def _judge_breakout_impl(k1h, k4h, k15, ind, chg24, funding):
     if _OPT_BRR and vol_ratio >= (2.5 if tier == "low" else 3.0):
         rsi_limit   = max(rsi_limit, _RSI_L_STR)
         rsi_limit_s = min(rsi_limit_s, _RSI_S_STR)
-    if direction == "LONG" and rsi_1h > rsi_limit:
+    if direction == "LONG" and rsi_1h > rsi_limit and not _rt_defer(ind, out, "rsi_1h_range"):
         out["reject_reason"] = f"RSI1H={rsi_1h:.1f} > {rsi_limit},超买追多"
         return False, out
-    if direction == "SHORT" and rsi_1h < rsi_limit_s:
+    if direction == "SHORT" and rsi_1h < rsi_limit_s and not _rt_defer(ind, out, "rsi_1h_range"):
         out["reject_reason"] = f"RSI1H={rsi_1h:.1f} < {rsi_limit_s},超卖追空"
         return False, out
 
@@ -1445,7 +1462,7 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
     # reversal 需要真正的市场异动（大跌/大涨），无量时评价信号没有意义
     _rev_vol_ratio_min = 0.40
     _rev_vol = ind.get("vol_ratio", ind.get("vol_ratio_1h", 1.0))
-    if _rev_vol < _rev_vol_ratio_min:
+    if _rev_vol < _rev_vol_ratio_min and not _rt_defer(ind, out, "vol_ratio"):
         out["reject_reason"] = (
             f"reversal 量能门槛：vol_ratio={_rev_vol:.2f} < {_rev_vol_ratio_min}，"
             f"无量异动时 reversal 信号无意义"
@@ -1620,7 +1637,7 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
             out["funding_extreme"] = True   # 负费率 < -0.3% 为强信号
 
         # 条件二:RSI极端超卖
-        if rsi_4h >= rsi_long_thresh:
+        if rsi_4h >= rsi_long_thresh and not _rt_defer(ind, out, "rsi_4h_extreme"):
             out["reject_reason"] = f"RSI4H={rsi_4h:.1f} >= {rsi_long_thresh},未达超卖"
             return False, out
         if rsi_4h < 20:
@@ -1628,14 +1645,14 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
         # 优化:RSI_1h < 25 才算超卖(更严格)
         if rsi_1h < 25:
             out["signal_base_strength"] = "strong"
-        elif rsi_1h >= 35:
+        elif rsi_1h >= 35 and not _rt_defer(ind, out, "rsi_1h_extreme"):
             out["reject_reason"] = f"RSI1H={rsi_1h:.1f} >= 35,未达极端超卖"
             return False, out
 
         # 条件三:连续两根15M止跌K线(所有波动层都需要)
         consec = _two_consecutive_reversal_15m(k15, "LONG")
         out["reversal_candles_15m"] = consec
-        if consec is None:
+        if consec is None and not _rt_defer(ind, out, "consecutive_15m_candles"):
             out["reject_reason"] = "未找到连续两根15M止跌K线"
             return False, out
 
@@ -1655,7 +1672,7 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
         # 条件四:跌势减速
         decel = _deceleration_1h(k1h, "LONG")
         out["deceleration_confirmed"] = decel
-        if not decel:
+        if not decel and not _rt_defer(ind, out, "deceleration_1h"):
             out["reject_reason"] = "跌势未减速"
             return False, out
 
@@ -1665,14 +1682,14 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
             closes_1h = [float(k[4]) for k in k1h[-16:]]
             rsi_now  = _rsi_ind(closes_1h)
             rsi_prev = _rsi_ind(closes_1h[:-1])
-            if rsi_now < rsi_prev - 1.0:  # RSI还在下跌(给1点容差)
+            if rsi_now < rsi_prev - 1.0 and not _rt_defer(ind, out, "rsi_1h_turning"):  # RSI还在下跌(给1点容差)
                 out["reject_reason"] = f"1H RSI仍在下跌({rsi_prev:.1f}->{rsi_now:.1f}),未出现回升迹象"
                 return False, out
 
         # 高波动层:两根1H K线都减速
         if tier == "high":
             decel2 = _deceleration_2_consecutive_1h(k1h, "LONG")
-            if not decel2:
+            if not decel2 and not _rt_defer(ind, out, "deceleration_1h"):
                 out["reject_reason"] = "高波动层:连续两根1H跌幅未递减"
                 return False, out
 
@@ -1707,7 +1724,7 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
             _last_closed = k1h[-1]  # 已收盘的最新K线（调用者已去除未闭合根，-1即最新闭合）
             # v3.64 BUG修复：原代码用 k1h[-2] 跳过了最新闭合K线，导致刚刚加速的行情漏掉保护
             _last_chg = (float(_last_closed[4]) - float(_last_closed[1])) / (float(_last_closed[1]) + 1e-9) * 100
-            if _last_chg >= 3.0:
+            if _last_chg >= 3.0 and not _rt_defer(ind, out, "1h_accel_guard"):
                 out["reject_reason"] = (
                     f"RSI极端通道但最近收盘1H K线仍在加速上涨({_last_chg:+.1f}%)，"
                     f"涨势未停，非顶部，拒绝做空"
@@ -1737,7 +1754,7 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
             _OPT_RST = False
         if _OPT_RST:
             rsi_short_thresh_new = max(rsi_short_thresh_new, rsi_short_thresh)
-        if rsi_4h < rsi_short_thresh_new:
+        if rsi_4h < rsi_short_thresh_new and not _rt_defer(ind, out, "rsi_4h_extreme"):
             out["reject_reason"] = f"RSI4H={rsi_4h:.1f} < {rsi_short_thresh_new},超买力度不足"
             return False, out
         if rsi_4h > 80:
@@ -1751,14 +1768,14 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
                 from config import REVERSAL_RSI1H_SHORT_MIN as _R1S
             except Exception:
                 _R1S = 65
-            if rsi_1h <= _R1S:
+            if rsi_1h <= _R1S and not _rt_defer(ind, out, "rsi_1h_extreme"):
                 out["reject_reason"] = f"RSI1H={rsi_1h:.1f} <= {_R1S},未达超买"
                 return False, out
             if len(k1h) >= 17:
                 from shared.indicators import rsi as _rsi_ind
                 _c1h = [float(k[4]) for k in k1h[-17:]]
                 _r0, _r1, _r2 = _rsi_ind(_c1h[:-2]), _rsi_ind(_c1h[:-1]), _rsi_ind(_c1h)
-                if _r0 < _r1 < _r2:   # 最近 3 根 1H RSI 连续上升
+                if _r0 < _r1 < _r2 and not _rt_defer(ind, out, "rsi_1h_turning"):   # 最近 3 根 1H RSI 连续上升
                     out["reject_reason"] = f"1H RSI仍在上升({_r0:.1f}->{_r1:.1f}->{_r2:.1f}),未出现回落迹象"
                     return False, out
 
@@ -1766,7 +1783,7 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
         # 防止「涨势加速」（大阳线推高RSI）被误判为顶部
         consec = _two_consecutive_reversal_15m(k15, "SHORT")
         out["reversal_candles_15m"] = consec
-        if consec is None:
+        if consec is None and not _rt_defer(ind, out, "consecutive_15m_candles"):
             out["reject_reason"] = "未找到连续两根15M止涨K线"
             return False, out
 
@@ -1778,7 +1795,7 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
         # 条件四:涨势减速（_rsi1h_channel 豁免：极端RSI已能说明超买，减速不是必要条件）
         decel = _deceleration_1h(k1h, "SHORT")
         out["deceleration_confirmed"] = decel
-        if not decel and not _rsi1h_channel:
+        if not decel and not _rsi1h_channel and not _rt_defer(ind, out, "deceleration_1h"):
             out["reject_reason"] = "涨势未减速"
             return False, out
 
@@ -4035,13 +4052,13 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
         _R1S_MIN, _R1S_MAX, _RG_S_MIN, _RG_S_MAX = 32, 48, 38, 48
     _rsi1h_min_eff = _R1S_MIN if _ema_direction == "short" else _RSI1H_MIN
     _rsi1h_max_eff = _R1S_MAX if _ema_direction == "short" else _RSI1H_MAX
-    if not (_rsi1h_min_eff <= rsi_1h <= _rsi1h_max_eff):
+    if not (_rsi1h_min_eff <= rsi_1h <= _rsi1h_max_eff) and not _rt_defer(ind, out, "rsi_1h_range"):
         out["reject_reason"] = (
             f"1H RSI={rsi_1h:.1f} 不在健康区间 [{_rsi1h_min_eff}, {_rsi1h_max_eff}]"
         )
         return False, out
 
-    if not (_rsi4h_min_eff <= rsi_4h <= _rsi4h_max_eff):
+    if not (_rsi4h_min_eff <= rsi_4h <= _rsi4h_max_eff) and not _rt_defer(ind, out, "rsi_4h_range"):
         out["reject_reason"] = (
             f"4H RSI={rsi_4h:.1f} 不在健康区间 [{_rsi4h_min_eff}, {_rsi4h_max_eff}]"
         )
@@ -4069,7 +4086,7 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
             return False, out
     _vol_min_short = getattr(_config_mod, "EMA_TREND_VOL_RATIO_SHORT_MIN", 0.7)
     _vr45 = ind.get("vol_ratio", 1.0)
-    if _ema_direction == "short" and _vr45 < _vol_min_short:
+    if _ema_direction == "short" and _vr45 < _vol_min_short and not _rt_defer(ind, out, "vol_ratio"):
         out["reject_reason"] = (
             f"做空量能不足: vol_ratio={_vr45:.2f} < {_vol_min_short}，缩量结构不支持做空"
         )
@@ -4086,13 +4103,13 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
     if _ema_direction == "long":
         _zone_above = _atr_zone * 0.3   # 上方最多0.3ATR
         _zone_below = _atr_zone * 0.7   # 下方最多0.7ATR
-        if pb_ratio > _zone_above:
+        if pb_ratio > _zone_above and not _rt_defer(ind, out, "price_in_zone"):
             out["reject_reason"] = (
                 f"价格追高: price={price:.4g} 在 EMA20={ema20_4h:.4g} 上方 "
                 f"{pb_ratio*100:.1f}%（>{_zone_above*100:.1f}%=0.3ATR），非回踩入场"
             )
             return False, out
-        if pb_ratio < -_zone_below:
+        if pb_ratio < -_zone_below and not _rt_defer(ind, out, "price_in_zone"):
             out["reject_reason"] = (
                 f"价格破位: price={price:.4g} 在 EMA20={ema20_4h:.4g} 下方 "
                 f"{abs(pb_ratio)*100:.1f}%（>{_zone_below*100:.1f}%=0.7ATR），EMA支撑失效"
@@ -4101,13 +4118,13 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
     else:  # SHORT
         _zone_above = _atr_zone * 0.7   # 上方最多0.7ATR（允许稍微突破阻力）
         _zone_below = _atr_zone * 0.3   # 下方最多0.3ATR
-        if pb_ratio > _zone_above:
+        if pb_ratio > _zone_above and not _rt_defer(ind, out, "price_in_zone"):
             out["reject_reason"] = (
                 f"SHORT 价格高于 EMA20 阻力: {pb_ratio*100:.1f}%（>{_zone_above*100:.1f}%=0.7ATR），"
                 f"已大幅突破阻力，不追空"
             )
             return False, out
-        if pb_ratio < -_zone_below:
+        if pb_ratio < -_zone_below and not _rt_defer(ind, out, "price_in_zone"):
             out["reject_reason"] = (
                 f"SHORT 价格过低: {abs(pb_ratio)*100:.1f}%（>{_zone_below*100:.1f}%=0.3ATR），"
                 f"跌离阻力太远，非回踩入场"
@@ -4116,7 +4133,7 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
 
     # ── 6. 量能检查 ───────────────────────────────────────────────────────
     vol_ratio = ind.get("vol_ratio", 1.0)
-    if vol_ratio < _VOL_MIN:
+    if vol_ratio < _VOL_MIN and not _rt_defer(ind, out, "vol_ratio"):
         out["reject_reason"] = (
             f"量能不足: vol_ratio={vol_ratio:.2f} < {_VOL_MIN}，"
             f"回踩无量可能继续跌破 EMA"
@@ -4135,7 +4152,7 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
         _k1h_c2 = k1h[:-1] if len(k1h) > 1 else k1h
         _k15_c2 = k15[:-1] if len(k15) > 1 else k15
         _trig = _reversal_signal_1h(_k1h_c2, _et_dir) or _reversal_signal_15m(_k15_c2, _et_dir)
-        if not _trig:
+        if not _trig and not _rt_defer(ind, out, "trigger_bar_1h_or_15m"):
             out["reject_reason"] = f"EMA趋势未见触发K线: 1H/15M 无{'止跌' if _et_dir == 'LONG' else '止涨'}形态"
             return False, out
         out["trigger_bar"] = _trig

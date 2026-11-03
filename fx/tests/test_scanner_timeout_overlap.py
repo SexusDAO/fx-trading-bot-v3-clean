@@ -111,7 +111,9 @@ def test_wait_for_shield_keeps_inner_future_pending():
 def test_loop_scan_source_has_skip_and_shield():
     assert "上一轮仍在运行，跳过本轮" in MAIN_SRC
     assert "_scan_future is not None and not _scan_future.done()" in MAIN_SRC
-    assert "asyncio.wait_for(asyncio.shield(future), timeout=300)" in MAIN_SRC
+    # [refactor-signal-arch-v2] 原：timeout=300 写死；现：max(300, SCAN_TOTAL_TIMEOUT_SEC + 120)，仍用 shield
+    assert "asyncio.wait_for(asyncio.shield(future), timeout=_scan_wait_sec)" in MAIN_SRC
+    assert 'max(300, int(getattr(_cfg_scan_wait, "SCAN_TOTAL_TIMEOUT_SEC", 180)) + 120)' in MAIN_SRC
 
 
 # ── Commit 3：事件循环延迟监控 ───────────────────────────────────────────────
