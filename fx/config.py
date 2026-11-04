@@ -294,7 +294,7 @@ LIQUIDITY_GATE_DEPTH_MULT = 5        # 深度需 >= 名义仓位 × 5
 NET_DELTA_MAX_PCT = 0.70   # 净多头/空头 Delta 上限 = 权益 × MAX_TOTAL_NOMINAL × 70%（原 30%）
 
 # ── 全局最大回撤保护（v3.57）────────────────────────────────────────────────
-DRAWDOWN_HALT_PCT  = 0   # 从高水位回撤 >= 15% → 暂停开仓
+DRAWDOWN_HALT_PCT  = 0.15   # 从高水位回撤 >= 15% → 暂停开仓
 DRAWDOWN_HALT_DAYS = 3      # 暂停天数
 DRAWDOWN_WARN_PCT  = 0.08   # >= 8% → 警告日志
 
