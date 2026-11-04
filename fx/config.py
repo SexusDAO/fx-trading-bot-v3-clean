@@ -363,11 +363,11 @@ ROUTE_FAIL_SWITCH_N = 3          # 当前通道连续失败这么多次才切换
 # [refactor-signal-arch-v2] 原值 120（候选池上限 165 时只订前 120 个，池尾走 REST）。
 #   现与候选池 SCAN_POOL_MAX=300 对齐：300 标的 × 3 周期 = 900 个 stream，每连接 180 → 5 条连接。
 #   想回到旧行为：改回 120。
-KLINE_HUB_SYMBOLS_MAX = 120
+KLINE_HUB_SYMBOLS_MAX = 60
 # [refactor-signal-arch-v2] hub 订阅的候选池前 N 名（持仓 + BTC 永远在最前、不受此值截断）。
 #   当前取 300 = 订阅整个候选池，使触发时实时精筛都能读到 hub K线；若 2 核机器吃紧，调小即可（如 60），
 #   池尾标的触发时会走 SW_REALTIME_JUDGE_NO_HUB 指定的降级策略。
-HUB_SUBSCRIBE_TOP_N = 165
+HUB_SUBSCRIBE_TOP_N = 60
 KLINE_REQUEST_TOTAL_SEC = 8.0     # 单次 get_klines 调用总时限（秒，含重试、重试间隔、直连失败后改走代理）
 API_REQUEST_TIMEOUT     = (3, 5)    # 全局 REST 接口超时 (connect_s, read_s)：公开行情 _get 与签名查询/撤单/杠杆等
 API_REQUEST_MAX_RETRY   = 1         # 全局 REST 接口最多重试次数（_retry 总尝试 = 1 + 此值）
