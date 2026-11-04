@@ -1221,7 +1221,7 @@ SW_REALTIME_JUDGE = True
 # hub 没有该标的 K线（未订阅/数据过旧/历史不足）时的处理：
 #   "pass"   放行（不阻断开仓，但等于该标的绕过了全部精筛条件）
 #   "reject" 不开仓（默认：候选池已全部订阅，hub 无K线属于少数异常情况，宁可错过也不绕过精筛）
-SW_REALTIME_JUDGE_NO_HUB = "reject"
+SW_REALTIME_JUDGE_NO_HUB = "rest_fallback"
 # 参与实时精筛的策略（funding_arb / oi_divergence 等不依赖 15M 的不在此列）
 # 不含 breakout：触发时价格已回踩到突破位，最新已收盘1H K线不再是「突破K线」，重跑 judge_breakout 会被
 #   「收盘价未突破近10根区间」误杀；breakout 的量能/突破幅度本来就基于已收盘突破K线，注册时的快照是准确的。
