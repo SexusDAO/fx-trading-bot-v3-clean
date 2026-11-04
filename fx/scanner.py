@@ -3617,6 +3617,19 @@ def _filter_and_register_signals(
                         expire_ts = min(expire_ts, _cut)
 
                     # 预算 entry_price（耗时 IO，在子线程做）
+                    # [fix] SW_REALTIME_JUDGE=True 时跳过，触发时再算，避免90+信号×IO串行爆炸
+                    try:
+                        from config import SW_REALTIME_JUDGE as _SRJ_SKIP
+                    except Exception:
+                        _SRJ_SKIP = False
+                    if _SRJ_SKIP:
+                        # 粗筛模式：只用 mark_price 作为 pre_entry_price，不拉 K 线/清算图
+                        sig["pre_entry_price"] = mark_p
+                        sig["_entry_params_ok"] = True
+                        entry_low, entry_high, entry_p = mark_p * 0.97, mark_p * 1.03, mark_p
+                        expire_ts_final = expire_ts
+                        prepared.append((sig, entry_low, entry_high, entry_p, expire_ts_final))
+                        continue
                     try:
                         k1h    = api.get_klines(sym, "1h", 50)
                         closed = k1h[:-1] if len(k1h) > 1 else k1h
