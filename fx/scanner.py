@@ -2561,7 +2561,18 @@ def refresh_pool() -> list:
         _sub_pool = [s for s in pool if s in _held_set or _is_stock_token_tradeable(s)]
         if len(_sub_pool) != len(pool):
             logger.debug(f"[scanner] hub 订阅跳过非交易时段股票代币 {len(pool) - len(_sub_pool)} 个")
-        _hub_subscribe_klines(_build_hub_sub_list(_held, _sub_pool))   # [refactor-signal-arch-v2] 原：["BTCUSDT"] + _held + _sub_pool
+        # [fix] SW_REALTIME_JUDGE模式下，hub只订阅 BTC+持仓+监控中信号，不订阅整个候选池
+        # 触发时K线走 REST 补（SW_REALTIME_JUDGE_NO_HUB="rest_fallback" 或精筛时拉取）
+        try:
+            from config import SW_REALTIME_JUDGE as _srj
+        except Exception:
+            _srj = False
+        if _srj:
+            # 只订阅 BTC + 持仓，SignalWatcher监控信号由触发时动态加入
+            _hub_subscribe_klines(_build_hub_sub_list(_held, []))
+            logger.debug(f"[hub] SW_REALTIME_JUDGE模式：只订阅BTC+持仓{len(_held)}个，候选池K线不预订阅")
+        else:
+            _hub_subscribe_klines(_build_hub_sub_list(_held, _sub_pool))   # [refactor-signal-arch-v2] 原：["BTCUSDT"] + _held + _sub_pool
         return pool
 
     except Exception as e:
