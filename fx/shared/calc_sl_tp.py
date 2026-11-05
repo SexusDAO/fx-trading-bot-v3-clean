@@ -1561,31 +1561,61 @@ def calc_sl_tp(
         max_pct = _SL_MAX_MAP.get(tier, _SL_MAX_PCT) * 100
         return {"error": f"止损距离 {sl_pct:.1f}% 超过 {max_pct:.0f}%（tier={tier}），拒绝信号"}
 
-    # ── funding_arb：止损 SL_ATR_MULT×ATR，不设 TP ──────────────────────────
+    # ── funding_arb：止损改为结构位+ATR缓冲，加 TP1 ──────────────────────
+    # [fix] 评审建议：
+    # 1. 止损优先用1H结构低/高点，ATR只做缓冲
+    # 2. 加 TP1：用上方/下方最近清算区（结算前平仓作为时间止盈兜底）
+    # 3. 资金费率作为盈利加成，不改变核心止盈止损逻辑
     if mode == "funding_arb":
         try:
             from config import FUNDING_ARB_SL_ATR_MULT as _FA_SL_MULT
         except Exception as _cfg_e:
-            _FA_SL_MULT = 1.5
+            _FA_SL_MULT = 1.0
             _cfg_fallback("FUNDING_ARB_SL_ATR_MULT", _cfg_e, {"value": _FA_SL_MULT})
-        if direction == "LONG":
-            sl = entry - atr * _FA_SL_MULT
+
+        # 止损：优先用1H摆动结构位
+        _fa_struct_sl = _swing_point_sl(k1h, direction, entry, atr) if k1h else None
+        if _fa_struct_sl is not None:
+            sl = _fa_struct_sl
+            _fa_sl_degraded = False
+            logger.info(f"[calc_sl_tp] funding_arb {direction} 结构止损: {sl:.6g}")
         else:
-            sl = entry + atr * _FA_SL_MULT
+            # 降级：ATR止损
+            sl = entry - atr * _FA_SL_MULT if direction == "LONG" else entry + atr * _FA_SL_MULT
+            _fa_sl_degraded = True
+
+        # TP1：用清算区结构位（有清算图）或 2×SL距离（降级）
+        _fa_tp1 = None
+        try:
+            _fa_liq_zones = liq_short if direction == "LONG" else liq_long
+            _fa_tp_zone = _nearest_liq_above(entry, atr, liq_short, dist_min=1.0, dist_max=5.0)                           if direction == "LONG" else                           _nearest_liq_below(entry, atr, liq_long, dist_min=1.0, dist_max=5.0)
+            if _fa_tp_zone:
+                if direction == "LONG":
+                    _fa_tp1 = round(_fa_tp_zone["price_low"] - atr * 0.1, 8)
+                else:
+                    _fa_tp1 = round(_fa_tp_zone["price_high"] + atr * 0.1, 8)
+        except Exception:
+            pass
+        if _fa_tp1 is None:
+            _fa_sl_dist = abs(entry - sl)
+            _fa_tp1 = round(entry + _fa_sl_dist * 2.0, 8) if direction == "LONG"                       else round(entry - _fa_sl_dist * 2.0, 8)
+
+        _fa_sl_pct = abs(entry - sl) / (entry + 1e-9) * 100
+        _fa_rr = abs(_fa_tp1 - entry) / (abs(entry - sl) + 1e-9) if _fa_tp1 else None
         return {
-            "entry_price":       round(entry, 8),
-            "sl_price":          round(sl, 8),
-            "tp1_price":         None,   # funding_arb 无固定止盈，由时间和费率驱动
-            "tp2_price":         None,
-            "sl_dist_pct":       round(abs(entry - sl) / (entry + 1e-9) * 100, 4),
-            "rr_tp1":            None,
-            "rr_tp2":            None,
-            "liq_data_available": False,
-            "sl_degraded":       False,
-            "tp_degraded":       False,
-            "entry_mode":        "immediate",
-            "liq_entry_raw":        None,
-            "liq_entry_dist_atr":  None,
+            "entry_price":        round(entry, 8),
+            "sl_price":           round(sl, 8),
+            "tp1_price":          _fa_tp1,
+            "tp2_price":          None,
+            "sl_dist_pct":        round(_fa_sl_pct, 4),
+            "rr_tp1":             round(_fa_rr, 2) if _fa_rr else None,
+            "rr_tp2":             None,
+            "liq_data_available": _fa_tp_zone is not None if '_fa_tp_zone' in dir() else False,
+            "sl_degraded":        _fa_sl_degraded,
+            "tp_degraded":        _fa_tp1 is None,
+            "entry_mode":         "immediate",
+            "liq_entry_raw":      None,
+            "liq_entry_dist_atr": None,
             "entry_degraded_reason": None,
         }
 

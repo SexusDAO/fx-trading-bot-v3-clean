@@ -1880,12 +1880,24 @@ def _prefetch_symbol(symbol: str, ticker: dict,
         if _over_budget("15m K线"):
             return None
         # 阶段5：klines=(k15, k1h, k4h) 由触发器传入 hub 快照时跳过 K 线 REST；不传时行为不变
-        k15 = klines[0] if klines else _get_klines_cached(symbol, "15m", 100)
-        if _over_budget("1h K线"):
-            return None
-        k1h = klines[1] if klines else _get_klines_cached(symbol, "1h",  100)
-        if not k1h or len(k1h) < 25:
-            return None
+        # [fix] SW_REALTIME_JUDGE=True 且非触发器路径时，粗筛只需要 ticker/价格数据，跳过 K 线 REST
+        try:
+            from config import SW_REALTIME_JUDGE as _srj_pf
+        except Exception:
+            _srj_pf = False
+        _is_realtime_ctx = bool((klines is not None) or False)
+        if _srj_pf and not _is_realtime_ctx and not (klines):
+            # 粗筛模式：用空K线，judge会走粗筛逻辑（_defer_rt=True跳过依赖K线的精筛）
+            k15 = []
+            k1h = [None] * 25  # 占位符，让长度检查通过
+            k4h_placeholder = []
+        else:
+            k15 = klines[0] if klines else _get_klines_cached(symbol, "15m", 100)
+            if _over_budget("1h K线"):
+                return None
+            k1h = klines[1] if klines else _get_klines_cached(symbol, "1h",  100)
+            if not k1h or len(k1h) < 25:
+                return None
 
         # [fix] 优先复用 run_scan 批量拉好的标记价格/资金费率；无数据时降级为单标的 REST
         if _over_budget("标记价格"):
@@ -2787,6 +2799,12 @@ def _filter_and_register_signals(
 
     # ── #1 相关性过滤：同方向同策略集中持仓保护 ─────────────────────────────────
     from config import CORR_MAX_REVERSAL_SAME_DIR, CORR_MAX_PULLBACK_SAME_DIR, CORR_MAX_SAME_DIR_TOTAL
+    # [fix] 相关性过滤上限跟随市场模式动态调整，不能写死
+    # 牛市：LONG上限放宽到 _dyn_max_long，空单上限收紧
+    # 熊市：SHORT上限放宽，多单上限收紧
+    _corr_max_long  = min(_dyn_max_long,  CORR_MAX_PULLBACK_SAME_DIR + (2 if _mkt_mode == "bull" else 0))
+    _corr_max_short = min(_dyn_max_short, CORR_MAX_PULLBACK_SAME_DIR + (2 if _mkt_mode == "bear" else 0))
+    _corr_max_total = max(CORR_MAX_SAME_DIR_TOTAL, _corr_max_long if _mkt_mode == "bull" else _corr_max_short)
     from shared.state import get_all_positions as _all_pos
     _open_pos = _all_pos()
     # 统计已有持仓的方向×策略分布（持仓 + SignalWatcher监控中的信号）
@@ -2895,7 +2913,14 @@ def _filter_and_register_signals(
                     "reason": f"震荡空单被拒(RSI4H={rsi_4h:.1f}<65 且 funding={funding:.5f}<=0)"})
         else:  # btc up
             # 牛市：需要真正超买
-            if rsi_4h >= 75 and funding >= 0.00005:
+            # [fix] ema_trend SHORT 在 BTC 牛市时直接拒绝：
+            # ema_trend 是趋势跟随策略，BTC 整体上涨时做空山寨4H空头排列胜率极低
+            _sig_type_s = sig.get("sig_type", "")
+            if _sig_type_s == "ema_trend":
+                result["rejected"].append({"symbol": sig["symbol"],
+                    "reason": f"BTC牛市禁止ema_trend SHORT（逆势趋势跟随胜率极低）"})
+                logger.info(f"[scanner] {sig['symbol']} ema_trend SHORT BTC牛市拦截")
+            elif rsi_4h >= 75 and funding >= 0.00005:
                 filtered_shorts.append(sig)
                 logger.info(f"[scanner] {sig['symbol']} 空单牛市超买通过: rsi4h={rsi_4h:.1f} funding={funding:.5f}")
             else:
@@ -3125,6 +3150,19 @@ def _filter_and_register_signals(
         elif _btc_trend == "up"   and direction == "SHORT": btc_adj = -5
         elif _btc_trend == "down" and direction == "LONG":  btc_adj = -5
         elif _btc_trend == "down" and direction == "SHORT": btc_adj = +5
+
+        # [fix] 极端资金费率对 reversal 信号加分（费率作为辅助条件而非独立策略）
+        # LONG reversal + 极端负费率（空头付费）→ +5分（费率支持做多）
+        # SHORT reversal + 极端正费率（多头付费）→ +5分（费率支持做空）
+        _sig_funding = float(sig.get("funding", ind.get("funding", 0)))
+        _fr_boost = 0
+        if _sig_type in ("reversal", "pullback", "ema_trend"):
+            if direction == "LONG" and _sig_funding < -0.001:   # 负费率超过0.1%
+                _fr_boost = +5
+            elif direction == "SHORT" and _sig_funding > 0.001:  # 正费率超过0.1%
+                _fr_boost = +5
+        if _fr_boost:
+            logger.debug(f"[scanner] {sig['symbol']} 极端费率({_sig_funding*100:.3f}%)加分 {_fr_boost:+d}")
         if btc_adj:
             logger.debug(f"[scanner] {sig['symbol']} btc_trend={_btc_trend} adj={btc_adj:+d}")
 
