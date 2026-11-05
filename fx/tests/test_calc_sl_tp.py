@@ -288,7 +288,7 @@ class TestVolatilityTierSLMult:
     def test_low_tier_sl_mult_1_2(self):
         """低波动层 SL 在入场价下方（小 ATR 时最小距离保护会覆盖 1.2×ATR）"""
         sig = _mock_signal("pullback", "LONG", tier="low")
-        r = calc_sl_tp(sig, MARK, ATR, {}, K1H, EMA20)
+        r = calc_sl_tp(sig, MARK, ATR, STANDARD_LIQ, K1H, EMA20)
         sl_dist = r["entry_price"] - r["sl_price"]
         assert sl_dist > 0, "SL 应在入场价下方"
 
