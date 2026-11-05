@@ -117,6 +117,13 @@ class WsOrderListener:
         self._keepalive_task:   Optional[asyncio.Task] = None
         self._force_order_task: Optional[asyncio.Task] = None
         self._rebuild_event:    asyncio.Event = asyncio.Event()
+        # [fix-ws-dynamic-subscribe] 协议级动态订阅：已有连接时用 SUBSCRIBE/UNSUBSCRIBE 消息增减订阅，
+        #   不再断开重连（原行为：每次 subscribe/unsubscribe 都置 _rebuild_event 强制重建，扫描注册信号时
+        #   markPrice 连接被反复重建，价格数据短暂中断）。
+        #   只有 从空变非空(首次连接)、断线重连 才真正重建。回退：删这三个属性并还原下方两个 _sync_* 与接收循环。
+        self._dynamic_sub_event:   asyncio.Event = asyncio.Event()
+        self._pending_subscribe:   set[str] = set()
+        self._pending_unsubscribe: set[str] = set()
 
         # [fix v3.91] markPrice 有限并发分发：在途任务计数 + 丢帧统计（仅事件循环线程访问，无需加锁）
         #   不用 Semaphore._value 判断：接收循环在缓冲有帧时可能不让出控制权，
@@ -319,15 +326,25 @@ class WsOrderListener:
         sym = symbol.upper()
         if sym not in self._subscribed:
             self._subscribed.add(sym)
+            self._pending_subscribe.add(sym)
+            self._pending_unsubscribe.discard(sym)
             logger.info(f"[ws] 订阅 markPrice: {sym}")
-            self._rebuild_event.set()
+            # 首次有订阅（从0变为1）才重建连接；已有连接时走动态订阅
+            # [fix-ws-dynamic-subscribe] 原：无条件 self._rebuild_event.set()
+            if len(self._subscribed) == 1:
+                self._rebuild_event.set()
+            else:
+                self._dynamic_sub_event.set()
 
     def _sync_unsubscribe(self, symbol: str) -> None:
         sym = symbol.upper()
         if sym in self._subscribed:
             self._subscribed.discard(sym)
+            self._pending_unsubscribe.add(sym)
+            self._pending_subscribe.discard(sym)
             logger.info(f"[ws] 取消订阅 markPrice: {sym}")
-            self._rebuild_event.set()
+            # [fix-ws-dynamic-subscribe] 原：self._rebuild_event.set()（每次退订都重连）
+            self._dynamic_sub_event.set()
 
     # ─────────────────────────────────────────────────────────────────────────
     # userData stream
@@ -448,6 +465,10 @@ class WsOrderListener:
             streams = "/".join(
                 f"{sym.lower()}@markPrice" for sym in sorted(self._subscribed)
             )
+            # [fix-ws-dynamic-subscribe] URL 已经包含当前全部订阅，发连接前攒下的增量队列作废（否则重连后
+            #   会重复 SUBSCRIBE 已在 URL 里的标的）。此处无 await，不会与 _sync_* 交错。
+            self._pending_subscribe.clear()
+            self._pending_unsubscribe.clear()
             url = MARK_PRICE_URL_TPL.format(streams=streams)
             logger.info(f"[ws] markPrice 连接: {len(self._subscribed)} 个标的")
 
@@ -462,15 +483,28 @@ class WsOrderListener:
                     _FB_MARK.opened()
                     ws_conn = ws
                     delay = RECONNECT_BASE
+                    # [fix-ws-dynamic-subscribe] 本次连接参数已按当前 _subscribed 建好，清掉建连前留下的
+                    #   重建标记，避免连上后又立刻因残留标记断开一次（原代码每次 subscribe 后会多重建一次）。
+                    self._rebuild_event.clear()
 
                     async for raw in ws:
                         self._stream_last_msg["markPrice"] = time.monotonic()
                         if self._stop_flag:
                             return
-                        # 检查是否需要重建（订阅列表变化）
+                        # 检查是否需要重建（只有首次连接/断线重连才置位）
                         if self._rebuild_event.is_set():
                             self._rebuild_event.clear()
-                            break  # 退出内层循环，重新连接
+                            break  # 只有真正需要重建时才断开
+                        # [fix-ws-dynamic-subscribe] 已有连接时走协议级动态订阅，不断线
+                        if self._dynamic_sub_event.is_set():
+                            self._dynamic_sub_event.clear()
+                            await self._apply_dynamic_subscriptions(ws)
+                            # 退订到空集合后不会再有帧进来，必须主动断开，否则内层循环永久阻塞，
+                            # 后续 subscribe 置的 _rebuild_event 也没机会被检查（原设计靠连接里仍有流
+                            # 持续推送才碰巧没卡死）。
+                            if not self._subscribed:
+                                self._rebuild_event.clear()
+                                break
                         # [fix] 有限并发分发：最多 _MP_MAX_INFLIGHT 个 dispatch 同时在途，超出直接丢弃（只保留最新价）
                         # 避免回调慢时任务无限堆积，同时不阻塞接收循环
                         if _MP_COALESCE:
@@ -492,6 +526,27 @@ class WsOrderListener:
                 delay = min(delay * 2, RECONNECT_MAX)
             finally:
                 ws_conn = None
+
+    async def _apply_dynamic_subscriptions(self, ws) -> None:
+        """用协议级 SUBSCRIBE/UNSUBSCRIBE 消息动态增减订阅，不重建连接。
+
+        [fix-ws-dynamic-subscribe] 新增方法。取出并清空待处理队列后按批发送；
+        发送失败（连接已断）由 _mark_price_loop 的异常分支接手重连。
+        """
+        to_sub   = list(self._pending_subscribe)
+        to_unsub = list(self._pending_unsubscribe)
+        self._pending_subscribe.clear()
+        self._pending_unsubscribe.clear()
+        if to_sub:
+            params = [f"{s.lower()}@markPrice" for s in to_sub]
+            msg = {"method": "SUBSCRIBE", "params": params, "id": 1}
+            await ws.send(json.dumps(msg))
+            logger.info(f"[ws] 动态订阅 {len(to_sub)} 个标的: {to_sub}")
+        if to_unsub:
+            params = [f"{s.lower()}@markPrice" for s in to_unsub]
+            msg = {"method": "UNSUBSCRIBE", "params": params, "id": 2}
+            await ws.send(json.dumps(msg))
+            logger.info(f"[ws] 动态取消订阅 {len(to_unsub)} 个标的: {to_unsub}")
 
     def _mp_coalesce(self, raw: str) -> None:
         """[refactor-B1] 只解析并记录每个标的最新价，不在接收循环里执行回调。"""
