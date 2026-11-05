@@ -1302,12 +1302,50 @@ def calc_sl_tp(
         sl, sl_degraded = _calc_sl(entry, atr, direction,
                                     liq_long, liq_short, tier, k1h=k1h)
 
-    # ── 2b. oi_divergence 止损回避清算密集带（v3.63b P1）────────────────────
-    # 评审建议（P2→P1 提升）：止损线恰好落在清算密集带内时，做市商极易猎杀。
-    # 当 mode=oi_divergence 时，主动检查 SL ±1% 范围内是否有 >$30万 同向清算。
-    # 若有，将 SL 外移至清算带外侧 +0.3% 作为缓冲。
-    # 阈值 $30万 比入场过滤（#6b $50万）更宽松：止损被猎杀的成本比不入场更高。
+    # ── 2b. oi_divergence 专属止损：反转结构失效位优先 ─────────────────────
+    # [fix] 评审建议：oi_divergence 止损应优先用价格反转结构的失效点
+    # LONG：止损 = 24H最低价 × 0.997（价格重创新低说明OI背离信号失效）
+    # SHORT：止损 = 24H最高价 × 1.003（价格重创新高说明信号失效）
+    # 若结构止损超过最大允许距离，降级用清算区止损
     if mode == "oi_divergence":
+        try:
+            _oid_low_24h  = float((signal.get("ind") or {}).get("low_24h") or 0)
+            _oid_high_24h = float((signal.get("ind") or {}).get("high_24h") or 0)
+            _max_sl_pct   = {"low": 0.12, "mid": 0.15, "high": 0.20}.get(tier, 0.15)
+            _oid_sl_struct = None
+            if direction == "LONG" and _oid_low_24h > 0:
+                _oid_sl_struct = round(_oid_low_24h * 0.997, 8)
+                _sl_pct = (entry - _oid_sl_struct) / (entry + 1e-9)
+                if _sl_pct <= _max_sl_pct:
+                    sl = _oid_sl_struct
+                    sl_degraded = False
+                    logger.info(
+                        f"[calc_sl_tp] oi_div LONG 结构失效止损: "
+                        f"24H低点={_oid_low_24h:.6g} → SL={sl:.6g} ({_sl_pct*100:.1f}%)"
+                    )
+                else:
+                    logger.info(
+                        f"[calc_sl_tp] oi_div LONG 结构止损过远({_sl_pct*100:.1f}%)，降级清算区止损"
+                    )
+            elif direction == "SHORT" and _oid_high_24h > 0:
+                _oid_sl_struct = round(_oid_high_24h * 1.003, 8)
+                _sl_pct = (_oid_sl_struct - entry) / (entry + 1e-9)
+                if _sl_pct <= _max_sl_pct:
+                    sl = _oid_sl_struct
+                    sl_degraded = False
+                    logger.info(
+                        f"[calc_sl_tp] oi_div SHORT 结构失效止损: "
+                        f"24H高点={_oid_high_24h:.6g} → SL={sl:.6g} ({_sl_pct*100:.1f}%)"
+                    )
+                else:
+                    logger.info(
+                        f"[calc_sl_tp] oi_div SHORT 结构止损过远({_sl_pct*100:.1f}%)，降级清算区止损"
+                    )
+        except Exception as _oid_sl_e:
+            logger.debug(f"[calc_sl_tp] oi_div 结构止损计算异常（跳过）: {_oid_sl_e}")
+
+        # 清算密集带回避（保留原逻辑）
+        try:
         try:
             _liq_sl_symbol = signal.get("symbol", "")
             _liq_sl_zones  = liq_short if direction == "SHORT" else liq_long

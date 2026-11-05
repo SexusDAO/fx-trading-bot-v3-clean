@@ -3658,24 +3658,17 @@ def _judge_oi_divergence_impl(k1h, k4h, k15, ind, chg24, funding):
                     f"(support={_liq_support/1000:.0f}k against={_liq_against/1000:.0f}k)"
                     f"，跳过方向性比值检查"
                 )
-            # 信号方向量不足而对手方有数据 → 拒绝
+            # [fix] 评审建议：清算图数据不足时降级而非拒绝
             elif _liq_support < _LIQ_ABS_MIN:
-                out["reject_reason"] = (
-                    f"清算图方向不利({direction}): {_dir_label_sup}清算量不足"
-                    f"({_liq_support/1000:.0f}k USD < {_LIQ_ABS_MIN/1000:.0f}k)，"
-                    f"缺乏方向催化，{_dir_label_opp}={_liq_against/1000:.0f}k"
-                )
-                return False, out
-            # 比值不足 → 拒绝
+                out["signal_strength"] = "medium"
+                out["liq_dir_insufficient"] = True
+                logger.debug(f"[judge_oi_divergence] {direction} 清算量不足({_liq_support/1000:.0f}k)，降级medium")
+            # 比值不足 → 降级而非拒绝
             elif _liq_against > 0 and (_liq_support / _liq_against) < _LIQ_RATIO_MIN:
                 _ratio = _liq_support / _liq_against
-                out["reject_reason"] = (
-                    f"清算图比值不足({direction}): {_dir_label_sup}={_liq_support/1000:.0f}k "
-                    f"/ {_dir_label_opp}={_liq_against/1000:.0f}k "
-                    f"= {_ratio:.2f} < {_LIQ_RATIO_MIN}，"
-                    f"反向清算压力过大，市场更可能朝反方向扫仓"
-                )
-                return False, out
+                out["signal_strength"] = "medium"
+                out["liq_dir_ratio_low"] = round(_ratio, 2)
+                logger.info(f"[judge_oi_divergence] {direction} 清算比值偏低{_ratio:.2f}<{_LIQ_RATIO_MIN}，降级medium")
             else:
                 _ratio_log = (_liq_support / _liq_against) if _liq_against > 0 else float("inf")
                 logger.info(
@@ -3858,6 +3851,21 @@ def _judge_oi_divergence_impl(k1h, k4h, k15, ind, chg24, funding):
         return False, out
     out["rsi_zone_check"] = "passed"
 
+    # ── 6f. 4H OI 持续性确认（加分项，不硬性条件）─────────────────────────
+    # [fix] 评审建议：1H OI可能是噪声，4H OI同向变化说明持仓变化有持续性
+    _oi_4h_ago = ind.get("oi_4h_ago", 0.0)  # 由scanner注入（如有）
+    if _oi_4h_ago > 0 and oi_now > 0:
+        _oi_4h_chg = (oi_now - _oi_4h_ago) / (_oi_4h_ago + 1e-9)
+        out["oi_4h_change_pct"] = round(_oi_4h_chg * 100, 2)
+        if direction == "LONG" and _oi_4h_chg >= 0.05:
+            out["oi_4h_confirm"] = True   # 4H OI上涨≥5%，持仓变化有持续性
+        elif direction == "SHORT" and _oi_4h_chg <= -0.05:
+            out["oi_4h_confirm"] = True
+        else:
+            out["oi_4h_confirm"] = False
+    else:
+        out["oi_4h_confirm"] = None   # 数据不可用，不影响判断
+
     # ── 7. 4H EMA 结构确认（不强制，但影响强度评级） ─────────────────────
     ema20_4h = ind.get("ema20_4h", 0.0)
     ema50_4h = ind.get("ema50_4h", 0.0)
@@ -3870,10 +3878,11 @@ def _judge_oi_divergence_impl(k1h, k4h, k15, ind, chg24, funding):
 
     # ── 8. 强度评级 ───────────────────────────────────────────────────────
     # strong：RSI 极端 + EMA 对齐 + OI 变化显著（>15%）
-    rsi_extreme = (direction == "LONG" and rsi_1h < 35) or (direction == "SHORT" and rsi_1h > 65)
-    oi_strong   = abs(oi_change) >= 0.15
+    rsi_extreme  = (direction == "LONG" and rsi_1h < 35) or (direction == "SHORT" and rsi_1h > 65)
+    oi_strong    = abs(oi_change) >= 0.15
+    oi_4h_ok     = bool(out.get("oi_4h_confirm"))  # 4H OI持续性确认
 
-    strong_count = sum([rsi_extreme, oi_strong, ema_aligned])
+    strong_count = sum([rsi_extreme, oi_strong, ema_aligned, oi_4h_ok])
     if strong_count >= 2:
         strength = "strong"
         base_score = _BASE_STRONG
