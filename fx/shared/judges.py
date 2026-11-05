@@ -3002,20 +3002,25 @@ def _judge_stop_hunt_impl(k1h, k4h, k15, ind, chg24, funding):
         _pl_lo, _pl_hi = pivot_low_val * (1 - _TOUCH_RANGE), pivot_low_val * (1 + _TOUCH_RANGE)
         _touch_low = sum(1 for _ki, _lo in enumerate(lows_1h)
                          if _ki != pivot_low_idx and _pl_lo <= _lo <= _pl_hi)
-        if _touch_low < _TOUCH_MIN:
-            pivot_low_val = pivot_low_idx = None
+        # [fix] 评审建议：触碰次数改为分级，不硬性要求>=2次
+        # 首次触碰允许候选，多次触碰作加分项
+        if _touch_low < 1:
+            pivot_low_val = pivot_low_idx = None  # 完全没触碰过才作废
     if pivot_high_val is not None:
         _ph_lo, _ph_hi = pivot_high_val * (1 - _TOUCH_RANGE), pivot_high_val * (1 + _TOUCH_RANGE)
         _touch_high = sum(1 for _ki, _hi in enumerate(highs_1h)
                           if _ki != pivot_high_idx and _ph_lo <= _hi <= _ph_hi)
-        if _touch_high < _TOUCH_MIN:
+        if _touch_high < 1:
             pivot_high_val = pivot_high_idx = None
     if pivot_low_val is None and pivot_high_val is None:
         out["reject_reason"] = (
             f"insufficient_pivot_touches: 前低触碰 {_touch_low} 次 / 前高触碰 {_touch_high} 次"
-            f"（各需>={_TOUCH_MIN}）"
+            f"（各需>=1）"
         )
         return False, out
+    # 多次触碰作加分项（写入out供评分层使用）
+    out["pivot_touch_low"]  = _touch_low  if pivot_low_val  is not None else 0
+    out["pivot_touch_high"] = _touch_high if pivot_high_val is not None else 0
     logger.debug(
         f"[judge_stop_hunt] pivot 触碰次数通过: low={pivot_low_val}({_touch_low}次) "
         f"high={pivot_high_val}({_touch_high}次)"
@@ -3268,22 +3273,21 @@ def _judge_stop_hunt_impl(k1h, k4h, k15, ind, chg24, funding):
         _CONS_BARS, _CONS_PCT = 8, 0.02
 
     if len(k1h) > _CONS_BARS + 4:
-        _cons_k1h    = k1h[-(  _CONS_BARS + 2):-1]           # 已闭合的最后 _CONS_BARS 根
+        _cons_k1h    = k1h[-(  _CONS_BARS + 2):-1]
         _cons_closes = [float(k[4]) for k in _cons_k1h[-_CONS_BARS:]]
         _cons_low    = pivot_val * (1 - _CONS_PCT)
         _cons_high   = pivot_val * (1 + _CONS_PCT)
         _out_count   = sum(1 for c in _cons_closes if not (_cons_low <= c <= _cons_high))
-        if _out_count > 0:
-            out["reject_reason"] = (
-                f"no_consolidation_before_sweep: 刺穿前{_CONS_BARS}根 1H 中有 {_out_count} 根"
-                f"收盘价超出 pivot({pivot_val:.4g})±{_CONS_PCT*100:.0f}%"
-            )
-            logger.info(
-                f"[judge_stop_hunt] 横盘积累不足拒绝: "
-                f"pivot={pivot_val:.4g} 范围=[{_cons_low:.4g},{_cons_high:.4g}] "
-                f"超出{_out_count}/{_CONS_BARS}根"
-            )
-            return False, out
+        # [fix] 评审建议：横盘不是必须条件，改为加分项
+        # 横盘后扫单（_out_count=0）：正常候选
+        # 趋势中关键位扫单（_out_count>0）：允许候选，但降分
+        out["consolidation_quality"] = max(0, _CONS_BARS - _out_count) / _CONS_BARS
+        if _out_count == 0:
+            out["strategy_adj"] = out.get("strategy_adj", 0) + 5  # 横盘后扫单加分
+            logger.debug(f"[judge_stop_hunt] 横盘积累良好，strategy_adj+5")
+        elif _out_count >= _CONS_BARS // 2:
+            out["strategy_adj"] = out.get("strategy_adj", 0) - 5  # 无横盘扣分
+            logger.debug(f"[judge_stop_hunt] 无明显横盘({_out_count}/{_CONS_BARS}根超出)，strategy_adj-5")
     # k1h 数据不足时降级，不拒绝
 
     # ── 8d. 资金费率方向软惩罚──────────────────────────────────────────────────

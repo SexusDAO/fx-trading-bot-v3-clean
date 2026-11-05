@@ -1457,13 +1457,31 @@ def calc_sl_tp(
         _sweep_extreme = float(_jd.get("sweep_extreme") or _jd.get("pierce_extreme") or
                                signal.get("sl_price_hint") or 0)
         if _ref_level > 0 and _sweep_extreme > 0:
-            # SL：extreme 外侧 0.3%
+            # SL：extreme 外侧 ATR 缓冲（评审建议：结构点+ATR缓冲，不用固定0.3%）
             if direction == "LONG":
-                sl  = round(_sweep_extreme * 0.997, 8)
-                tp1 = round(_ref_level * 0.999, 8)     # 前低稍下方一点点，避免精确触处
+                sl  = round(_sweep_extreme - atr * 0.2, 8)
+                # [fix] 评审建议：TP1 不能用被扫的前低（在入场价下方）
+                # LONG 收回前低后，TP1 应该在上方结构位
+                # 优先用近20根1H最高价作为阻力目标，降级用 entry + 2×SL距离
+                _recent_highs_sh = [float(k[2]) for k in k1h[-20:]] if k1h else []
+                _above_highs = [h for h in _recent_highs_sh if h > entry * 1.005]
+                if _above_highs:
+                    _nearest_high = min(_above_highs)  # 最近的上方阻力
+                    tp1 = round(_nearest_high * 0.995, 8)
+                else:
+                    _sl_dist_sh_tmp = abs(entry - round(_sweep_extreme - atr * 0.2, 8))
+                    tp1 = round(entry + _sl_dist_sh_tmp * 2.0, 8)
             else:
-                sl  = round(_sweep_extreme * 1.003, 8)
-                tp1 = round(_ref_level * 1.001, 8)     # 前高稍上方一点点
+                sl  = round(_sweep_extreme + atr * 0.2, 8)
+                # [fix] SHORT 收回前高后，TP1 应该在下方结构位
+                _recent_lows_sh = [float(k[3]) for k in k1h[-20:]] if k1h else []
+                _below_lows = [l for l in _recent_lows_sh if l < entry * 0.995]
+                if _below_lows:
+                    _nearest_low = max(_below_lows)  # 最近的下方支撑
+                    tp1 = round(_nearest_low * 1.005, 8)
+                else:
+                    _sl_dist_sh_tmp = abs(round(_sweep_extreme + atr * 0.2, 8) - entry)
+                    tp1 = round(entry - _sl_dist_sh_tmp * 2.0, 8)
             sl_degraded = False
 
             # 止损距离上限检查
