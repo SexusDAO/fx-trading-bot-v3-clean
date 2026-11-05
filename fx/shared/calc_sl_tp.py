@@ -1456,7 +1456,7 @@ def calc_sl_tp(
 
     # [结构优先] sl_degraded=True（无结构止损位）直接拒绝，不降仓继续开
     # 原逻辑降仓50%继续开，止损位置仍不合理，两头都不占便宜
-    if sl_degraded and mode in ("pullback", "ema_trend", "reversal", "range_bounce"):
+    if sl_degraded and mode in ("pullback", "ema_trend", "reversal", "range_bounce", "oi_divergence"):
         logger.info(
             f"[calc_sl_tp] {mode} {direction} 无结构止损位（sl_degraded），拒绝信号"
         )
