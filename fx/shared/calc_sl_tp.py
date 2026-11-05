@@ -696,32 +696,35 @@ def _calc_sl(entry: float, atr: float, direction: str,
             degraded = True
         sl = max(sl, entry + atr * 0.5)
 
-    # ── v3.27: 结构止损保护（摆动高/低点）────────────────────────────────────
-    # 在清算图/ATR止损基础上，若近期有效摆动点更宽，取更宽值
-    # 目的：防止止损挂在「庄家已知的 entry+1ATR」而被精准扫损
+    # ── v3.27: 结构止损（摆动高/低点）— 结构优先，不强行取更宽 ──────────────────
+    # [fix] 评审建议：先确定结构失效位，再检查清算区冲突，不无条件取更宽值。
+    # 有清算区止损时：摆动点只在更近（更保护）时才采用，不往外推。
+    # 无清算区降级时：摆动点是唯一结构依据，优先采用。
     if k1h:
         _struct_sl = _swing_point_sl(k1h, direction, entry, atr)
         if _struct_sl is not None:
-            if direction == "SHORT" and _struct_sl > sl:
-                _old = sl
-                sl = _struct_sl
-                # [v3.87 STEP4-1] 删除无效赋值 sl_degraded = True：本函数最终返回的是变量 degraded，
-                #   这里的 sl_degraded 是局部遮蔽变量，从未传出。摆动点保护加宽止损「有意不触发降级」（降级会让执行器减半仓位），
-                #   删除赋值不改变任何行为，仅消除误导。
-                logger.info(
-                    f"[calc_sl] SHORT 结构止损保护: "
-                    f"原={_old:.6g} → 摆动高点={sl:.6g} "
-                    f"(+{(_struct_sl/_old-1)*100:.1f}%)"
-                )
-            elif direction == "LONG" and _struct_sl < sl:
-                _old = sl
-                sl = _struct_sl
-                # [v3.87 STEP4-1] 同上：无效赋值已删除，摆动点保护有意不触发降级。
-                logger.info(
-                    f"[calc_sl] LONG 结构止损保护: "
-                    f"原={_old:.6g} → 摆动低点={sl:.6g} "
-                    f"(-{(1-_struct_sl/_old)*100:.1f}%)"
-                )
+            if direction == "SHORT":
+                if degraded:
+                    # 降级情况：摆动点是唯一结构位，直接用
+                    sl = _struct_sl
+                    degraded = False
+                    logger.info(f"[calc_sl] SHORT 摆动结构止损(降级恢复): {sl:.6g}")
+                elif _struct_sl < sl:
+                    # 有清算区：摆动点更近（更紧），取更紧值（更合理的结构位）
+                    _old = sl
+                    sl = _struct_sl
+                    logger.info(f"[calc_sl] SHORT 结构止损收紧: {_old:.6g}→{sl:.6g}")
+                # 摆动点更宽时不采用（不无条件外推止损）
+            elif direction == "LONG":
+                if degraded:
+                    sl = _struct_sl
+                    degraded = False
+                    logger.info(f"[calc_sl] LONG 摆动结构止损(降级恢复): {sl:.6g}")
+                elif _struct_sl > sl:
+                    _old = sl
+                    sl = _struct_sl
+                    logger.info(f"[calc_sl] LONG 结构止损收紧: {_old:.6g}→{sl:.6g}")
+                # 摆动点更宽时不采用（不无条件外推止损）
 
     # ── SL 最小距离保护（v3.37.1: 按 tier 动态设置）────────────────────────
     # low=2.5%（低波动，噪音小）/ mid=3.0%（正常山寨）/ high=5.0%（高波动，ATR大）
