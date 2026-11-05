@@ -172,7 +172,7 @@ def _fetch_from_clawby(symbol: str, current_price: float,
                 if val < 50_000:
                     continue
                 zone = {"price_low": price * 0.998, "price_high": price * 1.002,
-                        "amount": val}
+                        "liq_usd": val}
                 if price < current_price:
                     long_zones.append(zone)
                 else:
