@@ -4007,7 +4007,7 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
         import config as _config_mod
     except Exception:
         _config_mod = None
-    _rsi4h_max_short = getattr(_config_mod, "EMA_TREND_RSI4H_SHORT_MAX", 52)
+    _rsi4h_max_short = getattr(_config_mod, "EMA_TREND_RSI4H_SHORT_MAX", 55)  # [fix] 评审建议48→55，空头趋势中RSI50~55不代表反转
     _rsi4h_max_eff = _rsi4h_max_short if _ema_direction == "short" else _RSI4H_MAX
     _chg24_min_eff = -12.0 if _ema_direction == "short" else _CHG24_MIN
     _chg24_max_eff = 8.0 if _ema_direction == "short" else _CHG24_MAX
@@ -4110,6 +4110,35 @@ def _judge_ema_trend_impl(k1h, k4h, k15, ind, chg24, funding):
             f"做空量能不足: vol_ratio={_vr45:.2f} < {_vol_min_short}，缩量结构不支持做空"
         )
         return False, out
+
+    # ── 4.8 4H EMA20 斜率判断（趋势动能检查）────────────────────────────────
+    # [fix] 评审建议：EMA20>EMA50不代表趋势仍然强劲，需要检查EMA20斜率
+    # 斜率过平（趋势失去动能）时降级，斜率反向时拒绝
+    if len(k4h) >= 10:
+        try:
+            _k4h_closed_et = k4h[:-1] if len(k4h) > 1 else k4h
+            _closes_et = [float(_k[4]) for _k in _k4h_closed_et[-10:]]
+            if len(_closes_et) >= 10:
+                _ema_now_et = sum(_closes_et[-5:]) / 5
+                _ema_old_et = sum(_closes_et[-10:-5]) / 5
+                _slope_et = (_ema_now_et - _ema_old_et) / (_ema_old_et + 1e-9) * 100
+                out["ema20_4h_slope"] = round(_slope_et, 4)
+                # 斜率与方向相反（趋势已反转）→ 拒绝
+                if _ema_direction == "long" and _slope_et < -0.3:
+                    out["reject_reason"] = f"EMA20斜率向下({_slope_et:.2f}%/5根)，多头趋势已失去动能"
+                    return False, out
+                if _ema_direction == "short" and _slope_et > 0.3:
+                    out["reject_reason"] = f"EMA20斜率向上({_slope_et:.2f}%/5根)，空头趋势已失去动能"
+                    return False, out
+                # 斜率过平（动能弱）→ 降级 medium，不拒绝
+                if _ema_direction == "long" and _slope_et < 0.1:
+                    out["signal_strength"] = "medium"
+                    logger.debug(f"[judge_ema_trend] EMA20斜率过平({_slope_et:.2f}%)，降级medium")
+                elif _ema_direction == "short" and _slope_et > -0.1:
+                    out["signal_strength"] = "medium"
+                    logger.debug(f"[judge_ema_trend] EMA20斜率过平({_slope_et:.2f}%)，降级medium")
+        except Exception as _slope_e:
+            logger.debug(f"[judge_ema_trend] EMA20斜率计算异常（跳过）: {_slope_e}")
 
     # ── 5. 价格在 EMA20 附近回踩（v3.64：按方向分化）────────────────────
     # LONG：价格从上方靠近 EMA20 支撑（正常回踩）

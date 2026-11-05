@@ -1138,6 +1138,30 @@ def calc_sl_tp(
         # 如果 signal 里已有 fill_price / entry_price，上方已经走 _fixed_entry 分支
         entry  = mark_price
         e_mode = "limit"
+    elif mode == "ema_trend":
+        # [fix] 评审建议：ema_trend 入场改为确认后限价等真实回踩
+        # 策略核心：价格回踩4H EMA20确认止跌后入场
+        # 原逻辑市价追入，可能已偏离EMA20 1~2ATR
+        # 新逻辑：在EMA20附近挂限价，LONG在现价下方0.2ATR，SHORT在现价上方0.2ATR
+        # 距离比reversal更小（0.2 vs 0.3），因为ema_trend确认时偏离EMA20更近
+        _jd_et = signal.get("judge_detail") or signal.get("reason") or {}
+        _ema20_et = float(_jd_et.get("ema20_4h") or (signal.get("ind") or {}).get("ema20_4h") or 0)
+        if direction == "LONG":
+            if _ema20_et > 0 and mark_price > _ema20_et:
+                # 在EMA20上方0.1ATR挂单，贴近支撑位
+                entry  = round(_ema20_et + atr * 0.1, 8)
+            else:
+                entry  = round(mark_price - atr * 0.2, 8)
+            e_mode = "limit"
+        else:
+            if _ema20_et > 0 and mark_price < _ema20_et:
+                # 在EMA20下方0.1ATR挂单，贴近阻力位
+                entry  = round(_ema20_et - atr * 0.1, 8)
+            else:
+                entry  = round(mark_price + atr * 0.2, 8)
+            e_mode = "limit"
+        logger.info(f"[calc_sl_tp] ema_trend {direction} 限价入场: ema20={_ema20_et:.6g} mark={mark_price:.6g} entry={entry:.6g}")
+
     elif mode == "oi_divergence":
         # v3.63: P0 修复——入场价改为"近期高点回落 1.8%"逻辑
         #
