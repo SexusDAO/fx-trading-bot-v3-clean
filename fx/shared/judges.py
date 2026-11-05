@@ -2703,17 +2703,39 @@ def _judge_range_bounce_impl(k1h, k4h, k15, ind, chg24, funding):
         out["reject_reason"] = f"大涨幅度不足: pre_gain={pre_gain:.1f}%<15%"
         return False, out
 
-    # ── 2. 高点之后横盘区间（振幅 ≤ 20%，至少2根）───────────────────────
+    # ── 2. 高点之后横盘区间（振幅 ≤ 20%，至少4根）───────────────────────
+    # [fix] 评审建议：至少4根才能形成有效横盘（原2根太少），同时用影线计算真实区间
     post_peak_closes = closes[peak_abs_idx:]
-    if len(post_peak_closes) < 2:
-        out["reject_reason"] = "高点后K线数不足(<2根)，尚未形成横盘"
+    post_peak_k = k1h[peak_abs_idx:]   # 完整K线，含影线
+    if len(post_peak_closes) < 4:
+        out["reject_reason"] = f"高点后K线数不足(<4根，当前{len(post_peak_closes)}根)，尚未形成横盘"
         return False, out
+
+    # 收盘价区间（判断有效支撑）
     c_high  = max(post_peak_closes)
     c_low   = min(post_peak_closes)
-    c_range = (c_high - c_low) / (c_low + 1e-9) * 100
+    # [fix] 评审建议：影线低点用于确定真实支撑区域
+    wick_low  = min(float(k[3]) for k in post_peak_k)   # 最低影线
+    wick_high = max(float(k[2]) for k in post_peak_k)   # 最高影线
+
+    # 振幅用影线计算（更真实）
+    c_range = (wick_high - wick_low) / (wick_low + 1e-9) * 100
     if c_range > 20:
-        out["reject_reason"] = f"横盘区间过宽: {c_range:.1f}%>20%，非横盘而是继续波动"
+        out["reject_reason"] = f"横盘区间过宽: {c_range:.1f}%>20%（影线口径），非横盘"
         return False, out
+
+    # 收盘价振幅过宽（派发出货特征）
+    c_close_range = (c_high - c_low) / (c_low + 1e-9) * 100
+    if c_close_range > 15:
+        out["reject_reason"] = f"收盘价振幅过宽: {c_close_range:.1f}%>15%，可能是派发而非蓄势"
+        return False, out
+
+    # [fix] 评审建议：区间失效判断——最近2根收盘连续跌破c_low说明支撑已失效
+    if len(post_peak_closes) >= 2:
+        _recent2 = post_peak_closes[-2:]
+        if all(c < c_low * 0.998 for c in _recent2):
+            out["reject_reason"] = f"区间支撑失效：最近2根收盘({_recent2[-2]:.5g},{_recent2[-1]:.5g})连续跌破c_low={c_low:.5g}"
+            return False, out
 
     # ── 3. 当前价在横盘区间下半部（距下沿 40% 以内）────────────────────
     zone_mid = (c_high + c_low) / 2
@@ -2751,6 +2773,31 @@ def _judge_range_bounce_impl(k1h, k4h, k15, ind, chg24, funding):
         if gap_4h < -5.0:
             out["reject_reason"] = f"4H强空头(gap={gap_4h:.1f}%<-5%)，支撑可能是下跌中继"
             return False, out
+
+    # ── 6.5 横盘成交量衰减判断（加分项，区分蓄势和派发）────────────────────
+    # [fix] 评审建议：缩量横盘=蓄势，放量下跌=派发，不能用同一套逻辑
+    # 计算横盘阶段成交量均值 vs 拉升阶段成交量均值
+    try:
+        _rise_k   = k1h[max(0, peak_abs_idx-6):peak_abs_idx]   # 拉升阶段K线
+        _range_k  = k1h[peak_abs_idx:]                           # 横盘阶段K线
+        if len(_rise_k) >= 2 and len(_range_k) >= 2:
+            _rise_vol_avg  = sum(float(k[5]) for k in _rise_k)  / len(_rise_k)
+            _range_vol_avg = sum(float(k[5]) for k in _range_k) / len(_range_k)
+            _vol_shrink_ratio = _range_vol_avg / (_rise_vol_avg + 1e-9)
+            out["range_vol_shrink_ratio"] = round(_vol_shrink_ratio, 3)
+            if _vol_shrink_ratio < 0.6:
+                # 横盘成交量 < 拉升的60%：典型缩量蓄势，升级信号
+                out["vol_shrink_confirm"] = True
+                if out.get("signal_strength") == "medium":
+                    out["signal_strength"] = "strong"
+                    out["position_size_cap"] = min(out.get("position_size_cap", 0.3) * 1.5, 0.5)
+            elif _vol_shrink_ratio > 1.2:
+                # 横盘成交量 > 拉升的120%：放量横盘，可能是派发，降级
+                out["vol_shrink_confirm"] = False
+                out["position_size_cap"]  = round(out.get("position_size_cap", 0.3) * 0.7, 4)
+                logger.info(f"[judge_range_bounce] 横盘放量({_vol_shrink_ratio:.2f}x)，可能派发，降级仓位")
+    except Exception as _vol_rb_e:
+        logger.debug(f"[judge_range_bounce] 成交量衰减检查异常（跳过）: {_vol_rb_e}")
 
     # ── 7. 脉冲大阳保护（不在庄家拉盘途中追多）──────────────────────────
     _pulse = _is_pulse_candle(k1h, k4h)
