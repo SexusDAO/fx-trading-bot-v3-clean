@@ -1346,7 +1346,6 @@ def calc_sl_tp(
 
         # 清算密集带回避（保留原逻辑）
         try:
-        try:
             _liq_sl_symbol = signal.get("symbol", "")
             _liq_sl_zones  = liq_short if direction == "SHORT" else liq_long
             if _liq_sl_symbol and not _liq_sl_zones:
