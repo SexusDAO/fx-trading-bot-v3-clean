@@ -1102,8 +1102,18 @@ def calc_sl_tp(
         entry, e_mode = _entry_breakout(mark_price, atr,
                                          liq_long, liq_short, direction)
     elif mode == "reversal":
-        entry, e_mode, _degrade_info = _entry_reversal(mark_price, atr,
-                                         liq_long, liq_short, direction, entry_mode_hint)
+        # [fix] 评审建议：reversal 入场改为确认后等小幅回踩限价，而非清算区锚点
+        # 15M止跌确认后，价格可能已反弹一段，直接市价追入容易买在短线反弹末端
+        # 新逻辑：在确认位附近 mark ± 0.3ATR 挂限价，等小幅回踩再成交
+        # 若价格直接继续反弹不回踩，限价单自然过期撤销，不追单
+        if direction == "LONG":
+            entry  = mark_price - atr * 0.3   # 确认位下方0.3ATR等回踩
+            e_mode = "limit"
+        else:
+            entry  = mark_price + atr * 0.3   # 确认位上方0.3ATR等回抽
+            e_mode = "limit"
+        _degrade_info = {}
+        logger.info(f"[calc_sl_tp] reversal {direction} 确认后限价入场: mark={mark_price:.6g} entry={entry:.6g}")
     elif mode == "funding_arb":
         # funding_arb 市价立即入场，SL = entry ± 1.5 ATR，不设 TP
         entry  = mark_price

@@ -1551,10 +1551,21 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
             out["reject_reason"] = "4H K线数据不足,无法判断摆动低点结构"
             return False, out
         if hl_status == "reject":
+            # [fix] 评审建议：4H下跌通道不直接拒绝，改为分级处理
+            # 检查是否是加速下跌（持续加速才拒绝，减速中的通道允许降级候选）
             swing_lows = _swing_lows_4h(k4h)
             low_desc = f"{swing_lows[-2]:.6g}→{swing_lows[-1]:.6g}" if len(swing_lows) >= 2 else "?"
-            out["reject_reason"] = f"4H下跌通道:摆动低点依次降低({low_desc}),不允许做多reversal"
-            return False, out
+            # 检查最近1H跌势是否在减速（有衰竭迹象允许降级进入）
+            _decel_check = _deceleration_1h(k1h, "LONG") if k1h else False
+            if not _decel_check:
+                # 持续加速下跌：拒绝
+                out["reject_reason"] = f"4H下跌通道且跌势未减速({low_desc}),拒绝reversal LONG"
+                return False, out
+            else:
+                # 下跌减速但尚未形成更高低点：降级候选，仓位压到0.3
+                out["hl_status_override"] = "decel_in_downtrend"
+                hl_cap_mult = 0.5  # 仓位减半
+                logger.info(f"[judge_reversal] 4H下跌通道但跌势减速({low_desc})，降级候选 cap×0.5")
         # degraded:仅找到一个摆动低点,仓位减半(后面统一应用 hl_cap_mult)
     else:
         out["higher_low_status"]   = "skipped"
@@ -1821,8 +1832,7 @@ def _judge_reversal_impl(k1h, k4h, k15, ind, chg24, funding):
         out["funding_extreme"],
         out["rsi_extreme"],
         out.get("dual_window_resonance", False),
-        (out.get("liq_zone_below_amount") or 0) >= 3_000_000 if direction == "LONG"
-        else (out.get("liq_zone_above_amount") or 0) >= 3_000_000,
+        bool(out.get("liq_zone_strong", False)),   # [fix] 清算区只作加分，不直接决定仓位
         out.get("extra_structure_met", False),  # v3.6: 做空额外结构确认纳入加分
     ]
     strong_count = sum(strong_items)
@@ -2241,21 +2251,22 @@ def _fill_reversal_liq(out: dict, price: float, direction: str,
             total = sum(z.get("liq_usd", 0) for z in zones
                         if 0 < price - z["price_high"] < atr * 2)
             out["liq_zone_below_amount"] = round(total, 0)
+            # [fix] 评审建议：清算区只参与评分，不直接决定仓位上限
+            # 仓位由信号强度统一决定，清算区作为 strong 加分项写入 out
             if total >= 3_000_000:
-                out["position_size_cap"] = 0.5 if out.get("extreme_candle_flag") else 0.75
-                # v3.6 bugfix: reversal SHORT 不设 pending_order（清算区可能在价格上方很远，永不成交）
+                out["liq_zone_strong"] = True   # 供信号强度分级使用
                 out["entry_mode"] = "immediate"
             elif total >= 1_000_000:
-                out["position_size_cap"] = 0.5
+                out["liq_zone_moderate"] = True
         else:
             zones = get_liq_zones(symbol, "SHORT", price, range_="24h")
             total = sum(z.get("liq_usd", 0) for z in zones
                         if 0 < z["price_low"] - price < atr * 2)
             out["liq_zone_above_amount"] = round(total, 0)
             if total >= 3_000_000:
-                out["position_size_cap"] = 0.5 if out.get("extreme_candle_flag") else 0.75
+                out["liq_zone_strong"] = True
             elif total >= 1_000_000:
-                out["position_size_cap"] = 0.5
+                out["liq_zone_moderate"] = True
     except Exception as _rv_e:
         # [v3.89 #29] 不再静默：清算字段按无效处理并记录失败原因。
         #   注意 position_size_cap / entry_mode 的既有分支逐行未动，
